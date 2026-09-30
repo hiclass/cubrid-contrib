@@ -3,12 +3,9 @@
 CUBRID 볼륨의 섹터·페이지 배치를 터미널 지도로 보여주는 진단 유틸리티.
 **서버에 접속하지 않고** 볼륨 파일을 직접 읽는다.
 
-```
-⠿ catalog(sys)  ⠿⠿ data  ⠿⠿ index  ⠿⠾⠶⠴⠤=alloc 100..20%  ⠂ resv-empty  # meta
-[  1/9] volid 0  12GB  sectors 12287/12288 reserved  (cell: 160 pages = 2.5MB)
-╭┤ cbench ├──────────────────────┤ pages 786368 reserved / 781873 allocated ├╮
-│ ⠤⠤⠤⠤⠤⠤⠤⠴⠶⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿ │
-```
+![batch mode](docs/cli_execution.png)
+
+배치 모드 — 볼륨별 지도와 종류별 집계(`BY KIND`)를 한 화면에 낸다.
 
 ## 무엇을 푸는가
 
@@ -106,6 +103,12 @@ DB 이름 대신 **vinf 경로**를 직접 줄 수 있다. 같은 이름의 DB �
 cub_volmap -i /path/to/databases/<db>/<db>_vinf
 ```
 
+![interactive drill-down](docs/interactive_drilldown.png)
+
+인터랙티브 모드 — 지도에서 셀을 고르면 오른쪽 4박스가 섹터 → 페이지 → 슬롯 순으로
+이어서 열린다. 위 화면은 `dba.athlete` 의 페이지 848 로, 슬롯 260개가 `H`(home)와
+`R`(relocation)로 섞여 있다.
+
 ### 주요 키
 
 | 키 | 동작 |
@@ -141,6 +144,12 @@ cub_volmap -i /path/to/databases/<db>/<db>_vinf
 슬롯 구조가 아닌 페이지는 **왜 아닌지**를 함께 알린다 — `slots n/a - qresult page`.
 temp 볼륨은 대부분 AREA(작업공간)·QRESULT(정렬 결과)이고, 이들은 OID 로 참조되지 않으므로
 슬롯 디렉터리가 없는 것이 정상이다.
+
+![file view](docs/interactive_filelist.png)
+
+`[f]` 파일 뷰 — 이 볼륨의 섹터를 가진 파일 목록. 고른 파일(`dba.athlete`, 10섹터)의
+셀만 지도에 남색으로 남고 나머지는 회색으로 죽어, 그 파일이 어디에 흩어져 있는지가
+한눈에 보인다.
 
 상세는 [docs/views.md](docs/views.md).
 
