@@ -1,0 +1,23 @@
+volmap — CUBRID volume file mapping viewer
+==========================================
+
+This project is licensed under the BSD 3-Clause License (see LICENSE).
+
+Provenance note / 유래 고지:
+
+The files under src/ are written to be contributed into the CUBRID source
+tree (Apache License 2.0) and therefore carry the CUBRID Apache-2.0 license
+header. In particular, src/storage_ondisk_layout.hpp collects on-disk layout
+struct definitions that originate verbatim from the CUBRID engine sources
+(disk_manager.c, file_manager.c/h, slotted_page.h):
+
+  Copyright 2008 Search Solution Corporation
+  Copyright 2016 CUBRID Corporation
+  Licensed under the Apache License, Version 2.0
+
+The Apache-2.0 and BSD-3-Clause licenses are compatible: the combined work
+may be distributed under this repository's BSD-3-Clause terms provided the
+Apache-2.0 notices retained in those source files are preserved.
+
+Everything else in this repository (documentation, build scripts, tooling)
+is original work of the volmap authors under BSD-3-Clause.
