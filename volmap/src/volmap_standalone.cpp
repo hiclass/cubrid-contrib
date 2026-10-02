@@ -236,6 +236,7 @@ main (int argc, char **argv)
     {VOLMAP_FORMAT_L, 1, 0, VOLMAP_FORMAT_S},
     {VOLMAP_TICK_L, 1, 0, VOLMAP_TICK_S},
     {VOLMAP_WARN_IDLE_L, 1, 0, VOLMAP_WARN_IDLE_S},
+    {VOLMAP_TEMP_PATH_L, 1, 0, VOLMAP_TEMP_PATH_S},
     {0, 0, 0, 0}
   };
   UTIL_FUNCTION_ARG arg;
@@ -249,6 +250,7 @@ main (int argc, char **argv)
 	case VOLMAP_VOLUME_S:
 	case VOLMAP_FORMAT_S:
 	case VOLMAP_BUFMAP_S:
+	case VOLMAP_TEMP_PATH_S:
 	  vs_set (opt, optarg, 0, false);
 	  break;
 	case VOLMAP_WIDTH_S:

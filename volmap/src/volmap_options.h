@@ -96,5 +96,9 @@
 #define VOLMAP_WARN_IDLE_S    10858
 #define VOLMAP_WARN_IDLE_L    "warn-idle"
 #endif
+#ifndef VOLMAP_TEMP_PATH_S
+#define VOLMAP_TEMP_PATH_S    10859
+#define VOLMAP_TEMP_PATH_L    "temp-path"
+#endif
 
 #endif /* _VOLMAP_OPTIONS_H_ */

@@ -177,6 +177,9 @@ struct volmap_ctx
      exist only while a query spills.  [r] rescans the same directory to add new
      ones and drop those that vanished, which needs the vinf path kept here. */
   char vinf_path[PATH_MAX];
+  /* Where temp volumes live when the server spills elsewhere: temp_volume_path
+     from cubrid.conf, or --temp-path.  Empty = database directory only. */
+  char temp_path[PATH_MAX];
   /* header layout of these volumes: v11.4 inserted vol_creation, so the fields
      after it are 8 bytes earlier on an older volume (see VOLMAP_VLAYOUT) */
   int vlayout;
@@ -10257,13 +10260,55 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
    Returns 1 if the list changed, 0 otherwise.
 
    Non-invasive: readdir + open/pread only, never writes to the database. */
+
+/* Open every <db>_t<NNN> in one directory that is not held already. */
+static int
+volmap_scan_temp_dir (VOLMAP_CTX * ctx, const char *dir, const char *prefix, size_t plen)
+{
+  DIR *dh;
+  struct dirent *de;
+  int changed = 0;
+
+  dh = opendir (dir);
+  if (dh == NULL)
+    {
+      return 0;
+    }
+  while ((de = readdir (dh)) != NULL)
+    {
+      char tpath[PATH_MAX];
+      int have = 0, vi;
+
+      if (strncmp (de->d_name, prefix, plen) != 0 || de->d_name[plen] < '0' || de->d_name[plen] > '9')
+	{
+	  continue;
+	}
+      if ((size_t) snprintf (tpath, sizeof (tpath), "%s/%s", dir, de->d_name) >= sizeof (tpath))
+	{
+	  continue;
+	}
+      for (vi = 0; vi < ctx->nvols; vi++)
+	{
+	  if (strcmp (ctx->vols[vi].path, tpath) == 0)
+	    {
+	      have = 1;
+	      break;
+	    }
+	}
+      if (!have && volmap_open_volume (ctx, tpath) == NO_ERROR)
+	{
+	  changed = 1;
+	}
+    }
+  closedir (dh);
+  return changed;
+}
+
 static int
 volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
 {
   char dircopy[PATH_MAX], basecopy[PATH_MAX], prefix[PATH_MAX];
   char *dirp, *basep, *suffix;
-  DIR *dh;
-  struct dirent *de;
   size_t plen;
   int vi, changed = 0;
 
@@ -10313,40 +10358,129 @@ volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
       vi++;
     }
 
-  /* add newly created temp volumes, skipping paths already held */
-  dh = opendir (dirp);
-  if (dh == NULL)
+  /* add newly created temp volumes, skipping paths already held.  Two directories
+     may hold them: the database directory, and temp_volume_path when the server
+     is configured to spill elsewhere.  Scanning the same path twice is harmless
+     (already-held paths are skipped), so no de-duplication is needed. */
+  changed |= volmap_scan_temp_dir (ctx, dirp, prefix, plen);
+  if (ctx->temp_path[0] != '\0' && strcmp (ctx->temp_path, dirp) != 0)
     {
-      return changed;
+      changed |= volmap_scan_temp_dir (ctx, ctx->temp_path, prefix, plen);
     }
-  while ((de = readdir (dh)) != NULL)
-    {
-      char tpath[PATH_MAX];
-      int have = 0;
-
-      if (strncmp (de->d_name, prefix, plen) != 0 || de->d_name[plen] < '0' || de->d_name[plen] > '9')
-	{
-	  continue;
-	}
-      if ((size_t) snprintf (tpath, sizeof (tpath), "%s/%s", dirp, de->d_name) >= sizeof (tpath))
-	{
-	  continue;
-	}
-      for (vi = 0; vi < ctx->nvols; vi++)
-	{
-	  if (strcmp (ctx->vols[vi].path, tpath) == 0)
-	    {
-	      have = 1;
-	      break;
-	    }
-	}
-      if (!have && volmap_open_volume (ctx, tpath) == NO_ERROR)
-	{
-	  changed = 1;
-	}
-    }
-  closedir (dh);
   return changed;
+}
+
+/* Read temp_volume_path out of cubrid.conf.
+ *
+ * The engine puts temp volumes in that directory when it is set, falling back to
+ * the database directory when it is not (boot_sr.c, unchanged from 10.1 to 11.5).
+ * Spill volumes on a separate disk are a common setup, and volmap used to scan
+ * only the database directory, so those volumes were silently missing from the
+ * map, from BY KIND temp and from --check.
+ *
+ * Section precedence follows the engine: [common] first, then [@<db>] overrides
+ * it.  The file is $CUBRID_CONF_FILE if set, else $CUBRID/conf/cubrid.conf.
+ * Returns false when there is no setting - then only the database directory is
+ * scanned, as before. */
+static bool
+volmap_conf_temp_path (const char *db_name, char *out, size_t outsz)
+{
+  char path[PATH_MAX];
+  char want[256];
+  char line[PATH_MAX + 64];
+  const char *env;
+  bool in_common = false, in_db = false, from_db = false;
+  bool found = false;
+  FILE *fp;
+
+  out[0] = '\0';
+  env = getenv ("CUBRID_CONF_FILE");
+  if (env != NULL && env[0] != '\0')
+    {
+      snprintf (path, sizeof (path), "%s", env);
+    }
+  else
+    {
+      const char *root = getenv ("CUBRID");
+
+      if (root == NULL || root[0] == '\0')
+	{
+	  return false;
+	}
+      snprintf (path, sizeof (path), "%s/conf/cubrid.conf", root);
+    }
+  fp = fopen (path, "r");
+  if (fp == NULL)
+    {
+      return false;
+    }
+  snprintf (want, sizeof (want), "[@%s]", (db_name != NULL) ? db_name : "");
+
+  while (fgets (line, sizeof (line), fp) != NULL)
+    {
+      char *s = line, *e;
+
+      while (*s == ' ' || *s == '\t')
+	{
+	  s++;
+	}
+      if (*s == '#' || *s == '\n' || *s == '\0')
+	{
+	  continue;
+	}
+      if (*s == '[')
+	{
+	  e = strchr (s, ']');
+	  if (e != NULL)
+	    {
+	      e[1] = '\0';
+	    }
+	  in_common = (strncmp (s, "[common]", 8) == 0);
+	  in_db = (db_name != NULL && db_name[0] != '\0' && strcmp (s, want) == 0);
+	  continue;
+	}
+      if (!in_common && !in_db)
+	{
+	  continue;
+	}
+      if (strncmp (s, "temp_volume_path", 16) != 0)
+	{
+	  continue;
+	}
+      s += 16;
+      while (*s == ' ' || *s == '\t')
+	{
+	  s++;
+	}
+      if (*s != '=')
+	{
+	  continue;		/* another parameter that merely starts the same way */
+	}
+      s++;
+      while (*s == ' ' || *s == '\t')
+	{
+	  s++;
+	}
+      e = s + strlen (s);
+      while (e > s && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t'))
+	{
+	  e--;
+	}
+      *e = '\0';
+      if (*s == '\0')
+	{
+	  continue;
+	}
+      /* [@db] wins over [common]; once taken, [common] must not overwrite it */
+      if (in_db || !from_db)
+	{
+	  snprintf (out, outsz, "%s", s);
+	  found = true;
+	  from_db = in_db;
+	}
+    }
+  fclose (fp);
+  return found;
 }
 
 /* resolve database name to its volumes via databases.txt + _vinf; accept a direct vinf path too */
@@ -10391,6 +10525,22 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
   /* Decide the layout BEFORE opening any volume: volmap_open_volume () needs it to
      size the user area (the page watermark arrived in 10.2). */
   snprintf (ctx->vinf_path, sizeof (ctx->vinf_path), "%s", vinf_path);
+
+  /* Where to look for temp volumes, besides the database directory.  --temp-path
+     wins; otherwise take temp_volume_path from cubrid.conf for this database. */
+  if (ctx->temp_path[0] == '\0')
+    {
+      char nmcopy[PATH_MAX], *nm, *dot;
+
+      snprintf (nmcopy, sizeof (nmcopy), "%s", vinf_path);
+      nm = basename (nmcopy);
+      dot = strstr (nm, "_vinf");
+      if (dot != NULL)
+	{
+	  *dot = '\0';
+	}
+      (void) volmap_conf_temp_path (nm, ctx->temp_path, sizeof (ctx->temp_path));
+    }
   (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
   ctx->vlayout = (int) volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
   if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
@@ -10440,6 +10590,8 @@ volmap_usage (const char *argv0)
 	   "      --plain              ASCII output without ANSI colors\n"
 	   "      --tick=SEC           interactive auto-refresh period in seconds (default 2)\n"
 	   "      --warn-idle=PCT      report volumes whose idle space >= PCT%% as a finding (exit 2)\n"
+	   "      --temp-path=DIR      also scan DIR for temp volumes (default: temp_volume_path\n"
+	   "                           from cubrid.conf, else the database directory)\n"
 	   "  -V, --volume=N[,N...]    show only the given volume ids\n");
   (void) argv0;
 }
@@ -10482,6 +10634,14 @@ volmap (UTIL_FUNCTION_ARG * arg)
   ctx.residency = utility_get_option_bool_value (arg_map, VOLMAP_RESIDENCY_S);
   ctx.bufmap_path = utility_get_option_string_value (arg_map, VOLMAP_BUFMAP_S, 0);
   ctx.bufmap = (ctx.bufmap_path != NULL);
+  {
+    const char *tp = utility_get_option_string_value (arg_map, VOLMAP_TEMP_PATH_S, 0);
+
+    if (tp != NULL && tp[0] != '\0')
+      {
+	snprintf (ctx.temp_path, sizeof (ctx.temp_path), "%s", tp);	/* overrides cubrid.conf */
+      }
+  }
   ctx.check = utility_get_option_bool_value (arg_map, VOLMAP_CHECK_S);
   ctx.tick_sec = utility_get_option_int_value (arg_map, VOLMAP_TICK_S);
   if (ctx.tick_sec < 1 || ctx.tick_sec > 3600)

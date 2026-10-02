@@ -126,6 +126,19 @@ cub_volmap -i /path/to/databases/<db>/<db>_vinf
 `[r]` 는 지도뿐 아니라 **볼륨 목록도 재스캔**한다 — temp 볼륨은 쿼리가 spill 하는 동안만
 존재하므로, 새로 생긴 것은 넣고 사라진 것은 뺀다.
 
+### temp 볼륨이 다른 디스크에 있을 때
+
+엔진은 `temp_volume_path` 가 설정돼 있으면 **그 경로에** temp 볼륨을 만든다(없으면 DB
+디렉터리). spill 볼륨을 별도 디스크에 두는 구성이 흔하므로, volmap 도 두 곳을 모두 본다.
+
+| 우선순위 | 출처 |
+|---|---|
+| 1 | `--temp-path=DIR` |
+| 2 | `cubrid.conf` 의 `temp_volume_path` — `[@<db>]` 가 `[common]` 보다 우선(엔진과 동일) |
+| 3 | DB 디렉터리 (설정이 없을 때) |
+
+설정 파일은 `$CUBRID_CONF_FILE`, 없으면 `$CUBRID/conf/cubrid.conf` 를 읽는다.
+
 ## 화면 읽는 법
 
 **계층** — 볼륨 └ 섹터(64페이지=1MB) └ 페이지(16KB) └ 슬롯 └ 레코드
