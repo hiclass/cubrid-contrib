@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -176,6 +177,10 @@ struct volmap_ctx
      exist only while a query spills.  [r] rescans the same directory to add new
      ones and drop those that vanished, which needs the vinf path kept here. */
   char vinf_path[PATH_MAX];
+  /* header layout of these volumes: v11.4 inserted vol_creation, so the fields
+     after it are 8 bytes earlier on an older volume (see VOLMAP_VLAYOUT) */
+  int vlayout;
+  char db_release[32];
   VOLMAP_FILE *files;
   int nfiles;
   int width;
@@ -240,6 +245,104 @@ static int
 prv_user_offset (void)
 {
   return (int) offsetof (FILEIO_PAGE, page);
+}
+
+/* Which DISK_VOLUME_HEADER layout a volume uses.
+ *
+ * v11.4 inserted vol_creation (INT64) after db_creation - CBRD-25365, 44c022c31.
+ * storage_ondisk_layout.hpp carries the 11.4+ copy, so on an older volume every
+ * field from chkpt_lsa onward sits 8 bytes earlier than the struct says.  Reading
+ * them through the struct yields garbage (a 10.2 demodb reports next_vol 29231,
+ * which is really two characters of the volume name).
+ *
+ * The version is not in the volume header, so it comes from the log header, where
+ * db_release is a printable release string.  Its offset moved between releases
+ * too, so the string is located by pattern rather than by a fixed offset - that is
+ * the one thing that cannot itself be version-dependent. */
+typedef enum
+{
+  VOLMAP_VLAY_UNKNOWN = 0,	/* version not determined: do not print shifted fields */
+  VOLMAP_VLAY_PRE_114,		/* <= 11.3: no vol_creation */
+  VOLMAP_VLAY_114		/* >= 11.4: vol_creation present (matches the struct) */
+} VOLMAP_VLAYOUT;
+
+/* Read <db>_lgat and return its release string in rel[] ("" if not found). */
+static bool
+volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
+{
+  char path[PATH_MAX];
+  unsigned char buf[512];
+  size_t n, i;
+  const char *dot;
+  FILE *fp;
+
+  rel[0] = '\0';
+  if (vinf_path == NULL || vinf_path[0] == '\0')
+    {
+      return false;
+    }
+  /* <db>_vinf and <db>_lgat sit side by side */
+  dot = strstr (vinf_path, "_vinf");
+  if (dot == NULL)
+    {
+      return false;
+    }
+  if (snprintf (path, sizeof (path), "%.*s_lgat", (int) (dot - vinf_path), vinf_path) >= (int) sizeof (path))
+    {
+      return false;
+    }
+  fp = fopen (path, "rb");
+  if (fp == NULL)
+    {
+      return false;
+    }
+  n = fread (buf, 1, sizeof (buf), fp);
+  fclose (fp);
+
+  /* first "<digits>.<digits>" run in the header area is db_release */
+  for (i = 0; i + 2 < n; i++)
+    {
+      size_t j = i;
+
+      if (!isdigit (buf[i]) || (i > 0 && (isdigit (buf[i - 1]) || buf[i - 1] == '.')))
+	{
+	  continue;
+	}
+      while (j < n && (isdigit (buf[j]) || buf[j] == '.'))
+	{
+	  j++;
+	}
+      if (j - i >= 3 && memchr (buf + i, '.', j - i) != NULL)
+	{
+	  size_t len = j - i;
+
+	  if (len >= relsz)
+	    {
+	      len = relsz - 1;
+	    }
+	  memcpy (rel, buf + i, len);
+	  rel[len] = '\0';
+	  return true;
+	}
+    }
+  return false;
+}
+
+/* Pick the header layout from a release string such as "11.4.4" or "10.2.17". */
+static VOLMAP_VLAYOUT
+volmap_vlayout_of (const char *rel)
+{
+  int maj = 0, min = 0;
+
+  if (rel == NULL || sscanf (rel, "%d.%d", &maj, &min) != 2)
+    {
+      return VOLMAP_VLAY_UNKNOWN;
+    }
+  if (maj > 11 || (maj == 11 && min >= 4))
+    {
+      return VOLMAP_VLAY_114;
+    }
+  return VOLMAP_VLAY_PRE_114;
 }
 
 static VOLMAP_VOLUME *
@@ -4083,13 +4186,37 @@ volmap_describe_vhdr (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, char *out, size_t o
   vhdr = (const DISK_VOLUME_HEADER *) (iopage + prv_user_offset ());
   t = (time_t) vhdr->db_creation;
   strftime (ts, sizeof (ts), "%Y-%m-%d %H:%M", localtime (&t));
-  snprintf (out, outsz,
-	    "vhdr p0: iopg %d  %s  sect %dpg  nsect %d/%d(max)  stab p%d x%d  syslast %d  "
-	    "chkpt_lsa %lld|%d  next_vol %d  db_created %s",
-	    (int) vhdr->iopagesize, (vhdr->purpose == DB_TEMPORARY_DATA_PURPOSE) ? "TEMP" : "PERM",
-	    (int) vhdr->sect_npgs, (int) vhdr->nsect_total, (int) vhdr->nsect_max,
-	    (int) vhdr->stab_first_page, (int) vhdr->stab_npages, (int) vhdr->sys_lastpage,
-	    (long long) vhdr->chkpt_lsa.pageid, (int) vhdr->chkpt_lsa.offset, (int) vhdr->next_volid, ts);
+
+  /* Everything up to db_creation is at the same offset in every release, so it is
+     printed unconditionally.  chkpt_lsa and next_volid follow vol_creation, which
+     only exists from 11.4 - on an older volume they are 8 bytes earlier, and with
+     an undetermined version their position is not known at all. */
+  {
+    char tail[96];
+    const char *base = (const char *) vhdr;
+    int shift = (ctx->vlayout == VOLMAP_VLAY_114) ? 0 : -8;
+
+    if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
+      {
+	snprintf (tail, sizeof (tail), "chkpt_lsa ?  next_vol ?  (db version unknown)");
+      }
+    else
+      {
+	LOG_LSA lsa;
+	INT16 nv;
+
+	memcpy (&lsa, base + offsetof (DISK_VOLUME_HEADER, chkpt_lsa) + shift, sizeof (lsa));
+	memcpy (&nv, base + offsetof (DISK_VOLUME_HEADER, next_volid) + shift, sizeof (nv));
+	snprintf (tail, sizeof (tail), "chkpt_lsa %lld|%d  next_vol %d",
+		  (long long) lsa.pageid, (int) lsa.offset, (int) nv);
+      }
+    snprintf (out, outsz,
+	      "vhdr p0: iopg %d  %s  sect %dpg  nsect %d/%d(max)  stab p%d x%d  syslast %d  "
+	      "%s  db_created %s",
+	      (int) vhdr->iopagesize, (vhdr->purpose == DB_TEMPORARY_DATA_PURPOSE) ? "TEMP" : "PERM",
+	      (int) vhdr->sect_npgs, (int) vhdr->nsect_total, (int) vhdr->nsect_max,
+	      (int) vhdr->stab_first_page, (int) vhdr->stab_npages, (int) vhdr->sys_lastpage, tail, ts);
+  }
 }
 
 /* one slot of one page as a status line: the record OID plus the slot's type/length */
@@ -10235,6 +10362,9 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
   fclose (fp);
 
   snprintf (ctx->vinf_path, sizeof (ctx->vinf_path), "%s", vinf_path);
+  /* decide the volume header layout once, from the log header's release string */
+  (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
+  ctx->vlayout = (int) volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
   (void) volmap_scan_temp_volumes (ctx);
 
   return (ctx->nvols > 0) ? NO_ERROR : ER_FAILED;
