@@ -5856,7 +5856,12 @@ static struct
   bool a_busy;			/* the batch lane is walking the volume array; the list must not be touched meanwhile */
   int a_resid_vi;		/* >= 0: re-read residency for this volume index */
   volatile unsigned ui_frames;	/* UI frame counter: shadow-reuse guard */
-  volatile sig_atomic_t ui_reading;	/* UI is dereferencing the per-volume arrays; the commit must wait */
+  /* Publish interlock.  ui_reading says the UI is dereferencing the per-volume arrays;
+   * the commit may only swap the pointers while it is 0.  Both sides take pub_mx, so
+   * the flag is not a bare cross-thread int and the check cannot race the swap. */
+  pthread_mutex_t pub_mx;
+  pthread_cond_t pub_cv;
+  int ui_reading;
 
   pthread_mutex_t b_mx;
   pthread_cond_t b_cv;
@@ -5870,7 +5875,8 @@ static struct
   size_t b_buf_sz;
 } volmap_mt = {
   NULL, 0, 0, false, 0, -1, -1,
-  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0, 0,
+  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0,
+  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0,
   PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, false, -1, -1, -1, -1, NULL, 0
 };
 
@@ -5888,9 +5894,11 @@ volmap_mt_wake (void)
     }
 }
 
-/* rebuild the volume metadata in the shadow arrays, then swap the read side.
- * Runs on worker A only. */
-static void
+/* Rebuild the volume metadata in the shadow arrays, then swap the read side.
+ * Runs on worker A only.  Returns false when the swap was abandoned because the UI
+ * was still reading - the scan is then discarded and retried, never published half
+ * way, so a frame can not mix an old owner with a new reservation. */
+static bool
 volmap_mt_refresh (VOLMAP_CTX * ctx)
 {
   int vi;
@@ -5908,7 +5916,7 @@ volmap_mt_refresh (VOLMAP_CTX * ctx)
 	}
       if (vol->sh_stab == NULL || vol->sh_owner == NULL || vol->sh_alloc == NULL || vol->sh_pagebm == NULL)
 	{
-	  return;		/* no shadow memory: skip this refresh (map keeps the old state) */
+	  return false;		/* no shadow memory: skip this refresh (map keeps the old state) */
 	}
       vol->w_stab = vol->sh_stab;
       vol->w_owner = vol->sh_owner;
@@ -5921,12 +5929,28 @@ volmap_mt_refresh (VOLMAP_CTX * ctx)
    * commit landing mid-frame would draw a mix of the old and new scan.  Wait for the
    * UI to finish the frame it is in; the guard bounds the wait so a stalled UI only
    * delays the refresh by that much instead of blocking the worker for good. */
+  /* Take the interlock and swap only while ui_reading is 0.  Holding pub_mx across
+   * the swap is what makes it atomic with respect to a frame: the UI cannot enter a
+   * frame in the middle of it.  If the UI does not yield within the bound, the swap
+   * is abandoned rather than forced - the shadows keep the scan and the caller
+   * retries, so the published set is always one whole scan. */
+  pthread_mutex_lock (&volmap_mt.pub_mx);
   { int guard;
+
     for (guard = 0; volmap_mt.ui_reading && guard < 50 && !volmap_mt.stop; guard++)
       {
-	struct timespec ts = { 0, 2 * 1000000L };
+	struct timespec dl;
 
-	nanosleep (&ts, NULL);
+	clock_gettime (CLOCK_REALTIME, &dl);
+	dl.tv_nsec += 2 * 1000000L;
+	dl.tv_sec += dl.tv_nsec / 1000000000L;
+	dl.tv_nsec %= 1000000000L;
+	(void) pthread_cond_timedwait (&volmap_mt.pub_cv, &volmap_mt.pub_mx, &dl);
+      }
+    if (volmap_mt.ui_reading)
+      {
+	pthread_mutex_unlock (&volmap_mt.pub_mx);
+	return false;		/* UI still mid-frame: keep the scan in the shadows and retry */
       }
   }
   for (vi = 0; vi < ctx->nvols; vi++)
@@ -5944,6 +5968,8 @@ volmap_mt_refresh (VOLMAP_CTX * ctx)
       vol->alloc = vol->w_alloc;
       vol->pagebm = vol->w_pagebm;
     }
+  pthread_mutex_unlock (&volmap_mt.pub_mx);
+  return true;
 }
 
 static void *
@@ -5994,13 +6020,23 @@ volmap_mt_a_main (void *arg)
 
 	      nanosleep (&ts, NULL);
 	    }
-	  volmap_mt_refresh (ctx);
-	  committed = true;
-	  commit_frame = volmap_mt.ui_frames;
-	  pthread_mutex_lock (&volmap_mt.a_mx);
-	  volmap_mt.a_refresh_done = true;
-	  pthread_mutex_unlock (&volmap_mt.a_mx);
-	  volmap_mt_wake ();
+	  if (volmap_mt_refresh (ctx))
+	    {
+	      committed = true;
+	      commit_frame = volmap_mt.ui_frames;
+	      pthread_mutex_lock (&volmap_mt.a_mx);
+	      volmap_mt.a_refresh_done = true;
+	      pthread_mutex_unlock (&volmap_mt.a_mx);
+	      volmap_mt_wake ();
+	    }
+	  else
+	    {
+	      /* The swap was abandoned to keep the frame consistent; ask for it again so
+	       * the scan that is already in the shadows gets published next time round. */
+	      pthread_mutex_lock (&volmap_mt.a_mx);
+	      volmap_mt.a_refresh_req = true;
+	      pthread_mutex_unlock (&volmap_mt.a_mx);
+	    }
 	}
       if (resid_vi >= 0 && resid_vi < ctx->nvols)
 	{
@@ -6673,9 +6709,12 @@ volmap_interactive (VOLMAP_CTX * ctx)
       long total_pages = (long) vol->nsect_total * VOLMAP_SECT_NPAGES;
 
       /* One frame reads stab/owner/alloc/pagebm together, so a commit landing midway
-       * would mix a new reservation with an old owner.  Hold the commit off until the
-       * frame is done; it is published at the frame boundary instead. */
+       * would mix a new reservation with an old owner.  Taking pub_mx to raise the
+       * flag means the frame either starts before the swap or after it, never inside:
+       * the worker holds the same lock while it swaps. */
+      pthread_mutex_lock (&volmap_mt.pub_mx);
       volmap_mt.ui_reading = 1;
+      pthread_mutex_unlock (&volmap_mt.pub_mx);
       long res = 0;
       INT64 alloc = 0;
       long switches = 0;
@@ -7606,7 +7645,10 @@ volmap_interactive (VOLMAP_CTX * ctx)
       prev_cx = cur_x;
       prev_cy = cur_y;
       force_full = false;
+      pthread_mutex_lock (&volmap_mt.pub_mx);
       volmap_mt.ui_reading = 0;	/* frame done: a pending commit may publish now */
+      pthread_cond_broadcast (&volmap_mt.pub_cv);
+      pthread_mutex_unlock (&volmap_mt.pub_mx);
       volmap_mt.ui_frames++;	/* frame boundary: worker A may reuse the last shadow set */
 
       /* input — the select also listens on the worker self-pipe: scan progress,
