@@ -262,7 +262,8 @@ prv_user_offset (void)
 typedef enum
 {
   VOLMAP_VLAY_UNKNOWN = 0,	/* version not determined: do not print shifted fields */
-  VOLMAP_VLAY_PRE_114,		/* <= 11.3: no vol_creation */
+  VOLMAP_VLAY_101,		/* 10.1: no page watermark either (see volmap_user_size) */
+  VOLMAP_VLAY_PRE_114,		/* 10.2 .. 11.3: watermark present, no vol_creation */
   VOLMAP_VLAY_114		/* >= 11.4: vol_creation present (matches the struct) */
 } VOLMAP_VLAYOUT;
 
@@ -342,7 +343,35 @@ volmap_vlayout_of (const char *rel)
     {
       return VOLMAP_VLAY_114;
     }
+  if (maj == 10 && min <= 1)
+    {
+      return VOLMAP_VLAY_101;	/* 10.0 never gets this far - the header self-check rejects it */
+    }
   return VOLMAP_VLAY_PRE_114;
+}
+
+/* Size of the user area inside an io page.
+ *
+ * The page watermark (FILEIO_PAGE_WATERMARK, 8B at the end of the page) arrived in
+ * 10.2 - CBRD-22231, d81b071e8.  v10.1's storage_common.c has
+ * RESERVED_SIZE_IN_PAGE = sizeof (FILEIO_PAGE_RESERVED) alone; 10.2 adds the
+ * watermark to it.  Subtracting it on a 10.1 volume puts the end of the page - and
+ * with it the slot directory, which is addressed backwards from there - 8 bytes off,
+ * so slot views, --deep, del/dead counts and offline name resolution would all read
+ * the wrong place.
+ *
+ * With the version undetermined the watermark layout is assumed, because every
+ * release from 10.2 on has it; the caller warns in that case. */
+static int
+volmap_user_size (int vlayout, int iopagesize)
+{
+  int n = iopagesize - prv_user_offset ();
+
+  if (vlayout != VOLMAP_VLAY_101)
+    {
+      n -= (int) sizeof (FILEIO_PAGE_WATERMARK);
+    }
+  return n;
 }
 
 static VOLMAP_VOLUME *
@@ -920,7 +949,7 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
 
   vol->volid = vhdr->volid;
   vol->iopagesize = vhdr->iopagesize;
-  vol->user_size = vol->iopagesize - prv - (int) sizeof (FILEIO_PAGE_WATERMARK);
+  vol->user_size = volmap_user_size (ctx->vlayout, vol->iopagesize);
   vol->nsect_total = vhdr->nsect_total;
   vol->stab_npages = vhdr->stab_npages;
   vol->stab_first = vhdr->stab_first_page;
@@ -10350,6 +10379,22 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
       fprintf (ctx->outfp, "volmap: cannot open %s: %s\n", vinf_path, strerror (errno));
       return ER_FAILED;
     }
+
+  /* Decide the layout BEFORE opening any volume: volmap_open_volume () needs it to
+     size the user area (the page watermark arrived in 10.2). */
+  snprintf (ctx->vinf_path, sizeof (ctx->vinf_path), "%s", vinf_path);
+  (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
+  ctx->vlayout = (int) volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
+  if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
+    {
+      /* The watermark layout is assumed (every release from 10.2 has it), but on a
+         10.1 volume that is wrong by 8 bytes - say so rather than be quietly off.
+         stderr, not outfp: this must not land in the middle of --format json. */
+      fprintf (stderr,
+	       "volmap: cannot read the release from the log header - assuming 10.2+ page layout;"
+	       " slot-level output would be 8 bytes off on a 10.1 volume\n");
+    }
+
   while (fgets (line, sizeof (line), fp) != NULL)
     {
       int id;
@@ -10361,10 +10406,6 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
     }
   fclose (fp);
 
-  snprintf (ctx->vinf_path, sizeof (ctx->vinf_path), "%s", vinf_path);
-  /* decide the volume header layout once, from the log header's release string */
-  (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
-  ctx->vlayout = (int) volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
   (void) volmap_scan_temp_volumes (ctx);
 
   return (ctx->nvols > 0) ? NO_ERROR : ER_FAILED;
