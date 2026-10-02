@@ -9897,6 +9897,12 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
       VOLMAP_FILE *f = &ctx->files[fi];
       const char *name = "";
       const char *iname = "";
+      /* Class and index names come off the disk records, and CUBRID allows a quoted
+         identifier to contain " and \\ - unescaped they would terminate the JSON
+         string and produce output no parser accepts. */
+      /* Worst case is every byte escaped as \\uXXXX, so six bytes out per byte in. */
+      char ename[sizeof (f->class_name) * 6 + 8];
+      char einame[sizeof (f->index_name) * 6 + 8];
 
       if (!OID_ISNULL (&f->class_oid))
 	{
@@ -9906,6 +9912,8 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	      iname = volmap_resolve_index_name (ctx, f);
 	    }
 	}
+      name = volmap_json_escape (name, ename, (int) sizeof (ename));
+      iname = volmap_json_escape (iname, einame, (int) sizeof (einame));
       fprintf (fp, "    {\"vfid\": \"%d|%d\", \"type\": \"%s\", \"class\": \"%s\", \"index\": \"%s\","
 	       " \"pages_total\": %d, \"pages_user\": %d, \"pages_free\": %d, \"pages_ftab\": %d,"
 	       " \"sectors\": %d, \"alloc_pages\": %lld}%s\n",
