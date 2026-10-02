@@ -98,7 +98,7 @@ volmap이 파싱하는 볼륨 포맷의 성립·변화 이력. 근거는 CUBRID 
 | **10.2** | **페이지 워터마크 도입** — 페이지 끝에 `FILEIO_PAGE_WATERMARK` 8B 추가(CBRD-22231, d81b071e8). 사용자 영역이 그만큼 줄어든다 | 실측 검증 버전 |
 | **11.0** | **TDE 도입** — prv의 reserved 1B가 `pflag`(암호화 비트)로, reserved 8B가 `tde_nonce`로 전환 (**prv 32B 크기 불변**). 워터마크는 이미 10.2 에 있다 → **사용자 영역 8B 감소**(`iopagesize − prv − 8`) | `E` 표기·TDE 소견의 근거. 사용자 영역 크기 기준 변화(아래 캐비엇) |
 | 11.2 / 11.3 | 변화 없음 | 11.3 실측 검증 |
-| **11.4** | 볼륨 헤더에 `vol_creation`(INT64) 추가 — CBRD-25365(44c022c31), `db_creation` 뒤 삽입 | **삽입점 뒤 필드에 영향** — `chkpt_lsa`·`next_volid` 는 ≤11.3 볼륨에서 8B 앞에 있다. 버전을 판별해 보정한다(아래). 10.2 / 11.3.3 / 11.4.4 실측 검증 |
+| **11.4** | 볼륨 헤더에 `vol_creation`(INT64) 추가 — CBRD-25365(44c022c31), `db_creation` 뒤 삽입 | **삽입점 뒤 필드에 영향** — `chkpt_lsa`·`next_volid` 는 ≤11.3 볼륨에서 8B 앞에 있다. 버전을 판별해 보정한다(아래). 10.2 / 11.0 / 11.2 / 11.3 / 11.4 / 11.5 실측 검증 |
 | 11.5 | 변화 없음 | 11.5 실측 검증 | <!-- (iopagesize/volid/purpose/sect_npgs/nsect_total/stab_*/sys_lastpage)는 전부 삽입점 앞 |
 
 ### `vol_creation` 삽입과 버전 판별
