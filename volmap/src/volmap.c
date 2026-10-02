@@ -128,6 +128,7 @@ struct volmap_volume
   INT64 deep_recs;
   INT64 deep_fwd_slots;		/* REC_RELOCATION/REC_NEWHOME slots */
   INT64 deep_slots;
+  INT64 deep_tde_skipped;	/* encrypted pages left out of the deep figures */
   INT64 deep_cache_returned;	/* bytes returned to the OS after the deep scan (FADV_DONTNEED) */
   INT64 deep_cache_kept;	/* bytes kept because they were already cached before the scan */
 };
@@ -1379,6 +1380,15 @@ volmap_deep_scan (VOLMAP_CTX * ctx)
 	      if (p->pageid != pageid || p->volid != vol->volid)
 		{
 		  continue;	/* uninitialized or torn page; skip */
+		}
+	      /* The body of a TDE page is ciphertext.  Reading it as a slotted page would
+	         let random bytes pass the range checks below and feed invented records and
+	         densities into the figures - this tool does not decrypt, so the page is
+	         left out and counted separately instead. */
+	      if ((p->pflag & 0x3) != 0)
+		{
+		  vol->deep_tde_skipped++;
+		  continue;
 		}
 	      if (p->ptype == PAGE_HEAP || p->ptype == PAGE_BTREE || p->ptype == PAGE_OVERFLOW)
 		{
@@ -8963,19 +8973,35 @@ volmap_render (VOLMAP_CTX * ctx)
 	    fprintf (fp, "%s  fragmentation detail mostly hidden by cell zoom - use -f or --check for per-page view%s\n",
 		     ctx->plain ? "" : VM_DIM, ctx->plain ? "" : VM_RESET);
 	  }
+	/* Also report when everything readable was encrypted: printing nothing would
+	   read as "the sweep found no data pages" rather than "it could not look". */
+	if (ctx->deep && vol->deep_data_pages == 0 && vol->deep_tde_skipped > 0)
+	  {
+	    fprintf (fp, "%sdeep: no readable data pages - %lld TDE pages excluded (not decrypted)%s\n",
+		     ctx->plain ? "" : VM_DIM, (long long) vol->deep_tde_skipped,
+		     ctx->plain ? "" : VM_RESET);
+	  }
 	if (ctx->deep && vol->deep_data_pages > 0)
 	  {
 	    volmap_human (vol->deep_free_bytes, h1, sizeof (h1));
 	    volmap_human ((INT64) vol->deep_data_pages * vol->user_size, h2, sizeof (h2));
 	    {
-	      char h3[24], h4[24];
+	      char h3[24], h4[24], tde[64] = "";
 
 	      volmap_human (vol->deep_cache_returned, h3, sizeof (h3));
 	      volmap_human (vol->deep_cache_kept, h4, sizeof (h4));
-	      fprintf (fp, "%sdeep: data pages %lld, records %lld, in-page free %s of %s, forwarding %.2f%%"
+	      /* Say how many pages were left out, or the figures look like pages went
+	         missing.  The ratios above are taken over the pages actually read, so
+	         they stay correct - they just describe the readable part. */
+	      if (vol->deep_tde_skipped > 0)
+		{
+		  snprintf (tde, sizeof (tde), ", %lld TDE pages excluded (not decrypted)",
+			    (long long) vol->deep_tde_skipped);
+		}
+	      fprintf (fp, "%sdeep: data pages %lld, records %lld, in-page free %s of %s, forwarding %.2f%%%s"
 		       "  (page cache returned %s, kept %s pre-warm)%s\n",
 		       ctx->plain ? "" : VM_DIM, (long long) vol->deep_data_pages, (long long) vol->deep_recs, h1, h2,
-		       vol->deep_slots > 0 ? 100.0 * vol->deep_fwd_slots / vol->deep_slots : 0.0, h3, h4,
+		       vol->deep_slots > 0 ? 100.0 * vol->deep_fwd_slots / vol->deep_slots : 0.0, tde, h3, h4,
 		       ctx->plain ? "" : VM_RESET);
 	    }
 	  }
