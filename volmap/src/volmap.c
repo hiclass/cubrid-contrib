@@ -74,6 +74,9 @@
 #endif
 
 #define VOLMAP_MAX_VOLS   256
+/* highest volid the engine issues: LOG_MAX_DBVOLID = VOLID_MAX - 1 = SHRT_MAX - 1.
+   Temp volumes count down from here, so -V must cover the whole range. */
+#define VOLMAP_MAX_VOLID  32766
 #define VOLMAP_MAX_FILES  65536
 #define VOLMAP_SECT_NPAGES DISK_SECTOR_NPAGES
 
@@ -202,7 +205,11 @@ struct volmap_ctx
   const char *ov_user;		/* --user, default DBA */
   const char *ov_passwd;	/* --password; NULL = none supplied */
   FILE *outfp;
-  bool vol_filter[VOLMAP_MAX_VOLS + 1];	/* by volid; used only when vol_filter_on */
+  /* -V selection, keyed by volid over the engine's whole range.  An array sized by
+     VOLMAP_MAX_VOLS cannot hold a temp volume: those are numbered down from
+     LOG_MAX_DBVOLID (32766), so every one of them fell outside it and -V could
+     neither select nor show them.  A bit per volid is 4KB. */
+  unsigned char vol_filter[(VOLMAP_MAX_VOLID + 8) / 8];
   bool vol_filter_on;
   bool full;			/* -f: one cell per page, no row limit */
   bool interactive;		/* -i: full-screen mouse-driven browser */
@@ -251,6 +258,21 @@ static void volmap_deep_scan (VOLMAP_CTX * ctx);
 static void volmap_render (VOLMAP_CTX * ctx);
 static void volmap_overlay (VOLMAP_CTX * ctx, const char *db_name);
 static void volmap_usage (const char *argv0);
+
+/* Is this volume selected?  True when -V was not given at all. */
+static bool
+volmap_vol_selected (const VOLMAP_CTX * ctx, int volid)
+{
+  if (!ctx->vol_filter_on)
+    {
+      return true;
+    }
+  if (volid < 0 || volid > VOLMAP_MAX_VOLID)
+    {
+      return false;
+    }
+  return (ctx->vol_filter[volid / 8] >> (volid % 8)) & 1;
+}
 
 /* offset of user page area inside an io page */
 static int
@@ -925,6 +947,17 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   int prv = prv_user_offset ();
   if (ctx->nvols >= VOLMAP_MAX_VOLS)
     {
+      /* Dropping volumes in silence would understate every total on screen, and
+         nothing else in the output would hint that the map is partial.  Warned
+         once, not per volume. */
+      static bool said = false;
+
+      if (!said)
+	{
+	  said = true;
+	  fprintf (stderr, "volmap: more than %d volumes - the rest are not shown, so the totals are partial\n",
+		   VOLMAP_MAX_VOLS);
+	}
       return ER_FAILED;
     }
   vol = &ctx->vols[ctx->nvols];
@@ -1489,7 +1522,7 @@ volmap_deep_scan (VOLMAP_CTX * ctx)
       char *sectbuf;
       DKNSECTS s;
 
-      if (ctx->vol_filter_on && (vol->volid > VOLMAP_MAX_VOLS || !ctx->vol_filter[vol->volid]))
+      if (!volmap_vol_selected (ctx, vol->volid))
 	{
 	  continue;
 	}
@@ -6925,7 +6958,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	{
 	  VOLMAP_VOLUME *v0 = &ctx->vols[vskip];
 
-	  if (v0->volid <= VOLMAP_MAX_VOLS && ctx->vol_filter[v0->volid])
+	  if (volmap_vol_selected (ctx, v0->volid))
 	    {
 	      vi = vskip;
 	      break;
@@ -8164,8 +8197,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	    for (vskip = 0; vskip < ctx->nvols; vskip++)
 	      {
 		vi = (vi + 1) % ctx->nvols;
-		if (!ctx->vol_filter_on || (ctx->vols[vi].volid <= VOLMAP_MAX_VOLS
-					    && ctx->vol_filter[ctx->vols[vi].volid]))
+		if (volmap_vol_selected (ctx, ctx->vols[vi].volid))
 		  {
 		    break;	/* -V: cycle only through the selected volumes */
 		  }
@@ -8177,8 +8209,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	    for (vskip = 0; vskip < ctx->nvols; vskip++)
 	      {
 		vi = (vi + ctx->nvols - 1) % ctx->nvols;
-		if (!ctx->vol_filter_on || (ctx->vols[vi].volid <= VOLMAP_MAX_VOLS
-					    && ctx->vol_filter[ctx->vols[vi].volid]))
+		if (volmap_vol_selected (ctx, ctx->vols[vi].volid))
 		  {
 		    break;
 		  }
@@ -9072,7 +9103,7 @@ volmap_render (VOLMAP_CTX * ctx)
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
       int cells = ctx->width * ctx->rows;
 
-      if (ctx->vol_filter_on && (vol->volid > VOLMAP_MAX_VOLS || !ctx->vol_filter[vol->volid]))
+      if (!volmap_vol_selected (ctx, vol->volid))
 	{
 	  continue;
 	}
@@ -9577,7 +9608,7 @@ volmap_overlay (VOLMAP_CTX * ctx, const char *db_name)
 	void *result = NULL;
 	int stmt_id;
 
-	if (ctx->vol_filter_on && (vol->volid > VOLMAP_MAX_VOLS || !ctx->vol_filter[vol->volid]))
+	if (!volmap_vol_selected (ctx, vol->volid))
 	  {
 	    continue;
 	  }
@@ -10163,8 +10194,7 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
       DKNSECTS s;
       long res = 0, unknown = 0, switches = 0;
 
-      if (ctx->vol_filter_on
-	  && (vol->volid > VOLMAP_MAX_VOLS || !ctx->vol_filter[vol->volid]))
+      if (!volmap_vol_selected (ctx, vol->volid))
 	{
 	  continue;
 	}
@@ -10788,9 +10818,14 @@ volmap (UTIL_FUNCTION_ARG * arg)
 	      {
 		break;
 	      }
-	    if (v >= 0 && v <= VOLMAP_MAX_VOLS)
+	    if (v >= 0 && v <= VOLMAP_MAX_VOLID)
 	      {
-		ctx.vol_filter[v] = true;
+		ctx.vol_filter[v / 8] |= (unsigned char) (1 << (v % 8));
+	      }
+	    else
+	      {
+		fprintf (stderr, "volmap: -V: volume id %ld is out of range (0..%d)\n", v, VOLMAP_MAX_VOLID);
+		return EXIT_FAILURE;
 	      }
 	    p = (*end == ',') ? end + 1 : end;
 	  }
