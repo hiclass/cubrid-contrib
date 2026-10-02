@@ -51,14 +51,14 @@ fi
 LOG=$(mktemp "${TMPDIR:-/tmp}/volmap-build.XXXXXX")
 trap 'rm -f "$LOG"' EXIT
 rm -f "$OUT"
-if g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE $INC \
+if g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE $INC \
      "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
      -DVOLMAP_NO_DLOPEN -static-libstdc++ -static-libgcc -static -o "$OUT" >"$LOG" 2>&1; then
   :                             # built; warnings stay in the log
 else
   echo "full-static unavailable - building with static libstdc++/libgcc (glibc dynamic)"
   rm -f "$OUT"
-  if ! g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $INC \
+  if ! g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $INC \
        "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
        -static-libstdc++ -static-libgcc -o "$OUT" >"$LOG" 2>&1; then
     cat "$LOG" >&2
@@ -72,7 +72,7 @@ echo "built: $OUT"; file "$OUT" | cut -c1-100; ldd "$OUT" 2>&1 | head -3
 # dyn variant: glibc dynamic — dlopen of libcubridcs.so works here, enabling the
 # live-server overlay (pass 2) when a CUBRID installation is present at runtime
 rm -f "$OUT-dyn"
-if ! g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE $GLIBC_COMPAT $INC \
+if ! g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE $GLIBC_COMPAT $INC \
      "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
      -static-libstdc++ -static-libgcc -ldl -o "$OUT-dyn" >"$LOG" 2>&1; then
   cat "$LOG" >&2

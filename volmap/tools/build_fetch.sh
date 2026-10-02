@@ -224,14 +224,14 @@ fi
 # failed build reported as "built".
 rm -f "$OUT"
 LOG="$WORK/build.log"
-if g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
+if g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
      "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
      -static-libstdc++ -static-libgcc -static -o "$OUT" >"$LOG" 2>&1; then
   :                             # built; warnings stay in the log
 else
   echo "full-static unavailable - retrying with glibc dynamic" >&2
   rm -f "$OUT"
-  if ! g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
+  if ! g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
        "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
        -static-libstdc++ -static-libgcc -o "$OUT" >"$LOG" 2>&1; then
     cat "$LOG" >&2

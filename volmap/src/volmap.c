@@ -2406,7 +2406,7 @@ volmap_describe_cell_base (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long per_pages
     {
       VOLMAP_FILE *f = &ctx->files[cell_owner[cell]];
       int kind = volmap_kind_idx (f->ftype);
-      char label[128];
+      char label[160];		/* tag + class name (64) + index name (64) + separators */
 
       if (f->ftype == FILE_TEMP || f->ftype == FILE_QUERY_AREA)
 	{
@@ -2467,7 +2467,7 @@ volmap_describe_cell_base (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long per_pages
 	char peek[64];
 	bool is_ftab = false;
 	volmap_peek_page (ctx, vol, p0, peek, sizeof (peek), &is_ftab);
-	char cellinfo[40] = "";
+	char cellinfo[64] = "";	/* " | cell alloc %ld/%ld" - two counts, never truncated */
 
 	if (cell_alloc_arr[cell] < per_pages)
 	  {
@@ -4666,7 +4666,7 @@ volmap_ov_box_sector (VOLMAP_CTX * ctx, VOLMAP_PANEL * pa, int x0, int y, int w,
 		      long sect, long sect_del, long sect_dead, int hot, long sect_lo, long sect_hi,
 		      int iopagesize, VOLMAP_OV_GEOM * g)
 {
-  char t1[64], rng[32] = "";
+  char t1[64], rng[56] = "";	/* " (%ld/%ld in cell)" with both counts at full width */
   int r;
 
   /* One map cell can cover several sectors (e.g. cell = 192 pages -> 3 sectors).
@@ -4864,6 +4864,8 @@ volmap_ov_box_slots (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, VOLMAP_PANEL * pa, i
 {
   static const char sc2[8] = { '?', 'A', 'H', 'N', 'R', 'B', 'D', 'd' };
   static const int scol2[8] = { 37, 32, 34, 36, 33, 35, 31, 31 };
+
+  (void) pa;			/* the slots grid owns its geometry; kept for a uniform signature */
   char *iop = volmap_scratch (ctx, vol->iopagesize);
   VOLMAP_SLOTDIR sd;
   char t1[64];
@@ -5698,6 +5700,9 @@ volmap_file_view_draw (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const int *fv_file
 		       const int *fv_nsect, int fv_n, int fv_sel, int scr_cols, int scr_rows, int inner_w,
 		       int map_right, int left_side, int map_rows)
 {
+  (void) vol;			/* the list is already resolved; kept for a uniform signature */
+  (void) fv_first;		/* first sector per file - used by the caller's cursor jump, not here */
+
   /* The file view is wider than the drill-down: a list entry is "name + index
      name", and at 36 columns most long index names are cut.  On a narrow screen
      it falls back to the usual width. */
@@ -6616,8 +6621,13 @@ volmap_interactive (VOLMAP_CTX * ctx)
   int mapw = 80, maph = 20;
   int cur_x = 0, cur_y = 0;	/* keyboard cursor */
   bool auto_refresh = false;
-  VOLMAP_PANEL panel = { 0, 0, NULL, NULL, NULL, NULL, -1, -1, -1, "", -1, 0, { 0, 0 }, -1, 0, { "", "" }, 0, 0 };
-  VOLMAP_PANEL panelb = { 0, 0, NULL, NULL, NULL, NULL, -1, -1, -1, "", -1, 0, { 0, 0 }, -1, 0, { "", "" }, 0, 0 };
+  /* Positional initializer: every member is listed, so adding one to the struct and
+     not listing it here is caught by -Wmissing-field-initializers rather than
+     silently shifting the values. */
+  VOLMAP_PANEL panel = { 0, 0, NULL, NULL, NULL, NULL, -1, -1, -1, "", -1, 0, { 0, 0 }, -1, 0,
+                         { "", "" }, 0, 0, 0, 0, 0 };
+  VOLMAP_PANEL panelb = { 0, 0, NULL, NULL, NULL, NULL, -1, -1, -1, "", -1, 0, { 0, 0 }, -1, 0,
+                          { "", "" }, 0, 0, 0, 0, 0 };
   char status2[512] = "new here? h = guide(\xed\x99\x94\xeb\xa9\xb4 \xed\x95\xb4\xec\x84\x9d \xea\xb0\x80\xec\x9d\xb4\xeb\x93\x9c)  |  l = \xed\x95\x9c\xea\xb8\x80  |  arrows move, space inspect, enter zoom";
   int prev_vi = -1, prev_cx = 0, prev_cy = 0;	/* last painted frame */
   int prev_cols = 0, prev_rows = 0;
