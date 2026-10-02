@@ -1368,6 +1368,14 @@ volmap_deep_scan (VOLMAP_CTX * ctx)
 	      FILEIO_PAGE_RESERVED *p = (FILEIO_PAGE_RESERVED *) iopage;
 	      PAGEID pageid = s * VOLMAP_SECT_NPAGES + pg;
 
+	      /* A reserved sector may hold pages that are not allocated: after a drop or
+	         a truncate the old header survives in place, and counting it would add a
+	         deleted object's records and free space to the current figures.  The
+	         drill-down checks the same bit before it reads a page. */
+	      if (!((vol->pagebm[s] >> pg) & 1))
+		{
+		  continue;	/* sector reserved, page not allocated */
+		}
 	      if (p->pageid != pageid || p->volid != vol->volid)
 		{
 		  continue;	/* uninitialized or torn page; skip */
