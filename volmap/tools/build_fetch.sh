@@ -218,17 +218,30 @@ if [ "$(uname -m)" = "x86_64" ]; then
   fi
 fi
 
-g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
-    "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
-    -static-libstdc++ -static-libgcc -static -o "$OUT" 2>&1 \
-  | grep -vE "^In file|warning:" || true
-
-[ -x "$OUT" ] || {
+# Compile through a log instead of a pipe: a pipeline reports grep's status, and the
+# "|| true" that silences grep would swallow a compiler failure too.  The old binary
+# is removed first, so a stale one cannot make the -x test below pass and have a
+# failed build reported as "built".
+rm -f "$OUT"
+LOG="$WORK/build.log"
+if g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
+     "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
+     -static-libstdc++ -static-libgcc -static -o "$OUT" >"$LOG" 2>&1; then
+  :                             # built; warnings stay in the log
+else
   echo "full-static unavailable - retrying with glibc dynamic" >&2
-  g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
-      "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
-      -static-libstdc++ -static-libgcc -o "$OUT"
-}
+  rm -f "$OUT"
+  if ! g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
+       "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
+       -static-libstdc++ -static-libgcc -o "$OUT" >"$LOG" 2>&1; then
+    cat "$LOG" >&2
+    echo "build failed for REF=$REF" >&2
+    [ -n "$KEEP" ] || rm -rf "$WORK"
+    exit 1
+  fi
+fi
+
+[ -x "$OUT" ] || { echo "compiler reported success but $OUT is missing" >&2; exit 1; }
 
 [ -n "$KEEP" ] || rm -rf "$WORK"
 echo "built: $OUT"

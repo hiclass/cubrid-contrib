@@ -44,18 +44,40 @@ if [ "$(uname -m)" = "x86_64" ]; then
   fi
 fi
 
-g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE $INC \
-    "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
-    -DVOLMAP_NO_DLOPEN -static-libstdc++ -static-libgcc -static -o "$OUT" 2>&1 | grep -vE "^In file|warning:" || true
-[ -x "$OUT" ] || { echo "full-static unavailable — building with static libstdc++/libgcc (glibc dynamic)"; \
-  g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $INC \
-    "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
-    -static-libstdc++ -static-libgcc -o "$OUT"; }
+# Compile through a log rather than a pipe: a pipeline reports grep's status, so the
+# "|| true" that silences grep would hide a compiler failure as well.  The old binary
+# is removed first so a stale one cannot satisfy the -x test and have a failed build
+# reported as "built".
+LOG=$(mktemp "${TMPDIR:-/tmp}/volmap-build.XXXXXX")
+trap 'rm -f "$LOG"' EXIT
+rm -f "$OUT"
+if g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE $INC \
+     "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
+     -DVOLMAP_NO_DLOPEN -static-libstdc++ -static-libgcc -static -o "$OUT" >"$LOG" 2>&1; then
+  :                             # built; warnings stay in the log
+else
+  echo "full-static unavailable - building with static libstdc++/libgcc (glibc dynamic)"
+  rm -f "$OUT"
+  if ! g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $INC \
+       "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
+       -static-libstdc++ -static-libgcc -o "$OUT" >"$LOG" 2>&1; then
+    cat "$LOG" >&2
+    echo "build failed: $OUT" >&2
+    exit 1
+  fi
+fi
+[ -x "$OUT" ] || { echo "compiler reported success but $OUT is missing" >&2; exit 1; }
 echo "built: $OUT"; file "$OUT" | cut -c1-100; ldd "$OUT" 2>&1 | head -3
 
 # dyn variant: glibc dynamic — dlopen of libcubridcs.so works here, enabling the
 # live-server overlay (pass 2) when a CUBRID installation is present at runtime
-g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE $GLIBC_COMPAT $INC \
-    "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
-    -static-libstdc++ -static-libgcc -ldl -o "$OUT-dyn"
+rm -f "$OUT-dyn"
+if ! g++ -x c++ -std=gnu++17 -O2 -Wall -DNDEBUG -DVOLMAP_STANDALONE $GLIBC_COMPAT $INC \
+     "$(dirname "$0")/../src/volmap.c" "$(dirname "$0")/../src/volmap_standalone.cpp" \
+     -static-libstdc++ -static-libgcc -ldl -o "$OUT-dyn" >"$LOG" 2>&1; then
+  cat "$LOG" >&2
+  echo "build failed: $OUT-dyn" >&2
+  exit 1
+fi
+[ -x "$OUT-dyn" ] || { echo "compiler reported success but $OUT-dyn is missing" >&2; exit 1; }
 echo "built: $OUT-dyn (glibc dynamic, runtime-dlopen overlay capable)"
