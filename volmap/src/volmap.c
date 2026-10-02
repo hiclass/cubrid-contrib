@@ -73,7 +73,6 @@
 #include "dbtype.h"
 #endif
 
-#define VOLMAP_MAX_VOLS   256
 /* highest volid the engine issues: LOG_MAX_DBVOLID = VOLID_MAX - 1 = SHRT_MAX - 1.
    Temp volumes count down from here, so -V must cover the whole range. */
 #define VOLMAP_MAX_VOLID  32766
@@ -210,8 +209,8 @@ struct volmap_ctx
   const char *ov_user;		/* --user, default DBA */
   const char *ov_passwd;	/* --password; NULL = none supplied */
   FILE *outfp;
-  /* -V selection, keyed by volid over the engine's whole range.  An array sized by
-     VOLMAP_MAX_VOLS cannot hold a temp volume: those are numbered down from
+  /* -V selection, keyed by volid over the engine's whole range.  Sizing this by the
+     volume count instead could not hold a temp volume: those are numbered down from
      LOG_MAX_DBVOLID (32766), so every one of them fell outside it and -V could
      neither select nor show them.  A bit per volid is 4KB. */
   unsigned char vol_filter[(VOLMAP_MAX_VOLID + 8) / 8];
