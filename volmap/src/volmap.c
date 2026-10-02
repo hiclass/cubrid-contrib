@@ -6708,10 +6708,12 @@ volmap_interactive (VOLMAP_CTX * ctx)
       struct winsize ws;
       long total_pages = (long) vol->nsect_total * VOLMAP_SECT_NPAGES;
 
-      /* One frame reads stab/owner/alloc/pagebm together, so a commit landing midway
-       * would mix a new reservation with an old owner.  Taking pub_mx to raise the
-       * flag means the frame either starts before the swap or after it, never inside:
-       * the worker holds the same lock while it swaps. */
+      /* Drawing AND the key handling that follows read stab/owner/alloc/pagebm, so a
+       * commit landing anywhere in between would mix a new reservation with an old
+       * owner.  The flag is held across the whole iteration and dropped only around
+       * select(), the one point where this thread holds no array pointer.  Taking
+       * pub_mx to raise it means a frame starts either before the swap or after it,
+       * never inside: the worker holds the same lock while it swaps. */
       pthread_mutex_lock (&volmap_mt.pub_mx);
       volmap_mt.ui_reading = 1;
       pthread_mutex_unlock (&volmap_mt.pub_mx);
@@ -7645,10 +7647,6 @@ volmap_interactive (VOLMAP_CTX * ctx)
       prev_cx = cur_x;
       prev_cy = cur_y;
       force_full = false;
-      pthread_mutex_lock (&volmap_mt.pub_mx);
-      volmap_mt.ui_reading = 0;	/* frame done: a pending commit may publish now */
-      pthread_cond_broadcast (&volmap_mt.pub_cv);
-      pthread_mutex_unlock (&volmap_mt.pub_mx);
       volmap_mt.ui_frames++;	/* frame boundary: worker A may reuse the last shadow set */
 
       /* input — the select also listens on the worker self-pipe: scan progress,
@@ -7691,7 +7689,19 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	      tv.tv_usec = 10000;
 	      ptv = &tv;
 	    }
+	  /* The only point in the loop where this thread holds no array pointer: drop
+	   * the interlock so a pending commit can publish, and take it again before the
+	   * key handling below, which also dereferences owner[]/pagebm[]. */
+	  pthread_mutex_lock (&volmap_mt.pub_mx);
+	  volmap_mt.ui_reading = 0;
+	  pthread_cond_broadcast (&volmap_mt.pub_cv);
+	  pthread_mutex_unlock (&volmap_mt.pub_mx);
+
 	  rv = select (nfds, &rfds, NULL, NULL, ptv);
+
+	  pthread_mutex_lock (&volmap_mt.pub_mx);
+	  volmap_mt.ui_reading = 1;
+	  pthread_mutex_unlock (&volmap_mt.pub_mx);
 	  if (rv < 0)
 	    {
 	      if (errno == EINTR)
