@@ -6051,8 +6051,16 @@ volmap_file_view_draw (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const int *fv_file
  *               the page cache (queue depth 1, stale requests replaced); the
  *               UI then fills the panel from cache without a cold stall.
  * Wakeups reach the UI's select() through a self-pipe.  All volume fds are
- * pre-opened and pinned (volmap_fd_pin) so no thread ever closes an fd
- * another thread is reading from. */
+ * pre-opened and pinned (volmap_fd_pin), so in steady state no thread closes
+ * an fd another thread is reading from.
+ *
+ * The one exception is the [r] temp-volume rescan, which does close fds and
+ * move entries in ctx->vols[].  Pinning cannot cover that, so the rescan runs
+ * behind a barrier instead: it raises list_frozen, then waits for a_busy and
+ * b_busy to clear under each lane's own mutex, and skips the round rather than
+ * proceed if either lane will not go idle.  Both lanes re-check list_frozen
+ * under their mutex before taking work, so an observed "idle" cannot go stale.
+ * See the [r] handler for the full sequence. */
 static struct
 {
   VOLMAP_CTX *ctx;
