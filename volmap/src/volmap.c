@@ -5867,6 +5867,10 @@ static struct
   pthread_cond_t b_cv;
   unsigned b_req_seq, b_done_seq;
   bool b_busy;			/* the prefetch lane holds a volume pointer/fd; the list must not be touched meanwhile */
+  /* Rescan barrier.  The UI raises it before changing the volume list; both lanes
+   * check it under their own mutex and refuse to start new work while it is set, so
+   * "no lane is busy" cannot go stale between the check and the rescan. */
+  volatile sig_atomic_t list_frozen;
   int b_vol;
   long b_sect;
   int b_done_vol;
@@ -5877,7 +5881,7 @@ static struct
   NULL, 0, 0, false, 0, -1, -1,
   PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0,
   PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0,
-  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, false, -1, -1, -1, -1, NULL, 0
+  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, false, 0, -1, -1, -1, -1, NULL, 0
 };
 
 static volatile long volmap_last_key_sec = 0;	/* CLOCK_MONOTONIC secs of the last keypress (scan idle detection) */
@@ -6002,6 +6006,13 @@ volmap_mt_a_main (void *arg)
       resid_vi = volmap_mt.a_resid_vi;
       volmap_mt.a_resid_vi = -1;
       /* mark the window in which a UI-side list change would move the array underfoot */
+      if (volmap_mt.list_frozen)
+	{
+	  /* Same barrier as lane B: hold off while the UI is about to change the list. */
+	  do_refresh = false;
+	  resid_vi = -1;
+	  volmap_mt.a_refresh_req = true;	/* re-arm; the work is not lost */
+	}
       volmap_mt.a_busy = (do_refresh || resid_vi >= 0);
       pthread_mutex_unlock (&volmap_mt.a_mx);
       if (volmap_mt.stop)
@@ -6091,6 +6102,20 @@ volmap_mt_b_main (void *arg)
 
 	  clock_gettime (CLOCK_REALTIME, &dl);
 	  dl.tv_nsec += 200 * 1000000L;
+	  dl.tv_sec += dl.tv_nsec / 1000000000L;
+	  dl.tv_nsec %= 1000000000L;
+	  (void) pthread_cond_timedwait (&volmap_mt.b_cv, &volmap_mt.b_mx, &dl);
+	  continue;
+	}
+      if (volmap_mt.list_frozen)
+	{
+	  /* A rescan is pending: do not pick up work that would pin a volume it is
+	     about to drop.  Checked under b_mx together with b_busy, so the UI cannot
+	     see "idle" and have this lane go busy right afterwards. */
+	  struct timespec dl;
+
+	  clock_gettime (CLOCK_REALTIME, &dl);
+	  dl.tv_nsec += 5 * 1000000L;
 	  dl.tv_sec += dl.tv_nsec / 1000000000L;
 	  dl.tv_nsec %= 1000000000L;
 	  (void) pthread_cond_timedwait (&volmap_mt.b_cv, &volmap_mt.b_mx, &dl);
@@ -8335,11 +8360,21 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		(void) volmap_bufmap_reload (ctx);
 	      }
 	    /* Temp volumes live only while a query spills, so [r] rescans the directory,
-	       adding new ones and dropping those that vanished.  If the batch lane is
-	       walking the volume array, wait for it to finish - changing the array
-	       underneath it would have it read freed memory. */
+	       adding new ones and dropping those that vanished.  Both worker lanes hold
+	       volume pointers and fds across their reads, so the list may only change
+	       while neither is working AND neither can start:
+
+	         1. raise list_frozen - each lane checks it under its own mutex before
+	            taking new work, so "idle" cannot go stale after we observe it;
+	         2. wait for a_busy and b_busy to clear, each under its own mutex;
+	         3. rescan only if both really are clear - on timeout we skip this round
+	            rather than pull the array out from under a lane;
+	         4. drop the barrier and wake both lanes.  */
 	    {
 	      int guard;
+	      bool a_idle, b_idle;
+
+	      volmap_mt.list_frozen = 1;
 
 	      pthread_mutex_lock (&volmap_mt.a_mx);
 	      for (guard = 0; volmap_mt.a_busy && guard < 200; guard++)
@@ -8352,10 +8387,9 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		  dl.tv_nsec %= 1000000000L;
 		  (void) pthread_cond_timedwait (&volmap_mt.a_cv, &volmap_mt.a_mx, &dl);
 		}
+	      a_idle = !volmap_mt.a_busy;	/* read under a_mx, not after it */
 	      pthread_mutex_unlock (&volmap_mt.a_mx);
-	      /* The prefetch lane holds a volume pointer and its fd across its read, so it
-	         must be waited out as well - dropping a volume underneath it would leave it
-	         reading a closed (possibly reused) descriptor or a shifted array slot. */
+
 	      pthread_mutex_lock (&volmap_mt.b_mx);
 	      for (guard = 0; volmap_mt.b_busy && guard < 200; guard++)
 		{
@@ -8367,8 +8401,11 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		  dl.tv_nsec %= 1000000000L;
 		  (void) pthread_cond_timedwait (&volmap_mt.b_cv, &volmap_mt.b_mx, &dl);
 		}
-	      pthread_mutex_unlock (&volmap_mt.b_mx);
-	      if (!volmap_mt.a_busy && !volmap_mt.b_busy && volmap_scan_temp_volumes (ctx))
+	      b_idle = !volmap_mt.b_busy;	/* read under b_mx, not after it */
+
+	      /* The barrier keeps both lanes out, so the rescan runs with the list to
+	         itself.  b_mx is still held: lane B cannot even re-enter its loop body. */
+	      if (a_idle && b_idle && volmap_scan_temp_volumes (ctx))
 		{
 		  /* the list changed; the cursor may point at a volume that is gone */
 		  if (vi >= ctx->nvols)
@@ -8377,6 +8414,15 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		    }
 		  force_full = true;
 		}
+	      pthread_mutex_unlock (&volmap_mt.b_mx);
+
+	      volmap_mt.list_frozen = 0;
+	      pthread_mutex_lock (&volmap_mt.a_mx);
+	      pthread_cond_broadcast (&volmap_mt.a_cv);
+	      pthread_mutex_unlock (&volmap_mt.a_mx);
+	      pthread_mutex_lock (&volmap_mt.b_mx);
+	      pthread_cond_broadcast (&volmap_mt.b_cv);
+	      pthread_mutex_unlock (&volmap_mt.b_mx);
 	    }
 	    if (volmap_mt.started)
 	      {
