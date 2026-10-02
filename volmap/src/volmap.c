@@ -9386,6 +9386,48 @@ volmap_db_api_open (VOLMAP_CTX * ctx, VOLMAP_DB_API * api)
       fprintf (ctx->outfp, "(overlay skipped: cubrid client library has unexpected symbols)\n");
       return false;
     }
+
+  /* The symbols existing says nothing about the layout behind them.  Pass 2 hands
+     db_query_get_tuple_value a DB_VALUE on this function's stack, sized by the
+     headers this binary was built against, and the library writes through that
+     pointer - so a library from another release can write past the end of it.
+     DB_VALUE is 64 bytes up to 11.0 and 72 from 11.3 (DB_RESULTSET widened to
+     uint64_t and a length field was added), so a 10.2-built binary under an 11.3+
+     installation is an 8-byte stack overwrite, and the reverse misreads the value.
+     The major release must therefore match; mismatches skip the overlay, which is
+     only an optimisation over reading the volume files. */
+  {
+    /* version.h defines MAJOR_RELEASE_STRING unquoted (11.5.0), so it is stringified
+       here rather than used directly. */
+#define VM_STR2(x) #x
+#define VM_STR(x)  VM_STR2 (x)
+    static const char built_rel[] = VM_STR (MAJOR_RELEASE_STRING);
+    const char *(*relf) (void) = (const char *(*)(void)) dlsym (h, "_Z24rel_major_release_stringv");
+    const char *lib_rel = (relf != NULL) ? relf () : NULL;
+    int lib_maj = 0, lib_min = 0, our_maj = 0, our_min = 0;
+
+    /* Compare major.minor only.  What the two releases call "major" is not spelled
+       the same way - 10.2 reports "10.2" where 11.5 reports "11.5.0" - and it is
+       major.minor that decides the layout anyway (the 64 -> 72 byte change landed
+       in 11.3). */
+    if (lib_rel != NULL && sscanf (lib_rel, "%d.%d", &lib_maj, &lib_min) == 2
+	&& sscanf (built_rel, "%d.%d", &our_maj, &our_min) == 2
+	&& lib_maj == our_maj && lib_min == our_min)
+      {
+	/* same release line: the layout the headers describe is the one in the
+	   library, so Pass 2 may use it */
+      }
+    else
+      {
+	fprintf (ctx->outfp, "(overlay skipped: client library is %s, this build is %s - "
+		 "DB_VALUE layout may differ)\n", (lib_rel != NULL) ? lib_rel : "an unknown release", built_rel);
+	dlclose (h);
+	api->handle = NULL;
+	return false;
+      }
+#undef VM_STR
+#undef VM_STR2
+  }
   return true;
 }
 

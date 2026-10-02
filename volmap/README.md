@@ -77,6 +77,13 @@ SRC=/path/to/cubrid-src bash tools/build_standalone.sh
 
 > 정적 빌드에서 `dlopen`은 쓰지 않는다. 정적 glibc에 공유 glibc가 이중 적재되어 segfault가 난다(`-DVOLMAP_NO_DLOPEN`).
 
+> **Pass 2 는 빌드 버전과 같은 릴리스에서만 동작한다.** `dlopen` 한 `libcubridcs.so` 의
+> `rel_major_release_string()` 을 읽어 major.minor 가 다르면 오버레이를 생략한다.
+> Pass 2 는 **이 바이너리 스택의 `DB_VALUE`** 를 라이브러리에 넘기는데, 그 크기가
+> 버전마다 다르기 때문이다 — **11.0 까지 64B, 11.3 부터 72B**(`DB_RESULTSET` 이
+> `uint64_t` 로 넓어지고 length 필드 추가). 10.2 로 빌드한 바이너리를 11.3+ 설치본에서
+> 돌리면 **스택 8바이트를 넘겨 쓴다.** 생략해도 지도·요약은 볼륨 파일만으로 완전하다.
+
 ### 구버전 호환 (build_fetch.sh 가 자동 처리)
 
 | 차이 | 처리 |
