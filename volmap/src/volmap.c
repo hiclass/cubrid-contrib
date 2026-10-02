@@ -5856,6 +5856,7 @@ static struct
   bool a_busy;			/* the batch lane is walking the volume array; the list must not be touched meanwhile */
   int a_resid_vi;		/* >= 0: re-read residency for this volume index */
   volatile unsigned ui_frames;	/* UI frame counter: shadow-reuse guard */
+  volatile sig_atomic_t ui_reading;	/* UI is dereferencing the per-volume arrays; the commit must wait */
 
   pthread_mutex_t b_mx;
   pthread_cond_t b_cv;
@@ -5869,7 +5870,7 @@ static struct
   size_t b_buf_sz;
 } volmap_mt = {
   NULL, 0, 0, false, 0, -1, -1,
-  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0,
+  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0, 0,
   PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, false, -1, -1, -1, -1, NULL, 0
 };
 
@@ -5915,6 +5916,19 @@ volmap_mt_refresh (VOLMAP_CTX * ctx)
       vol->w_pagebm = vol->sh_pagebm;
     }
   (void) volmap_refresh (ctx);	/* every write lands in the shadows */
+  /* Publish at a frame boundary.  The four pointers are swapped one at a time, and a
+   * frame reads them together (reservation, owner, allocation, page bitmap), so a
+   * commit landing mid-frame would draw a mix of the old and new scan.  Wait for the
+   * UI to finish the frame it is in; the guard bounds the wait so a stalled UI only
+   * delays the refresh by that much instead of blocking the worker for good. */
+  { int guard;
+    for (guard = 0; volmap_mt.ui_reading && guard < 50 && !volmap_mt.stop; guard++)
+      {
+	struct timespec ts = { 0, 2 * 1000000L };
+
+	nanosleep (&ts, NULL);
+      }
+  }
   for (vi = 0; vi < ctx->nvols; vi++)
     {
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
@@ -6657,6 +6671,11 @@ volmap_interactive (VOLMAP_CTX * ctx)
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
       struct winsize ws;
       long total_pages = (long) vol->nsect_total * VOLMAP_SECT_NPAGES;
+
+      /* One frame reads stab/owner/alloc/pagebm together, so a commit landing midway
+       * would mix a new reservation with an old owner.  Hold the commit off until the
+       * frame is done; it is published at the frame boundary instead. */
+      volmap_mt.ui_reading = 1;
       long res = 0;
       INT64 alloc = 0;
       long switches = 0;
@@ -7587,6 +7606,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
       prev_cx = cur_x;
       prev_cy = cur_y;
       force_full = false;
+      volmap_mt.ui_reading = 0;	/* frame done: a pending commit may publish now */
       volmap_mt.ui_frames++;	/* frame boundary: worker A may reuse the last shadow set */
 
       /* input — the select also listens on the worker self-pipe: scan progress,
