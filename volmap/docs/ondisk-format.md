@@ -2,7 +2,7 @@
 
 볼륨 바이너리를 직접 해석하는 데 필요한 포맷 지식을 정리한다. 구조체 정의 자체는
 `src/storage_ondisk_layout.hpp`가 원본이며(오프셋은 컴파일러가 계산), 이 문서는
-그 배경 지식과 실측으로 확정한 사실을 기록한다. 파일 매니저 재설계(10.0, CBRD-20185)
+그 배경 지식과 실측으로 확정한 사실을 기록한다. 파일 매니저 재설계(10.1, CBRD-20185)
 이후 이 레이아웃은 불변이라 10.0~11.5 전 버전에 적용된다.
 
 ## 1. 페이지 공통 구조
@@ -95,18 +95,23 @@ volmap이 파싱하는 볼륨 포맷의 성립·변화 이력. 근거는 CUBRID 
 |---|---|---|
 | ~10.0 (9.x 포함) | **구포맷** — 페이지 할당 비트테이블(`page_alloctb`), 볼륨 purpose 4종(DATA/INDEX/GENERIC/TEMP), `used_data/index_npages` 카운터, 파일은 allocset 체인(extdata 없음) | **미지원.** 자기검증이 거부 — 신포맷의 `sect_npgs`(=64) 오프셋이 구포맷에선 `purpose`(0~3)라 값 검사에서 탈락 |
 | **10.1** (2016-11) | **현행 포맷 성립** — 디스크/파일 매니저 재설계(CBRD-20185, cc368329d). 섹터(64페이지=1MB) 예약 비트테이블 `stab`, purpose 2종(PERMANENT/TEMPORARY), `FILE_HEADER`+extdata 파일 구조. 페이지 prv 끝 8B는 미사용 reserved | 지도·요약·자기발견·--check 전부 동작하는 최소 버전 |
-| 10.2 | 변화 없음 (10.1과 동일) | 실측 검증 버전 |
-| **11.0** | **TDE 도입** — prv의 reserved 1B가 `pflag`(암호화 비트)로, reserved 8B가 `tde_nonce`로 전환 (**prv 24B 크기 불변**). 페이지 끝에 `FILEIO_PAGE_WATERMARK` 8B 추가 → **사용자 영역 8B 감소**(`iopagesize − prv − 8`) | `E` 표기·TDE 소견의 근거. 사용자 영역 크기 기준 변화(아래 캐비엇) |
-| 11.2 / 11.3 / 11.4 | 변화 없음 | 11.3 / 11.4 / 11.4.5 실측 검증 |
-| **11.5** | 볼륨 헤더에 `vol_creation`(INT64) 추가 — CBRD-25365, `db_creation` 뒤 삽입 | **무영향** — volmap이 읽는 필드(iopagesize/volid/purpose/sect_npgs/nsect_total/stab_*/sys_lastpage)는 전부 삽입점 앞 |
+| **10.2** | **페이지 워터마크 도입** — 페이지 끝에 `FILEIO_PAGE_WATERMARK` 8B 추가(CBRD-22231, d81b071e8). 사용자 영역이 그만큼 줄어든다 | 실측 검증 버전 |
+| **11.0** | **TDE 도입** — prv의 reserved 1B가 `pflag`(암호화 비트)로, reserved 8B가 `tde_nonce`로 전환 (**prv 32B 크기 불변**). 워터마크는 이미 10.2 에 있다 → **사용자 영역 8B 감소**(`iopagesize − prv − 8`) | `E` 표기·TDE 소견의 근거. 사용자 영역 크기 기준 변화(아래 캐비엇) |
+| 11.2 / 11.3 | 변화 없음 | 11.3 실측 검증 |
+| **11.4** | 볼륨 헤더에 `vol_creation`(INT64) 추가 — CBRD-25365(44c022c31), `db_creation` 뒤 삽입 | **무영향** — volmap 이 읽는 필드는 그 앞에 있다 | 11.4 / 11.4.5 실측 검증 |
+| 11.5 | 변화 없음 | 11.5 실측 검증 | <!-- (iopagesize/volid/purpose/sect_npgs/nsect_total/stab_*/sys_lastpage)는 전부 삽입점 앞 |
 
-`FILE_HEADER`는 10.1 → 11.5(HEAD) 구조체 diff가 **완전 동일**하다 — 파일 자기발견·이름
-해석·temp 생성 시각이 전 버전에서 같은 코드로 동작하는 근거.
+`FILE_HEADER` 는 10.1 → 11.5 구조체 diff 가 동일하다 — 파일 자기발견·이름 해석·temp 생성
+시각이 그 구간에서 같은 코드로 동작하는 근거.
 
-**캐비엇 — 10.1/10.2 볼륨의 슬롯 단위 기능**: volmap은 사용자 영역 크기를 11.0+ 기준
-(`iopagesize − prv − 8`, 워터마크 포함)으로 고정한다. 워터마크가 없는 10.1/10.2 볼륨은
+> **develop 은 다르다.** CBRD-27308(1ea077d85)이 `FILE_HEADER` 를, CBRD-26176(e84a7f6dc)이
+> `SPAGE_HEADER` 를 바꿨다. 사본(`storage_ondisk_layout.hpp`)을 쓰는 부분은 이 변경이
+> **컴파일로 드러나지 않으므로**, develop 볼륨을 다룰 때는 이 표를 먼저 확인해야 한다.
+
+**캐비엇 — 10.1 볼륨의 슬롯 단위 기능**: volmap은 사용자 영역 크기를 10.2+ 기준
+(`iopagesize − prv − 8`, 워터마크 포함)으로 고정한다. 워터마크가 없는 **10.1** 볼륨은
 슬롯 배열 끝 기준이 8B 어긋날 수 있어, **슬롯 뷰·`--deep` 밀도·del/dead·오프라인 이름
-해석**은 10.x에서 부정확할 수 있다(지도·요약·자기발견·--check는 슬롯 배열을 쓰지 않아
+해석**은 10.1 에서 부정확할 수 있다(지도·요약·자기발견·--check는 슬롯 배열을 쓰지 않아
 무관). 볼륨 헤더에 버전 필드가 없어(magic은 "CUBRID/Volume" 고정) 자동 판별은 불가 —
 향후 과제: 슬롯 헤더 sanity 실패 시 −8 없이 재시도하는 폴백 휴리스틱.
 

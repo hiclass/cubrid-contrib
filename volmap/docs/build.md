@@ -10,7 +10,15 @@
 
 ## 2. 왜 헤더가 필요한가
 
-volmap 은 온디스크 구조체를 **복사해 두지 않고** 엔진 헤더에서 `#include` 한다.
+volmap 은 페이지·볼륨 구조체를 엔진 헤더(`file_io.h`·`storage_common.h` 등)에서 `#include` 한다 —
+오프셋을 하드코딩하지 않고 컴파일러가 계산한다.
+
+단 **파일 디스크립터 구조체(`FILE_HEAP_DES` 등)와 `FILE_TYPE` 은 사본**이다
+(`src/storage_ondisk_layout.hpp`). 엔진의 `disk_manager.c`·`file_manager.h`·`slotted_page.h`
+는 받지 않는다 — 이 파일들은 헤더가 아니거나 내부 의존이 커서 단독 include 가 어렵기 때문이다.
+
+> 사본인 부분은 엔진에서 구조체가 바뀌어도 **컴파일 단계에서 드러나지 않는다.**
+> 포맷 변경은 [ondisk-format.md](ondisk-format.md) 의 버전표와 대조해 확인해야 한다.
 
 ```c
 #include "file_io.h"    /* FILEIO_PAGE_RESERVED - prv 헤더 레이아웃 */
@@ -144,3 +152,40 @@ fatal error: config.h: No such file or directory
 
 경고 4건이 남아 있고 전부 `snprintf` 의 `-Wformat-truncation` 이다. 경계가 보장되어
 오버플로가 불가능하며, 좁은 박스에서 **의도적으로** 줄이는 자리다(제목·축척 인셋).
+
+## 구 glibc 환경에서 실행하기
+
+빌드한 호스트보다 오래된 배포판에서 돌려야 할 때가 있다.
+
+| 산출물 | glibc 요구 | 비고 |
+|---|---|---|
+| `cub_volmap` (정적) | **없음** | 어느 배포판에서나 실행. 구 환경 배포에는 이쪽을 쓴다 |
+| `cub_volmap-dyn` | `__libc_start_main@GLIBC_2.34` 1건 | 아래 참조 |
+
+### 심볼 버전 고정 (자동)
+
+glibc 2.34 는 `libdl`·`libpthread` 를 `libc` 로 합치면서 옮겨 온 심볼을
+`GLIBC_2.34` 로 다시 매겼다. 그래서 2.34+ 에서 빌드하면 `dlopen`·`pthread_create`
+같은, 2.2.5 부터 있던 함수들까지 2.34 를 요구하게 된다.
+
+옛 버전은 같은 libc 안에 그대로 남아 있으므로, 빌드 스크립트가 호스트 glibc 를 감지해
+2.34 이상이면 `-DVOLMAP_GLIBC_COMPAT` 을 붙여 옛 버전을 명시적으로 요청한다
+([src/volmap_glibc_compat.h](../src/volmap_glibc_compat.h)). 함수를 다시 구현하는 것이
+아니라 **기록되는 버전만** 낮추는 것이라 동작은 같다.
+
+적용 대상: `dlopen`·`dlsym`·`dlclose`·`dlerror`·`pthread_create`·`pthread_join`·
+`pthread_detach`·`memcpy`·`clock_gettime`·`log2`, 그리고 2.33 이전에는 심볼이 아예
+없던 `stat`/`lstat`/`fstat`(옛 인라인이 호출하던 `__xstat` 계열로 우회).
+
+효과 — 2.34 요구가 6건에서 1건으로 줄고 2.14·2.17·2.29·2.33 요구는 사라진다.
+
+### 남은 1건: `__libc_start_main`
+
+이 심볼은 소스가 아니라 **CRT 스타트업(`Scrt1.o`)** 이 참조하므로 `.symver` 로 바꿀 수 없다.
+동적 빌드를 구 glibc 에서 돌리려면 둘 중 하나가 필요하다.
+
+1. **정적 빌드를 쓴다** (`cub_volmap`) — 가장 간단하고, glibc 요구가 아예 없다.
+2. 대상과 같은 세대의 glibc 에서 빌드한다(구 배포판 컨테이너·chroot).
+
+Pass 2 라이브 오버레이가 꼭 필요한 구 환경이 아니라면 1번을 권한다.
+

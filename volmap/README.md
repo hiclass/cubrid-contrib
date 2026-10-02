@@ -28,7 +28,7 @@ CUBRID 볼륨의 섹터·페이지 배치를 터미널 지도로 보여주는 �
 | **서버 무접촉** | 볼륨 파일을 `O_RDONLY`로 해석. 페이지 버퍼·락 테이블 미접근 |
 | **의존 0** | 완전 정적 1.3MB — 어느 서버에나 파일 하나로 복사 |
 | **온/오프라인 무관** | 기동 중 DB와 정지된 DB에서 동일 동작 |
-| **오프셋 하드코딩 0** | 온디스크 구조체를 엔진 헤더에서 `#include` |
+| **오프셋 하드코딩 0** | 페이지·볼륨 구조체는 엔진 헤더(`file_io.h` 등)를 `#include` — 오프셋은 컴파일러가 계산한다. 단 파일 디스크립터 구조체는 사본(`storage_ondisk_layout.hpp`) |
 | **손상 비은폐** | 미할당은 `(unallocated)`, 이상값은 `corrupt?`로 그대로 노출 |
 
 ## 빌드
@@ -72,7 +72,7 @@ SRC=/path/to/cubrid-src bash tools/build_standalone.sh
 
 | 바이너리 | 크기 | 특성 |
 |---|---:|---|
-| `cub_volmap` | 1.3MB | 완전 정적, 의존 0 |
+| `cub_volmap` | 1.3MB | 완전 정적, 의존 0 — **glibc 버전 요구 없음**(구 배포판 포함 어디서나 실행) |
 | `cub_volmap-dyn` | 0.15MB | glibc 동적 — 런타임 `dlopen`으로 라이브 오버레이(Pass 2) 가능 |
 
 > 정적 빌드에서 `dlopen`은 쓰지 않는다. 정적 glibc에 공유 glibc가 이중 적재되어 segfault가 난다(`-DVOLMAP_NO_DLOPEN`).
@@ -163,7 +163,6 @@ temp 볼륨은 대부분 AREA(작업공간)·QRESULT(정렬 결과)이고, 이�
 | [docs/build.md](docs/build.md) | 빌드 방법과 버전 호환 |
 | [docs/ondisk-format.md](docs/ondisk-format.md) | 온디스크 구조와 버전 변천 |
 | [docs/limitations.md](docs/limitations.md) | 제한 사항과 검증 매트릭스 |
-| [pt/](pt/) | 브리핑 자료 (실화면 캡처 포함) |
 
 ## 제한
 
@@ -175,4 +174,4 @@ temp 볼륨은 대부분 AREA(작업공간)·QRESULT(정렬 결과)이고, 이�
 
 ## 라이선스
 
-BSD-3-Clause. CUBRID(Apache-2.0) 유래 코드에 대한 고지는 [NOTICE](NOTICE) 참조.
+Apache-2.0 ([LICENSE](LICENSE)) — CUBRID 엔진·본 리포와 동일. 유래 고지는 [NOTICE](NOTICE) 참조.

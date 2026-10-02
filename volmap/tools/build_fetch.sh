@@ -1,4 +1,20 @@
 #!/bin/sh
+#
+# Copyright 2008 Search Solution Corporation
+# Copyright 2016 CUBRID Corporation
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
 # build_fetch.sh - build cub_volmap without a local CUBRID source checkout.
 #
 # Fetches only the headers volmap includes (26 files) from the CUBRID repository
@@ -186,14 +202,30 @@ INC="-I$SELF/../src -I$WORK/gen -I$WORK/stub -I$WORK/include \
  -I$WORK/src/executables -I$WORK/src/thread -I$WORK/src/transaction"
 
 echo "compiling"
-g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $INC \
+# glibc 2.34 merged libdl/libpthread into libc and re-versioned the symbols that
+# moved, so a build there records GLIBC_2.34 and will not start on anything older.
+# The old versions are still in the same libc, so on 2.34+ we ask for them
+# explicitly (src/volmap_glibc_compat.h) and the result runs on both.
+GLIBC_COMPAT=""
+if [ "$(uname -m)" = "x86_64" ]; then
+  gv=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)
+  if [ -n "$gv" ]; then
+    gmaj=${gv%%.*}; gmin=${gv##*.}
+    if [ "$gmaj" -gt 2 ] 2>/dev/null || { [ "$gmaj" -eq 2 ] && [ "$gmin" -ge 34 ]; } 2>/dev/null; then
+      GLIBC_COMPAT="-DVOLMAP_GLIBC_COMPAT"
+      echo "glibc $gv - pinning old symbol versions (runs on glibc 2.11+)"
+    fi
+  fi
+fi
+
+g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
     "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
     -static-libstdc++ -static-libgcc -static -o "$OUT" 2>&1 \
   | grep -vE "^In file|warning:" || true
 
 [ -x "$OUT" ] || {
   echo "full-static unavailable - retrying with glibc dynamic" >&2
-  g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $INC \
+  g++ -x c++ -std=gnu++17 -O2 -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
       "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
       -static-libstdc++ -static-libgcc -o "$OUT"
 }

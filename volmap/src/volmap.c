@@ -63,6 +63,7 @@
 #include "object_representation_constants.h"
 #include "file_io.h"
 #include "storage_ondisk_layout.hpp"
+#include "volmap_glibc_compat.h"
 #if defined (VOLMAP_STANDALONE) && !defined (VOLMAP_NO_DLOPEN)
 #include <dlfcn.h>
 #endif
@@ -5691,8 +5692,7 @@ volmap_file_line (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long sect, char *buf, s
 
 /* [f] file view: list of the files owning sectors in this volume - the map
  * dims everything else (volmap_focus_file), so one file's physical footprint
- * reads at a glance (volume -> file -> sector browsing, vimkim/volmap's
- * file-selector map adapted to the interactive TUI). */
+ * reads at a glance (volume -> file -> sector browsing). */
 static void
 volmap_file_view_draw (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const int *fv_files, const long *fv_first,
 		       const int *fv_nsect, int fv_n, int fv_sel, int scr_cols, int scr_rows, int inner_w,
@@ -5860,6 +5860,7 @@ static struct
   pthread_mutex_t b_mx;
   pthread_cond_t b_cv;
   unsigned b_req_seq, b_done_seq;
+  bool b_busy;			/* the prefetch lane holds a volume pointer/fd; the list must not be touched meanwhile */
   int b_vol;
   long b_sect;
   int b_done_vol;
@@ -5869,7 +5870,7 @@ static struct
 } volmap_mt = {
   NULL, 0, 0, false, 0, -1, -1,
   PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0,
-  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, -1, -1, -1, -1, NULL, 0
+  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, false, -1, -1, -1, -1, NULL, 0
 };
 
 static volatile long volmap_last_key_sec = 0;	/* CLOCK_MONOTONIC secs of the last keypress (scan idle detection) */
@@ -6048,6 +6049,9 @@ volmap_mt_b_main (void *arg)
       seq = volmap_mt.b_req_seq;
       v = volmap_mt.b_vol;
       sect = volmap_mt.b_sect;
+      /* The volume pointer and fd below are only valid while the list stays put, so
+         mark the window the UI must wait out before it drops a vanished volume. */
+      volmap_mt.b_busy = true;
       pthread_mutex_unlock (&volmap_mt.b_mx);
       if (v >= 0 && v < ctx->nvols && sect >= 0)
 	{
@@ -6068,6 +6072,8 @@ volmap_mt_b_main (void *arg)
 	    }
 	}
       pthread_mutex_lock (&volmap_mt.b_mx);
+      volmap_mt.b_busy = false;	/* done with the volume array; the list may be changed now */
+      pthread_cond_broadcast (&volmap_mt.b_cv);
       volmap_mt.b_done_seq = seq;
       volmap_mt.b_done_vol = v;
       volmap_mt.b_done_sect = sect;
@@ -8275,7 +8281,22 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		  (void) pthread_cond_timedwait (&volmap_mt.a_cv, &volmap_mt.a_mx, &dl);
 		}
 	      pthread_mutex_unlock (&volmap_mt.a_mx);
-	      if (!volmap_mt.a_busy && volmap_scan_temp_volumes (ctx))
+	      /* The prefetch lane holds a volume pointer and its fd across its read, so it
+	         must be waited out as well - dropping a volume underneath it would leave it
+	         reading a closed (possibly reused) descriptor or a shifted array slot. */
+	      pthread_mutex_lock (&volmap_mt.b_mx);
+	      for (guard = 0; volmap_mt.b_busy && guard < 200; guard++)
+		{
+		  struct timespec dl;
+
+		  clock_gettime (CLOCK_REALTIME, &dl);
+		  dl.tv_nsec += 10 * 1000000L;
+		  dl.tv_sec += dl.tv_nsec / 1000000000L;
+		  dl.tv_nsec %= 1000000000L;
+		  (void) pthread_cond_timedwait (&volmap_mt.b_cv, &volmap_mt.b_mx, &dl);
+		}
+	      pthread_mutex_unlock (&volmap_mt.b_mx);
+	      if (!volmap_mt.a_busy && !volmap_mt.b_busy && volmap_scan_temp_volumes (ctx))
 		{
 		  /* the list changed; the cursor may point at a volume that is gone */
 		  if (vi >= ctx->nvols)

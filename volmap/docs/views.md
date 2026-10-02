@@ -110,7 +110,8 @@ BY KIND
 
 ## 4.5 버퍼풀 뷰 (-B FILE / b 토글)
 
-cub_top 이 `--bcb-dump FILE` 로 남긴 cub_server 버퍼풀(BCB 배열) 스냅샷을 지도에 얹는다. -m 이 "OS 페이지캐시"라면
+cub_top 이 `--bcb-dump FILE` 로 남긴 cub_server 버퍼풀(BCB 배열) 스냅샷을 지도에 얹는다.
+ -m 이 "OS 페이지캐시"라면
 이 층은 "엔진 버퍼풀"이다. 두 층을 함께 켜면 디스크 → 페이지캐시 → 버퍼풀이 한 셀에서 읽힌다.
 
 | 배경 | 의미 | 우선순위 |
