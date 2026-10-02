@@ -94,7 +94,11 @@ struct volmap_volume
   DKNPAGES stab_npages;
   PAGEID stab_first;
   PAGEID sys_lastpage;		/* end of the volume system area (header + sector table) */
-  long tde_pages;		/* pages seen with the TDE-encrypted flag (probe sample) */
+  long tde_pages;		/* distinct pages seen with the TDE-encrypted flag (probe sample) */
+  UINT64 *tde_bm;		/* sector -> which of its pages are already counted in tde_pages;
+				   a page can be probed more than once (--full-sweep pass B
+				   re-probes pass A's first page, and every refresh re-probes),
+				   so the count needs the bitmap to stay a page count */
   PAGEID hwm_page;		/* highest allocated page = high-water mark (display marker) */
   DB_VOLPURPOSE purpose;
   unsigned char *stab;		/* 1 byte per sector: reserved bit */
@@ -504,6 +508,7 @@ volmap_vol_release (VOLMAP_VOLUME * vol)
   free (vol->bufpg);
   free (vol->buf_prefix);
   free (vol->dirty_prefix);
+  free (vol->tde_bm);
   memset (vol, 0, sizeof (*vol));
   vol->fd = -1;			/* memset left it 0, which is a valid fd */
 }
@@ -965,7 +970,8 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   vol->owner = (int *) malloc (vol->nsect_total * sizeof (int));
   vol->alloc = (int *) calloc (vol->nsect_total, sizeof (int));
   vol->pagebm = (UINT64 *) calloc (vol->nsect_total, sizeof (UINT64));
-  if (vol->stab == NULL || vol->owner == NULL || vol->alloc == NULL || vol->pagebm == NULL)
+  vol->tde_bm = (UINT64 *) calloc (vol->nsect_total, sizeof (UINT64));
+  if (vol->stab == NULL || vol->owner == NULL || vol->alloc == NULL || vol->pagebm == NULL || vol->tde_bm == NULL)
     {
       goto error;
     }
@@ -1182,9 +1188,13 @@ volmap_probe_sector (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, DKNSECTS s, char *io
 	{
 	  return;
 	}
-      if (prv_area.pflag & 0x3)
+      if ((prv_area.pflag & 0x3) && vol->tde_bm != NULL
+	  && !((vol->tde_bm[s] >> pg) & 1))
 	{
-	  vol->tde_pages++;	/* TDE-encrypted (AES/ARIA): contents not interpretable */
+	  /* TDE-encrypted (AES/ARIA): contents not interpretable.  Counted once per
+	     page - this probe may be a repeat of an earlier one. */
+	  vol->tde_bm[s] |= (UINT64) 1 << pg;
+	  vol->tde_pages++;
 	}
       if (prv_area.ptype != PAGE_FTAB || prv_area.pageid != pageid || prv_area.volid != vol->volid)
 	{
@@ -2717,6 +2727,11 @@ volmap_refresh (VOLMAP_CTX * ctx)
       memset (vol->w_owner, -1, vol->nsect_total * sizeof (int));
       memset (vol->w_alloc, 0, vol->nsect_total * sizeof (int));
       memset (vol->w_pagebm, 0, vol->nsect_total * sizeof (UINT64));
+      /* tde_pages and tde_bm are deliberately NOT cleared here.  This refresh is a
+         delta probe - it only visits sectors nobody owns - so zeroing the tally
+         would throw away every page the initial full scan found and never look at
+         it again.  The bitmap keeps the count correct instead: a page already
+         counted is not counted twice, whichever probe reaches it. */
     }
 
   /* re-walk known files (counts + ownership); vanished files simply stop matching */
