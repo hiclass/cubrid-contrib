@@ -347,6 +347,32 @@ volmap_vol_fd_close (VOLMAP_VOLUME * vol)
     }
 }
 
+/* Release everything one volume slot owns: fd plus every heap array hanging off
+   it.  Every release path goes through here - keeping the list in one place is
+   what stops the paths from drifting apart (they already had, by seven arrays).
+   The w_* pointers are aliases of either the read side or the sh_* set, never a
+   separate allocation, so they must NOT be freed here. */
+static void
+volmap_vol_release (VOLMAP_VOLUME * vol)
+{
+  volmap_vol_fd_close (vol);
+  free (vol->stab);
+  free (vol->owner);
+  free (vol->alloc);
+  free (vol->pagebm);
+  free (vol->sh_stab);
+  free (vol->sh_owner);
+  free (vol->sh_alloc);
+  free (vol->sh_pagebm);
+  free (vol->respg);
+  free (vol->res_prefix);
+  free (vol->bufpg);
+  free (vol->buf_prefix);
+  free (vol->dirty_prefix);
+  memset (vol, 0, sizeof (*vol));
+  vol->fd = -1;			/* memset left it 0, which is a valid fd */
+}
+
 static bool
 volmap_read_iopage (VOLMAP_VOLUME * vol, PAGEID pageid, char *buf)
 {
@@ -829,12 +855,7 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
 
 error:
   /* the slot will be reused by the next volume: nothing may stay owned by it */
-  volmap_vol_fd_close (vol);
-  free (vol->stab);
-  free (vol->owner);
-  free (vol->alloc);
-  free (vol->pagebm);
-  memset (vol, 0, sizeof (*vol));
+  volmap_vol_release (vol);
   return ER_FAILED;
 }
 
@@ -2684,6 +2705,19 @@ struct volmap_panel
   int rec_col;			/* byte view: ANSI fg for record cells = the owning file's KIND color
 				 * (map contract: data=34 blue, index=32 green) - 0 = unknown (37) */
 };
+
+/* Release a panel's cell buffers.  Paired with volmap_panel_ensure - every panel
+   that gets one needs one of these before it goes out of scope. */
+static void
+volmap_panel_free (VOLMAP_PANEL * p)
+{
+  free (p->color);
+  free (p->glyph);
+  free (p->aux);
+  free (p->rbg);
+  p->color = p->glyph = p->aux = p->rbg = NULL;
+  p->rows = p->w = 0;
+}
 
 static void
 volmap_panel_ensure (VOLMAP_PANEL * p, int rows, int w)
@@ -8760,10 +8794,8 @@ volmap_interactive (VOLMAP_CTX * ctx)
   free (cell_p0);
   free (cell_alloc_arr);
   free (cell_render);
-  free (panel.color);
-  free (panel.rbg);
-  free (panel.glyph);
-  free (panel.aux);
+  volmap_panel_free (&panel);
+  volmap_panel_free (&panelb);	/* the page box: its buffers outlived the function */
 }
 
 static void
@@ -10102,20 +10134,7 @@ volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
       if (strncmp (b, prefix, plen) == 0 && b[plen] >= '0' && b[plen] <= '9'
 	  && access (vol->path, R_OK) != 0)
 	{
-	  volmap_vol_fd_close (vol);
-	  free (vol->stab);
-	  free (vol->owner);
-	  free (vol->alloc);
-	  free (vol->pagebm);
-	  free (vol->sh_stab);
-	  free (vol->sh_owner);
-	  free (vol->sh_alloc);
-	  free (vol->sh_pagebm);
-	  free (vol->respg);
-	  free (vol->res_prefix);
-	  free (vol->bufpg);
-	  free (vol->buf_prefix);
-	  free (vol->dirty_prefix);
+	  volmap_vol_release (vol);
 	  /* close the gap by shifting the array down (volume order is also screen order) */
 	  if (vi + 1 < ctx->nvols)
 	    {
@@ -10453,18 +10472,13 @@ volmap (UTIL_FUNCTION_ARG * arg)
 
   for (vi = 0; vi < ctx.nvols; vi++)
     {
-      volmap_vol_fd_close (&ctx.vols[vi]);
-      free (ctx.vols[vi].stab);
-      free (ctx.vols[vi].owner);
-      free (ctx.vols[vi].alloc);
-      free (ctx.vols[vi].pagebm);
-      free (ctx.vols[vi].respg);
-      free (ctx.vols[vi].res_prefix);
+      volmap_vol_release (&ctx.vols[vi]);
     }
   free (ctx.files);
   free (ctx.scan_pos);
   free (ctx.scratch);
   free (ctx.scratch_bmap);
+  free (ctx.bm_recs);		/* --bufmap snapshot records */
   if (ctx.outfp != stdout)
     {
       fclose (ctx.outfp);
