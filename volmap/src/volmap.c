@@ -88,7 +88,11 @@
 typedef struct volmap_volume VOLMAP_VOLUME;
 struct volmap_volume
 {
-  char path[PATH_MAX];
+  /* Allocated to the length actually needed.  As an inline char[PATH_MAX] this one
+     field was 4096 of the struct's 4384 bytes - 93% - while real volume paths run
+     about 50.  Making it a pointer is what lets the volume array grow on demand
+     without the array itself becoming the expensive part. */
+  char *path;
   int fd;
   INT16 volid;
   INT16 iopagesize;
@@ -178,7 +182,8 @@ struct volmap_bufrec
 typedef struct volmap_ctx VOLMAP_CTX;
 struct volmap_ctx
 {
-  VOLMAP_VOLUME vols[VOLMAP_MAX_VOLS];
+  VOLMAP_VOLUME *vols;		/* grown on demand; see volmap_open_volume () */
+  int nvols_alloc;		/* entries allocated in vols[] */
   int nvols;
   /* Temp volumes (<db>_t<NNNNN>) are absent from the vinf and short-lived - they
      exist only while a query spills.  [r] rescans the same directory to add new
@@ -536,6 +541,7 @@ volmap_vol_release (VOLMAP_VOLUME * vol)
   free (vol->buf_prefix);
   free (vol->dirty_prefix);
   free (vol->tde_bm);
+  free (vol->path);
   memset (vol, 0, sizeof (*vol));
   vol->fd = -1;			/* memset left it 0, which is a valid fd */
 }
@@ -945,24 +951,73 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   DISK_VOLUME_HEADER *vhdr;
   char *iopage = NULL;
   int prv = prv_user_offset ();
-  if (ctx->nvols >= VOLMAP_MAX_VOLS)
+  if (ctx->nvols > VOLMAP_MAX_VOLID)
     {
-      /* Dropping volumes in silence would understate every total on screen, and
-         nothing else in the output would hint that the map is partial.  Warned
-         once, not per volume. */
+      /* Only reachable past the engine's own volid ceiling.  Dropping volumes in
+         silence would understate every total on screen, so it is said once. */
       static bool said = false;
 
       if (!said)
 	{
 	  said = true;
 	  fprintf (stderr, "volmap: more than %d volumes - the rest are not shown, so the totals are partial\n",
-		   VOLMAP_MAX_VOLS);
+		   VOLMAP_MAX_VOLID + 1);
 	}
       return ER_FAILED;
     }
+  if (ctx->nvols >= ctx->nvols_alloc)
+    {
+      /* Grow on demand.  A well-kept database has a handful of volumes and a
+         neglected one can have thousands, so neither a small fixed array nor a
+         large one is right: this costs ~300 bytes per volume that actually exists.
+         Only two places add volumes - the initial load, which runs before the
+         worker threads start, and the [r] rescan, which already holds both lanes
+         idle behind the list_frozen barrier because it memmoves this same array.
+         So nothing can be holding a VOLMAP_VOLUME * across this realloc. */
+      int want = (ctx->nvols_alloc > 0) ? ctx->nvols_alloc * 2 : 16;
+      VOLMAP_VOLUME *grown;
+
+      if (want > VOLMAP_MAX_VOLID + 1)
+	{
+	  want = VOLMAP_MAX_VOLID + 1;
+	}
+      grown = (VOLMAP_VOLUME *) realloc (ctx->vols, (size_t) want * sizeof (*grown));
+      if (grown == NULL)
+	{
+	  fprintf (stderr, "volmap: out of memory for %d volumes\n", want);
+	  return ER_FAILED;
+	}
+      memset (grown + ctx->nvols_alloc, 0, (size_t) (want - ctx->nvols_alloc) * sizeof (*grown));
+      if (grown != ctx->vols)
+	{
+	  /* The LRU fd cache holds VOLMAP_VOLUME pointers across calls, so a move
+	     leaves it pointing into freed memory - caught by ASan as a use-after-free
+	     the first time a cached volume was read again.  Rebase the entries that
+	     refer to this array; any others (there are none today) are dropped. */
+	  int k;
+
+	  for (k = 0; k < VOLMAP_MAX_OPEN_FDS; k++)
+	    {
+	      if (volmap_fd_slot[k] >= ctx->vols && volmap_fd_slot[k] < ctx->vols + ctx->nvols_alloc)
+		{
+		  volmap_fd_slot[k] = grown + (volmap_fd_slot[k] - ctx->vols);
+		}
+	      else
+		{
+		  volmap_fd_slot[k] = NULL;
+		}
+	    }
+	}
+      ctx->vols = grown;
+      ctx->nvols_alloc = want;
+    }
   vol = &ctx->vols[ctx->nvols];
   memset (vol, 0, sizeof (*vol));
-  snprintf (vol->path, sizeof (vol->path), "%s", path);
+  vol->path = strdup (path);
+  if (vol->path == NULL)
+    {
+      return ER_FAILED;
+    }
 
   vol->fd = -1;
   if (volmap_vol_fd (vol) < 0)
@@ -10398,6 +10453,19 @@ volmap_scan_temp_dir (VOLMAP_CTX * ctx, const char *dir, const char *prefix, siz
 	{
 	  continue;
 	}
+      /* The name carries the volid: fileio_make_volume_temp_name () writes
+         <db>_t<volid>, unchanged from 10.1 to 11.5.  Reading it here means an
+         unselected volume is never opened at all - it costs no fd, no header read,
+         and no slot in the volume array, which is what the 256 limit runs out of. */
+      {
+	char *vend = NULL;
+	long tvolid = strtol (de->d_name + plen, &vend, 10);
+
+	if (vend != NULL && *vend == '\0' && !volmap_vol_selected (ctx, (int) tvolid))
+	  {
+	    continue;
+	  }
+      }
       if ((size_t) snprintf (tpath, sizeof (tpath), "%s/%s", dir, de->d_name) >= sizeof (tpath))
 	{
 	  continue;
@@ -10958,6 +11026,7 @@ volmap (UTIL_FUNCTION_ARG * arg)
     {
       volmap_vol_release (&ctx.vols[vi]);
     }
+  free (ctx.vols);
   free (ctx.files);
   free (ctx.scan_pos);
   free (ctx.scratch);
