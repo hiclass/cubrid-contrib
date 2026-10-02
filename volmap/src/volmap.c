@@ -9820,6 +9820,7 @@ volmap_json_escape (const char *in, char *out, int outsz)
 static int
 volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 {
+  int nvol_printed = 0, nfile_printed = 0;
   FILE *fp = ctx->outfp;
   int vi, fi;
 
@@ -9833,11 +9834,22 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
     fprintf (fp, "{\n  \"db\": \"%s\", \"tool\": \"volmap\", \"timestamp\": \"%s\",\n  \"volumes\": [\n",
 	     volmap_json_escape (db_name, edb, (int) sizeof (edb)), ts);
   }
+  /* -V selects the volumes to report; the batch renderer honours it, so JSON must too
+     or an automation asking for one volume gets the whole database.  The separator is
+     driven by what has actually been printed, not by the loop index - skipping a
+     volume with an index-based comma would emit a trailing one and break the parse. */
+  nvol_printed = 0;
   for (vi = 0; vi < ctx->nvols; vi++)
     {
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
       DKNSECTS s;
       long res = 0, unknown = 0, switches = 0;
+
+      if (ctx->vol_filter_on
+	  && (vol->volid > VOLMAP_MAX_VOLS || !ctx->vol_filter[vol->volid]))
+	{
+	  continue;
+	}
       INT64 alloc = 0;
 
       for (s = 0; s < vol->nsect_total; s++)
@@ -9853,13 +9865,14 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	}
       char epath[2 * PATH_MAX];
 
-      fprintf (fp, "    {\"volid\": %d, \"path\": \"%s\", \"purpose\": \"%s\", \"iopagesize\": %d,"
+      fprintf (fp, "%s    {\"volid\": %d, \"path\": \"%s\", \"purpose\": \"%s\", \"iopagesize\": %d,"
 	       " \"sectors_total\": %d,"
 	       " \"sectors_reserved\": %ld, \"pages_allocated\": %lld, \"owner_switches\": %ld,"
 	       " \"unknown_sectors\": %ld, \"tde_pages_probed\": %ld,"
 	       " \"idle_pages\": %lld, \"idle_pct\": %.3f, \"fragmentation_pct\": %.3f,"
 	       " \"media_rotational\": %d,"
 	       " \"buffered_pages\": %ld, \"dirty_pages\": %ld, \"buffered_freed_pages\": %ld}%s\n",
+	       nvol_printed ? ",\n" : "",
 	       vol->volid, volmap_json_escape (vol->path, epath, (int) sizeof (epath)),
 	       (vol->purpose == DB_TEMPORARY_DATA_PURPOSE) ? "temporary" : "permanent", vol->iopagesize,
 	       vol->nsect_total, res, (long long) alloc, switches,
@@ -9876,7 +9889,12 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	       volmap_media_rotational (vol->path),
 	       ctx->bufmap_loaded ? vol->buf_total : -1L,
 	       ctx->bufmap_loaded ? vol->buf_dirty : -1L, ctx->bufmap_loaded ? vol->buf_freed : -1L,
-	       (vi < ctx->nvols - 1) ? "," : "");
+	       "");
+      nvol_printed++;
+    }
+  if (nvol_printed)
+    {
+      fprintf (fp, "\n");
     }
   fprintf (fp, "  ],\n");
   if (ctx->bufmap_loaded)
