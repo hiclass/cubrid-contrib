@@ -77,6 +77,19 @@ SRC=/path/to/cubrid-src bash tools/build_standalone.sh
 
 > 정적 빌드에서 `dlopen`은 쓰지 않는다. 정적 glibc에 공유 glibc가 이중 적재되어 segfault가 난다(`-DVOLMAP_NO_DLOPEN`).
 
+> **Pass 2 는 기본 off 다.** 이 도구의 나머지 전부는 볼륨 파일만 읽고 서버에 접속하지
+> 않는데, Pass 2 만 **서버 세션을 연다**(트랜잭션 인덱스 할당 등). 그래서 `--overlay` 로
+> 명시할 때만 실행한다 — 기본 실행은 `connect()` 호출이 **0건**임을 strace 로 확인했다.
+>
+> | 옵션 | 뜻 |
+> |---|---|
+> | `--overlay` | Pass 2 실행 (서버 접속) |
+> | `-u, --user=NAME` | 접속 사용자 (기본 DBA) |
+> | `--password=PASS` | 비밀번호 |
+>
+> 실패 사유는 `db_error_string()` 으로 구분해 출력한다. 예전에는 서버 정지와 비밀번호
+> 오류가 **같은 문구**(`no server session`)였다.
+
 > **Pass 2 는 빌드 버전과 같은 릴리스에서만 동작한다.** `dlopen` 한 `libcubridcs.so` 의
 > `rel_major_release_string()` 을 읽어 major.minor 가 다르면 오버레이를 생략한다.
 > Pass 2 는 **이 바이너리 스택의 `DB_VALUE`** 를 라이브러리에 넘기는데, 그 크기가

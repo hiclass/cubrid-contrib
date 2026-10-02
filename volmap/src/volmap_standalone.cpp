@@ -239,12 +239,15 @@ main (int argc, char **argv)
     {VOLMAP_WARN_IDLE_L, 1, 0, VOLMAP_WARN_IDLE_S},
     {VOLMAP_TEMP_PATH_L, 1, 0, VOLMAP_TEMP_PATH_S},
     {VOLMAP_HELP_L, 0, 0, VOLMAP_HELP_S},
+    {VOLMAP_OVERLAY_L, 0, 0, VOLMAP_OVERLAY_S},
+    {VOLMAP_USER_L, 1, 0, VOLMAP_USER_S},
+    {VOLMAP_PASSWORD_L, 1, 0, VOLMAP_PASSWORD_S},
     {0, 0, 0, 0}
   };
   UTIL_FUNCTION_ARG arg;
   int opt;
 
-  while ((opt = getopt_long (argc, argv, "o:w:r:V:B:fimh", longopts, NULL)) != -1)
+  while ((opt = getopt_long (argc, argv, "o:w:r:V:B:u:fimh", longopts, NULL)) != -1)
     {
       switch (opt)
 	{
@@ -253,6 +256,8 @@ main (int argc, char **argv)
 	case VOLMAP_FORMAT_S:
 	case VOLMAP_BUFMAP_S:
 	case VOLMAP_TEMP_PATH_S:
+	case VOLMAP_USER_S:
+	case VOLMAP_PASSWORD_S:
 	  vs_set (opt, optarg, 0, false);
 	  break;
 	case VOLMAP_WIDTH_S:

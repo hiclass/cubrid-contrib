@@ -196,6 +196,11 @@ struct volmap_ctx
   bool deep;
   bool full_sweep;
   bool no_overlay;
+  /* Pass 2 (live-server overlay) is opt-in: it opens a server session, which the
+     rest of the tool deliberately never does.  --overlay turns it on. */
+  bool overlay;
+  const char *ov_user;		/* --user, default DBA */
+  const char *ov_passwd;	/* --password; NULL = none supplied */
   FILE *outfp;
   bool vol_filter[VOLMAP_MAX_VOLS + 1];	/* by volid; used only when vol_filter_on */
   bool vol_filter_on;
@@ -9317,6 +9322,7 @@ struct volmap_db_api
   int (*shutdown) (void);
   DB_TYPE (*value_type) (const DB_VALUE *);
   int (*get_int) (const DB_VALUE *);
+  const char *(*error_string) (int);	/* may be NULL: not required for the overlay */
   void *handle;			/* dlopen handle; NULL for the linked build */
 };
 
@@ -9376,6 +9382,8 @@ volmap_db_api_open (VOLMAP_CTX * ctx, VOLMAP_DB_API * api)
   api->shutdown = (int (*) (void)) dlsym (h, "db_shutdown");
   api->value_type = (DB_TYPE (*) (const DB_VALUE *)) dlsym (h, "db_value_type");
   api->get_int = (int (*) (const DB_VALUE *)) dlsym (h, "db_get_int");
+  /* optional: only used to say WHY a session could not be opened */
+  api->error_string = (const char *(*)(int)) dlsym (h, "db_error_string");
   api->handle = h;
   if (api->set_client_type == NULL || api->login == NULL || api->restart == NULL || api->open_buffer == NULL
       || api->compile == NULL || api->execute == NULL || api->first_tuple == NULL || api->get_tuple_value == NULL
@@ -9506,6 +9514,7 @@ volmap_db_api_open (VOLMAP_CTX * ctx, VOLMAP_DB_API * api)
   api->shutdown = db_shutdown;
   api->value_type = vm_db_value_type;
   api->get_int = db_get_int;
+  api->error_string = db_error_string;
   api->handle = NULL;
   return true;
 }
@@ -9529,10 +9538,29 @@ volmap_overlay (VOLMAP_CTX * ctx, const char *db_name)
       return;
     }
   api.set_client_type (7);	/* DB_CLIENT_TYPE_ADMIN_UTILITY (db_client_type.hpp) */
-  api.login ("DBA", NULL);
+  api.login ((ctx->ov_user != NULL) ? ctx->ov_user : "DBA", ctx->ov_passwd);
   if (api.restart ("volmap", 1, db_name) != NO_ERROR)
     {
-      fprintf (ctx->outfp, "(overlay skipped: no server session - map above is from volume files only)\n");
+      /* Say why.  "no server session" alone reads as "the server is down", which
+         sent people looking in the wrong place when the real answer was that the
+         user has a password: both cases printed the same line. */
+      const char *why = (api.error_string != NULL) ? api.error_string (-1) : NULL;
+
+      if (why != NULL && why[0] != '\0')
+	{
+	  fprintf (ctx->outfp, "(overlay skipped: %s", why);
+	  /* only hint at credentials when that is actually what failed - suggesting
+	     a password while the server is down sends people the wrong way */
+	  if (ctx->ov_passwd == NULL && strstr (why, "password") != NULL)
+	    {
+	      fprintf (ctx->outfp, " - pass --password for %s", (ctx->ov_user != NULL) ? ctx->ov_user : "DBA");
+	    }
+	  fprintf (ctx->outfp, ")\n");
+	}
+      else
+	{
+	  fprintf (ctx->outfp, "(overlay skipped: no server session - map above is from volume files only)\n");
+	}
       volmap_db_api_close (&api);
       return;
     }
@@ -10643,6 +10671,11 @@ volmap_usage (const char *argv0)
 	   "      --format=json        machine-readable output (volumes, files, findings)\n"
 	   "      --deep               full scan: record density + forwarding ratio\n"
 	   "      --full-sweep         probe every page of unowned sectors\n"
+	   "      --overlay            Pass 2: open a read-only server session and report the\n"
+	   "                           live-vs-on-disk delta (off by default: everything else\n"
+	   "                           here reads the volume files and never contacts the server)\n"
+	   "  -u, --user=NAME          user for --overlay (default DBA)\n"
+	   "      --password=PASS      password for --overlay\n"
 	   "      --no-overlay         skip the live-server overlay pass\n"
 	   "      --plain              ASCII output without ANSI colors\n"
 	   "      --tick=SEC           interactive auto-refresh period in seconds (default 2)\n"
@@ -10686,6 +10719,15 @@ volmap (UTIL_FUNCTION_ARG * arg)
   ctx.deep = utility_get_option_bool_value (arg_map, VOLMAP_DEEP_S);
   ctx.full_sweep = utility_get_option_bool_value (arg_map, VOLMAP_FULL_SWEEP_S);
   ctx.no_overlay = utility_get_option_bool_value (arg_map, VOLMAP_NO_OVERLAY_S);
+  ctx.overlay = utility_get_option_bool_value (arg_map, VOLMAP_OVERLAY_S);
+  ctx.ov_user = utility_get_option_string_value (arg_map, VOLMAP_USER_S, 0);
+  ctx.ov_passwd = utility_get_option_string_value (arg_map, VOLMAP_PASSWORD_S, 0);
+  if (!ctx.overlay && (ctx.ov_user != NULL || ctx.ov_passwd != NULL))
+    {
+      /* credentials without --overlay would be silently unused */
+      fprintf (stderr, "volmap: --user/--password apply to --overlay, which was not given\n");
+      return EXIT_FAILURE;
+    }
   ctx.plain = utility_get_option_bool_value (arg_map, VOLMAP_PLAIN_S);
   ctx.full = utility_get_option_bool_value (arg_map, VOLMAP_FULL_S);
   ctx.interactive = utility_get_option_bool_value (arg_map, VOLMAP_INTERACTIVE_S);
@@ -10869,7 +10911,9 @@ volmap (UTIL_FUNCTION_ARG * arg)
 	}
 
       /* Pass 2 — optional live overlay */
-      if (!ctx.no_overlay && strstr (db_name, "_vinf") == NULL)
+      /* --no-overlay is kept so existing invocations do not break, but the overlay
+         is off unless asked for: it is the one thing here that touches the server. */
+      if (ctx.overlay && !ctx.no_overlay && strstr (db_name, "_vinf") == NULL)
 	{
 	  volmap_overlay (&ctx, db_name);
 	}
