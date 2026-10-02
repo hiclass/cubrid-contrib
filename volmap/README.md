@@ -93,8 +93,8 @@ SRC=/path/to/cubrid-src bash tools/build_standalone.sh
 > | `-u, --user=NAME` | 접속 사용자 (기본 DBA) |
 > | `--password=PASS` | 비밀번호 |
 >
-> 실패 사유는 `db_error_string()` 으로 구분해 출력한다. 예전에는 서버 정지와 비밀번호
-> 오류가 **같은 문구**(`no server session`)였다.
+> 실패 사유는 `db_error_string()` 으로 구분해 출력한다 — 서버 정지와 비밀번호 오류는
+> 다른 문구로 나온다.
 
 > **Pass 2 는 빌드 버전과 같은 릴리스에서만 동작한다.** `dlopen` 한 `libcubridcs.so` 의
 > `rel_major_release_string()` 을 읽어 major.minor 가 다르면 오버레이를 생략한다.

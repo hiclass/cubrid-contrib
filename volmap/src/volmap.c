@@ -517,10 +517,9 @@ volmap_vol_fd_close (VOLMAP_VOLUME * vol)
     }
 }
 
-/* Release everything one volume slot owns: fd plus every heap array hanging off
-   it.  Every release path goes through here - keeping the list in one place is
-   what stops the paths from drifting apart (they already had, by seven arrays).
-   The w_* pointers are aliases of either the read side or the sh_* set, never a
+/* Release everything one volume slot owns: its fd and every heap array hanging
+   off it.  Every release path goes through here, so the list lives in one place.
+   The w_* pointers alias either the read side or the sh_* set and are never a
    separate allocation, so they must NOT be freed here. */
 static void
 volmap_vol_release (VOLMAP_VOLUME * vol)
@@ -2085,9 +2084,8 @@ volmap_ov_layout_calc (VOLMAP_OV_LAYOUT * lo, int box_w, int avail_rows, int cel
 }
 
 /* Sector grid scroll state, shared by drawing (volmap_ov_sect_draw) and input
-   handling.  The window follows the map cell's range, so the old clamp fixed at
-   64 cells no longer applies; input handling keeps the selection inside the
-   cell instead. */
+   handling.  The window follows the map cell's range; input handling keeps the
+   selection inside that cell. */
 static VOLMAP_GRID volmap_ov_sect_grid = { VOLMAP_OV_PAGE_W, 2, 0, 0 };
 
 #define volmap_ov_sect_base (volmap_ov_sect_grid.base)	/* first cell of the sector grid (= page number) */
@@ -4563,8 +4561,6 @@ spage_is_valid_anchor (int a)
   return a >= 1 && a <= 4;
 }
 
-/* Display width in columns.  SGR = 0, 0xE2/0xE1 symbols = 1, other 3-byte
-   UTF-8 = 2.  Kept in one place; duplicates of this walk used to disagree. */
 /* Display width - the single source of truth.
    Rules: SGR (\033...m) = 0 columns; a 3-byte sequence starting 0xE2/0xE1
    (symbols, braille) = 1 column; other 3-byte UTF-8 (Hangul etc.) = 2 columns;
@@ -6155,8 +6151,8 @@ volmap_file_view_draw (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const int *fv_file
  *               refresh.  A refresh rebuilds the per-volume metadata in the
  *               sh_* shadow arrays (via the w_* write-side pointers) and
  *               commits by pointer swap, so the UI never renders a
- *               half-rebuilt map and a cold multi-second refresh no longer
- *               freezes input.
+ *               half-rebuilt map and a cold multi-second refresh does not
+ *               freeze input.
  * Worker B    : low-latency lane - warms the overlay's 1MB sector read into
  *               the page cache (queue depth 1, stale requests replaced); the
  *               UI then fills the panel from cache without a cold stall.
@@ -9626,9 +9622,8 @@ volmap_overlay (VOLMAP_CTX * ctx, const char *db_name)
   api.login ((ctx->ov_user != NULL) ? ctx->ov_user : "DBA", ctx->ov_passwd);
   if (api.restart ("volmap", 1, db_name) != NO_ERROR)
     {
-      /* Say why.  "no server session" alone reads as "the server is down", which
-         sent people looking in the wrong place when the real answer was that the
-         user has a password: both cases printed the same line. */
+      /* Report the library's own reason: a stopped server and a password-protected
+         user are different failures and must not read the same. */
       const char *why = (api.error_string != NULL) ? api.error_string (-1) : NULL;
 
       if (why != NULL && why[0] != '\0')
@@ -10556,9 +10551,9 @@ volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
  *
  * The engine puts temp volumes in that directory when it is set, falling back to
  * the database directory when it is not (boot_sr.c, unchanged from 10.1 to 11.5).
- * Spill volumes on a separate disk are a common setup, and volmap used to scan
- * only the database directory, so those volumes were silently missing from the
- * map, from BY KIND temp and from --check.
+ * Spill volumes on a separate disk are a common setup, so both directories are
+ * scanned - otherwise those volumes are missing from the map, from BY KIND temp
+ * and from --check.
  *
  * Section precedence follows the engine: [common] first, then [@<db>] overrides
  * it.  The file is $CUBRID_CONF_FILE if set, else $CUBRID/conf/cubrid.conf.
