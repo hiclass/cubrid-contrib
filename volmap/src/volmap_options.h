@@ -100,5 +100,9 @@
 #define VOLMAP_TEMP_PATH_S    10859
 #define VOLMAP_TEMP_PATH_L    "temp-path"
 #endif
+#ifndef VOLMAP_HELP_S
+#define VOLMAP_HELP_S         'h'
+#define VOLMAP_HELP_L         "help"
+#endif
 
 #endif /* _VOLMAP_OPTIONS_H_ */

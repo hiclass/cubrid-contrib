@@ -10607,7 +10607,8 @@ volmap_usage (const char *argv0)
 	   "      --warn-idle=PCT      report volumes whose idle space >= PCT%% as a finding (exit 2)\n"
 	   "      --temp-path=DIR      also scan DIR for temp volumes (default: temp_volume_path\n"
 	   "                           from cubrid.conf, else the database directory)\n"
-	   "  -V, --volume=N[,N...]    show only the given volume ids\n");
+	   "  -V, --volume=N[,N...]    show only the given volume ids\n"
+	   "  -h, --help               show this help\n");
   (void) argv0;
 }
 
@@ -10679,7 +10680,15 @@ volmap (UTIL_FUNCTION_ARG * arg)
   }
   {
     const char *fmt = utility_get_option_string_value (arg_map, VOLMAP_FORMAT_S, 0);
-    ctx.json = (fmt != NULL && strcmp (fmt, "json") == 0);
+
+    if (fmt != NULL && strcmp (fmt, "json") != 0)
+      {
+	/* falling back to text would hand a caller that asked for a machine-readable
+	   document a human one, with a successful exit status */
+	fprintf (stderr, "volmap: unknown --format '%s' (only 'json')\n", fmt);
+	return EXIT_FAILURE;
+      }
+    ctx.json = (fmt != NULL);
   }
   {
     const char *vol_list = utility_get_option_string_value (arg_map, VOLMAP_VOLUME_S, 0);

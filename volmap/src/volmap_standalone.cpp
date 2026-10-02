@@ -53,6 +53,7 @@ static struct
 } vs_opts[VS_MAX_OPTS];
 static int vs_nopts = 0;
 static const char *vs_db_arg = NULL;
+static bool vs_help = false;
 
 static void
 vs_set (int key, const char *sval, INT64 ival, bool bval)
@@ -237,12 +238,13 @@ main (int argc, char **argv)
     {VOLMAP_TICK_L, 1, 0, VOLMAP_TICK_S},
     {VOLMAP_WARN_IDLE_L, 1, 0, VOLMAP_WARN_IDLE_S},
     {VOLMAP_TEMP_PATH_L, 1, 0, VOLMAP_TEMP_PATH_S},
+    {VOLMAP_HELP_L, 0, 0, VOLMAP_HELP_S},
     {0, 0, 0, 0}
   };
   UTIL_FUNCTION_ARG arg;
   int opt;
 
-  while ((opt = getopt_long (argc, argv, "o:w:r:V:B:fim", longopts, NULL)) != -1)
+  while ((opt = getopt_long (argc, argv, "o:w:r:V:B:fimh", longopts, NULL)) != -1)
     {
       switch (opt)
 	{
@@ -259,14 +261,39 @@ main (int argc, char **argv)
 	case VOLMAP_WARN_IDLE_S:
 	  vs_set (opt, NULL, atoll (optarg), false);
 	  break;
+	case '?':
+	  /* getopt_long has already said which option it disliked (unrecognized, or
+	     a missing required argument).  Stopping here matters most for --check
+	     and --warn-idle: running on and exiting 0 would tell a caller that
+	     watches only the exit code that the database passed, when in fact the
+	     requested check never ran. */
+	  fprintf (stderr, "volmap: try --help for the list of options\n");
+	  return EXIT_FAILURE;
+	case VOLMAP_HELP_S:
+	  vs_help = true;
+	  break;
 	default:
 	  vs_set (opt, NULL, 0, true);
 	  break;
 	}
     }
+  if (vs_help)
+    {
+      memset (&arg, 0, sizeof (arg));
+      arg.command_name = "volmap";
+      arg.argv0 = argv[0];
+      (void) volmap (&arg);	/* no database argument: prints usage */
+      return EXIT_SUCCESS;
+    }
   if (optind < argc)
     {
       vs_db_arg = argv[optind];
+    }
+  if (optind + 1 < argc)
+    {
+      /* one database per run; a second one would otherwise be dropped in silence */
+      fprintf (stderr, "volmap: unexpected argument '%s' - one database per run\n", argv[optind + 1]);
+      return EXIT_FAILURE;
     }
 
   memset (&arg, 0, sizeof (arg));

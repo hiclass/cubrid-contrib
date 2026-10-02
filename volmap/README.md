@@ -94,7 +94,20 @@ cub_volmap --check --plain <db>                # 배치: 지도 + 정합성 소�
 cub_volmap -i <db>                             # 인터랙티브
 cub_volmap -i -m --bufmap=/tmp/bcb.dump <db>   # 캐시 + 버퍼풀 중첩
 cub_volmap --check --format=json <db> -o out.json
+cub_volmap --help                              # 옵션 목록
 ```
+
+### 종료 코드
+
+| 코드 | 뜻 |
+|---|---|
+| 0 | 정상 (소견 없음) |
+| 1 | **사용법 오류** — 알 수 없는 옵션, 인자 누락, DB 두 개 지정, `--format` 값 오류 |
+| 2 | `--check` / `--warn-idle` 소견 있음 |
+
+**사용법 오류는 반드시 1로 끝난다.** 오타 난 `--chek` 를 조용히 무시하고 0으로 끝내면,
+종료 코드만 보는 호출자에게 **검사가 통과한 것처럼** 보이기 때문이다 — 실제로는
+요청한 검사가 아예 돌지 않았는데도.
 
 DB 이름 대신 **vinf 경로**를 직접 줄 수 있다. 같은 이름의 DB 가 여러 설치본에 있으면
 `databases.txt` 해석이 의도와 달라질 수 있어, vinf 경로가 모호함이 없다.
