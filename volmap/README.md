@@ -33,8 +33,9 @@ CUBRID 볼륨의 섹터·페이지 배치를 터미널 지도로 보여주는 �
 
 ## 빌드
 
-빌드본(`cub_volmap`, `cub_volmap-dyn`)이 리포에 함께 있으므로 **받아서 바로 쓸 수 있다**.
-직접 빌드하려면 두 가지 방법이 있다.
+**빌드본은 리포에 두지 않는다.** 트리에 있는 바이너리는 어느 커밋·어느 헤더 `REF`·
+어느 툴체인으로 만들어졌는지 확인할 수 없고, 소스를 고쳐도 따라 갱신되지 않으며,
+낡은 것이 남아 있으면 빌드 실패를 가릴 수 있다. 아래 두 방법 중 하나로 빌드한다.
 
 ### ① 소스 체크아웃 없이 — 헤더만 내려받아 빌드 (권장)
 
@@ -73,7 +74,12 @@ SRC=/path/to/cubrid-src bash tools/build_standalone.sh
 | 바이너리 | 크기 | 특성 |
 |---|---:|---|
 | `cub_volmap` | 1.3MB | 완전 정적, 의존 0 — **glibc 버전 요구 없음**(구 배포판 포함 어디서나 실행) |
-| `cub_volmap-dyn` | 0.15MB | glibc 동적 — 런타임 `dlopen`으로 라이브 오버레이(Pass 2) 가능 |
+| `cub_volmap-dyn` | 0.15MB | glibc 동적 — 런타임 `dlopen`으로 라이브 오버레이(Pass 2) 가능. **빌드한 호스트의 glibc 이상이 필요**하다 |
+
+`-dyn` 은 `.symver` 로 구버전 심볼을 고정하지만 `__libc_start_main` 하나는 CRT(`Scrt1.o`)
+참조라 소스에서 바꿀 수 없다. 그래서 glibc 2.34 이상에서 빌드하면 **그보다 낮은 배포판
+(RHEL/Rocky 8 등)에서 실행되지 않는다.** 구버전 환경에는 **정적 빌드(`cub_volmap`)** 를
+쓴다 — glibc 참조가 **0건**이라 어디서든 돈다. 대신 Pass 2(`--overlay`)는 쓸 수 없다.
 
 > 정적 빌드에서 `dlopen`은 쓰지 않는다. 정적 glibc에 공유 glibc가 이중 적재되어 segfault가 난다(`-DVOLMAP_NO_DLOPEN`).
 
