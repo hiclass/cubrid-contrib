@@ -194,7 +194,7 @@ temp 볼륨은 대부분 AREA(작업공간)·QRESULT(정렬 결과)이고, 이�
 
 | 문서 | 내용 |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 2-패스 수집, 3 레인 스레드, 렌더 파이프라인 |
+| [docs/architecture.md](docs/architecture.md) | 데이터 수집, 3 레인 스레드, 렌더 파이프라인 |
 | [docs/views.md](docs/views.md) | 화면 구성과 글리프 문법 |
 | [docs/usage.md](docs/usage.md) | 옵션·키·트러블슈팅 |
 | [docs/build.md](docs/build.md) | 빌드 방법과 버전 호환 |
