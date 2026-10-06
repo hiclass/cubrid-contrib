@@ -9888,7 +9888,7 @@ volmap_json_escape (const char *in, char *out, int outsz)
 static int
 volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 {
-  int nvol_printed = 0, nfile_printed = 0;
+  int nvol_printed = 0;
   FILE *fp = ctx->outfp;
   int vi, fi;
 

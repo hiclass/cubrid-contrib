@@ -32,5 +32,5 @@
 | 입력 응답 | 강제 콜드(90GB): refresh·스캔 중에도 키→프레임 ≤0.1s, 유휴 CPU 0.0%, 랜덤키 소크 10/10 클린 |
 | JSON | `json.load` 파싱 검증, 테이블/인덱스명 해석 포함 |
 | `--bufmap` 정합 | 볼륨별 buf 페이지 수 = cub_top `pgbuf.vol<N>.resident` (cbench 9/9, demodb 5/5 일치). 스냅샷 dirty 55장은 디스크 LSA 대비 전부 unflushed, 다른 db 스냅샷은 거부 |
-| 빌드 | CUBRID 트리 릴리스·디버그 양 모드 + 단독 정적 바이너리. 남은 경고는 경계가 보장된 `snprintf` 절삭 |
+| 빌드 | CUBRID 트리 릴리스·디버그 양 모드 + 단독 정적 바이너리. `-Wall -Wextra` 경고 0 |
 | 버전 호환 빌드 | `build_fetch.sh` 로 **10.2 / 11.0 / 11.2 / 11.3 / 11.4 / develop** 6개 태그 빌드·실행 확인. 헤더 차이 3건(`memory_cwrapper.h` 부재 · lz4/lzo include · `pflag` 필드명)은 자동 처리 — [build.md](build.md) |

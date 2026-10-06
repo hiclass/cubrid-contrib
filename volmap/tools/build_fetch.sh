@@ -249,3 +249,12 @@ fi
 [ -n "$KEEP" ] || rm -rf "$WORK"
 echo "built: $OUT"
 file "$OUT" | cut -c1-100
+
+# Say which of the two it is: the fallback above produces a glibc-dynamic binary
+# at the same path, and that one carries the build host's glibc floor.
+if ldd "$OUT" 2>&1 | grep -q "not a dynamic executable"; then
+  echo "  fully static - no glibc requirement"
+else
+  echo "  glibc-dynamic (glibc-static was unavailable): requires glibc $(objdump -T "$OUT" 2>/dev/null |
+    grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1 | sed 's/GLIBC_//') or newer on the target" >&2
+fi

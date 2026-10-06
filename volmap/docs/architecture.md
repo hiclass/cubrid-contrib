@@ -228,7 +228,7 @@ UI 스레드에서 **레인이 idle 해질 때까지 기다린 뒤** 수행한�
 (`volmap.c`가 cubridcs/cubridsa 양쪽에 컴파일).
 등록 방법은 [integration/cubrid-tree.md](../integration/cubrid-tree.md).
 
-**② 단독 바이너리** — `cub_volmap`. 완전 정적 링크(1.3MB, 동적 의존 0)로
+**② 단독 바이너리** — `cub_volmap`. 정적 링크(1.3MB, `glibc-static` 이 있을 때)로
 어느 리눅스 x86_64에나 파일 하나 복사로 동작한다. CUBRID 미설치 장비·구버전(10.x) 서버·
 백업 볼륨 분석용. `volmap_standalone.cpp`가 프레임워크 심볼(옵션 접근자 4종,
 databases.txt 파서 3종)을 자체 구현해 CUBRID 라이브러리에 전혀 링크하지 않는다.
