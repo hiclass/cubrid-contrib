@@ -73,7 +73,36 @@ src/transaction/ log_lsa.hpp
 
 ## 4. 검증된 버전
 
-전부 빌드하고 실제 볼륨을 열어 동작을 확인했다.
+`tools/check-releases.sh` 가 GitHub Releases API 에서 각 major.minor 의 최신 태그를 읽어
+전부 빌드하고, 온디스크 구조체가 바뀌었는지 함께 본다.
+
+```sh
+sh tools/check-releases.sh              # 구조체 + 빌드
+sh tools/check-releases.sh --structs    # 구조체만 (컴파일러 불요, 수십 초)
+sh tools/check-releases.sh --builds     # 빌드만
+```
+
+| 종료 코드 | 뜻 |
+|---|---|
+| 0 | 이상 없음 |
+| 1 | 빌드 실패 |
+| 2 | **구조체 변화** — 사본·문서 갱신 필요 |
+| 3 | 둘 다 |
+
+**구조체 검사가 따로 있는 이유**: volmap 이 include 할 수 없는 파일
+(`disk_manager.c`·`file_manager.c/h`·`slotted_page.h`)의 구조체는
+`src/storage_ondisk_layout.hpp` 에 사본으로 둔다. 사본은 엔진이 바뀌어도 **컴파일에서
+드러나지 않으므로**, 빌드가 통과해도 오프셋이 어긋난 채 돌 수 있다. 이 검사는 릴리스
+사이의 변화와 **사본 자체의 노후**를 모두 본다.
+
+검출 예 — 11.4 가 `DISK_VOLUME_HEADER` 에 필드를 끼워 넣은 변화:
+
+```
+CHANGED disk_volume_header: v11.3.5.1280 -> v11.4.6.1963
+    +INT64 vol_creation;
+```
+
+아래 표는 그 검사를 통과한 시점의 기록이다.
 
 | 태그 | 빌드 | 실행 | 비고 |
 |---|---|---|---|

@@ -161,11 +161,12 @@ struct spage_header
   int reserved1;
   int flags;			/* Page flags: Always SPAGE_HEADER_FLAG_NONE, not currently used */
   unsigned int is_saving:1;	/* True if saving is need for recovery (undo) */
+  unsigned int need_update_best_hint:1;	/* True if we should update best pages hint for this page */
 
   /* The followings are reserved for future use. */
   /* SPAGE_HEADER should be 8 bytes aligned. Packing of bit fields depends on compiler's behavior. It's better to use
    * 4-bytes type in order not to be affected by the compiler. */
-  unsigned int reserved_bits:31;
+  unsigned int reserved_bits:30;
 };
 
 /* 4-byte disk storage slot design */

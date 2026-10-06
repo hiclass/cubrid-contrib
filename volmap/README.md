@@ -47,7 +47,8 @@ volmap 이 포함하는 헤더 **23개**(+버전에 따라 선택 1개)만 GitHu
 CMake 생성물(`config.h`·`version.h`)은 스크립트가 직접 만든다.
 clone·cmake·빌드 트리 모두 불필요하다.
 
-**검증된 버전** — 전부 빌드·실행 확인:
+**검증된 버전** — 전부 빌드·실행 확인. 목록은 `sh tools/check-releases.sh` 가 GitHub
+Releases 에서 각 major.minor 최신 태그를 읽어 다시 만든다(온디스크 구조체 변화도 함께 본다):
 
 | 태그 | 결과 |
 |---|---|
