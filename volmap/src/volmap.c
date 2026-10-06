@@ -320,11 +320,15 @@ volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
     {
       return false;
     }
-  /* <db>_vinf and <db>_lgat sit side by side */
-  dot = strstr (vinf_path, "_vinf");
-  if (dot == NULL)
+  /* <db>_vinf and <db>_lgat sit side by side.  Replace the suffix of the file
+     name only: searching the whole path would match a directory called e.g.
+     my_vinf_dir and build a path that does not exist, and failing to read the
+     log header means the version is unknown and the 10.2+ page layout assumed. */
+  dot = strrchr (vinf_path, '/');
+  dot = strstr ((dot != NULL) ? dot + 1 : vinf_path, "_vinf");
+  if (dot == NULL || strcmp (dot, "_vinf") != 0)
     {
-      return false;
+      return false;		/* only a trailing _vinf names a volume info file */
     }
   if (snprintf (path, sizeof (path), "%.*s_lgat", (int) (dot - vinf_path), vinf_path) >= (int) sizeof (path))
     {
