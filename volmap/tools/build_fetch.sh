@@ -91,13 +91,29 @@ done
 # 11.5.0), and volmap stringifies them, so quoting them would leave a literal
 # quote in the compared text and no build would ever match.  And the value has to
 # follow REF, or a binary built for one release would claim another's.
+#
+# Only a version tag says which release the headers came from.  A commit SHA or a
+# branch name does not, and naming a version anyway would be a guess: a build from
+# release/10.2 that claimed 11.5.0 would pass the overlay's release check against
+# an 11.5 client library, whose DB_VALUE is 8 bytes larger - the stack overwrite
+# the check exists to prevent.  Those builds get "unknown", which the check cannot
+# parse, so the overlay is skipped and only Pass 2 is lost.
 case "$REF" in
-  v[0-9]*) RV=${REF#v} ;;          # v11.4.6.1963 -> 11.4.6.1963
-  *)       RV=11.5.0 ;;            # develop and other branch names
+  v[0-9]*.[0-9]*) RV=${REF#v} ;;   # v11.4.6.1963 -> 11.4.6.1963
+  *)              RV= ;;           # branch name or commit: release not determinable
 esac
-RV_MAJ=$(echo "$RV" | cut -d. -f1)
-RV_MIN=$(echo "$RV" | cut -d. -f2)
-RV_PAT=$(echo "$RV" | cut -d. -f3); [ -n "$RV_PAT" ] || RV_PAT=0
+if [ -n "$RV" ]; then
+    RV_MAJ=$(echo "$RV" | cut -d. -f1)
+    RV_MIN=$(echo "$RV" | cut -d. -f2)
+    RV_PAT=$(echo "$RV" | cut -d. -f3); [ -n "$RV_PAT" ] || RV_PAT=0
+    RV_REL=$RV_MAJ.$RV_MIN.$RV_PAT
+    echo "release $RV_REL (from REF=$REF) - the live overlay is available"
+else
+    RV_MAJ=0; RV_MIN=0; RV_PAT=0
+    RV_REL=unknown
+    RV=unknown
+    echo "REF=$REF does not name a release - the live overlay (--overlay) will be skipped" >&2
+fi
 mkdir -p "$WORK/gen"
 cat > "$WORK/gen/version.h" <<EOF
 #ifndef _VERSION_H_
@@ -106,8 +122,8 @@ cat > "$WORK/gen/version.h" <<EOF
 #define MINOR_VERSION $RV_MIN
 #define PATCH_VERSION $RV_PAT
 #define EXTRA_VERSION 0
-#define MAJOR_RELEASE_STRING $RV_MAJ.$RV_MIN.$RV_PAT
-#define RELEASE_STRING $RV_MAJ.$RV_MIN.$RV_PAT
+#define MAJOR_RELEASE_STRING $RV_REL
+#define RELEASE_STRING $RV_REL
 #define BUILD_NUMBER "$RV"
 #define BUILD_OS "Linux"
 #define BUILD_TYPE "release"
