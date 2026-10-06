@@ -24,7 +24,6 @@ cub_volmap [옵션] <database-name | vinf-경로>
       --check          무결성 소견(findings) 리포트 — 소견 존재 시 종료코드 2 (CI 연동)
       --format=json    JSON 출력 (volumes/files/findings)
       --full-sweep     파일 자기발견 2차 전 페이지 스윕 (안전망)
-      --no-overlay     Pass 2(서버 오버레이) 생략
       --plain          ANSI 없이 ASCII
       --tick=SEC       인터랙티브 자동 새로고침 주기 (기본 2초)
       --warn-idle=PCT  볼륨 idle 공간이 PCT% 이상이면 소견(finding)으로 보고 — 종료코드 2 (용량 경보)

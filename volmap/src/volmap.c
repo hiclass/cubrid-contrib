@@ -22,12 +22,11 @@
  * Renders an ANSI terminal map of permanent volumes: which file (object) owns each sector, how densely
  * sectors are allocated/used, and how fragmented the free space is.
  *
- * Two-pass design:
- *   Pass 1 reads volume binary files directly using the compiled on-disk layout structures
- *          (storage_ondisk_layout.hpp). It takes no locks, opens no transaction and never contacts
- *          the server process; it works identically whether the database is online or offline.
- *   Pass 2 (optional, skipped on failure or --no-overlay) makes one read-only client session to
- *          report the freshness delta between the on-disk sector counts and the server's live view.
+ * Reads volume binary files directly using the compiled on-disk layout structures
+ * (storage_ondisk_layout.hpp).  It takes no locks, opens no transaction and never
+ * contacts the server process, so it works identically whether the database is
+ * online or offline.  Buffer-pool state, when wanted, comes from a cub_top
+ * --bcb-dump snapshot file (--bufmap), not from the server.
  */
 
 #ident "$Id$"
@@ -64,10 +63,6 @@
 #include "object_representation_constants.h"
 #include "file_io.h"
 #include "storage_ondisk_layout.hpp"
-#include "volmap_glibc_compat.h"
-#if defined (VOLMAP_STANDALONE) && !defined (VOLMAP_NO_DLOPEN)
-#include <dlfcn.h>
-#endif
 #if !defined (VOLMAP_STANDALONE)
 #include "db.h"
 #include "dbtype.h"
@@ -202,12 +197,6 @@ struct volmap_ctx
   bool plain;
   bool deep;
   bool full_sweep;
-  bool no_overlay;
-  /* Pass 2 (live-server overlay) is opt-in: it opens a server session, which the
-     rest of the tool deliberately never does.  --overlay turns it on. */
-  bool overlay;
-  const char *ov_user;		/* --user, default DBA */
-  const char *ov_passwd;	/* --password; NULL = none supplied */
   FILE *outfp;
   /* -V selection, keyed by volid over the engine's whole range.  Sizing this by the
      volume count instead could not hold a temp volume: those are numbered down from
@@ -260,7 +249,6 @@ static void volmap_walk_extdata (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const ch
 				 bool is_partial, int file_idx);
 static void volmap_deep_scan (VOLMAP_CTX * ctx);
 static void volmap_render (VOLMAP_CTX * ctx);
-static void volmap_overlay (VOLMAP_CTX * ctx, const char *db_name);
 static void volmap_usage (const char *argv0);
 
 /* Is this volume selected?  True when -V was not given at all. */
@@ -9387,322 +9375,6 @@ volmap_render (VOLMAP_CTX * ctx)
 
 }
 
-/*
- * volmap_overlay () - Pass 2: one read-only session; report freshness delta between on-disk reserved
- *                     counts and the server's live free counts. Skipped entirely on any failure.
- */
-typedef struct volmap_db_api VOLMAP_DB_API;
-struct volmap_db_api
-{
-  void (*set_client_type) (int);
-  int (*login) (const char *, const char *);
-  int (*restart) (const char *, int, const char *);
-  void *(*open_buffer) (const char *);
-  int (*compile) (void *);
-  int (*execute) (void *, int, void **);
-  int (*first_tuple) (void *);
-  int (*get_tuple_value) (void *, int, DB_VALUE *);
-  int (*query_end) (void *);
-  void (*close_session) (void *);
-  int (*shutdown) (void);
-  DB_TYPE (*value_type) (const DB_VALUE *);
-  int (*get_int) (const DB_VALUE *);
-  const char *(*error_string) (int);	/* may be NULL: not required for the overlay */
-  void *handle;			/* dlopen handle; NULL for the linked build */
-};
-
-#if defined (VOLMAP_STANDALONE) && defined (VOLMAP_NO_DLOPEN)
-/* fully-static build: a static-glibc process cannot safely dlopen the client
- * library (a second, shared glibc would be mapped into the same process -
- * observed segfault), so pass 2 stays compiled out */
-static bool
-volmap_db_api_open (VOLMAP_CTX * ctx, VOLMAP_DB_API * api)
-{
-  (void) api;
-  fprintf (ctx->outfp, "(overlay unavailable in fully-static build - map above is from volume files only)\n");
-  return false;
-}
-
-static void
-volmap_db_api_close (VOLMAP_DB_API * api)
-{
-  (void) api;
-}
-#elif defined (VOLMAP_STANDALONE)
-/* The standalone binary links nothing from CUBRID, but when the machine has a
- * CUBRID installation the client library can be picked up at RUNTIME: dlopen
- * $CUBRID/lib/libcubridcs.so and resolve the db_* entry points by name.  Any
- * failure (no library, symbol mismatch) degrades to "overlay skipped". */
-static bool
-volmap_db_api_open (VOLMAP_CTX * ctx, VOLMAP_DB_API * api)
-{
-  void *h = NULL;
-  const char *cub = getenv ("CUBRID");
-  char path[4096];
-
-  if (cub != NULL)
-    {
-      snprintf (path, sizeof (path), "%s/lib/libcubridcs.so", cub);
-      h = dlopen (path, RTLD_NOW | RTLD_LOCAL);
-    }
-  if (h == NULL)
-    {
-      h = dlopen ("libcubridcs.so", RTLD_NOW | RTLD_LOCAL);
-    }
-  if (h == NULL)
-    {
-      fprintf (ctx->outfp, "(overlay skipped: no cubrid client library - map above is from volume files only)\n");
-      return false;
-    }
-  api->set_client_type = (void (*) (int)) dlsym (h, "db_set_client_type");
-  api->login = (int (*) (const char *, const char *)) dlsym (h, "db_login");
-  api->restart = (int (*) (const char *, int, const char *)) dlsym (h, "db_restart");
-  api->open_buffer = (void *(*) (const char *)) dlsym (h, "db_open_buffer");
-  api->compile = (int (*) (void *)) dlsym (h, "db_compile_statement");
-  api->execute = (int (*) (void *, int, void **)) dlsym (h, "db_execute_statement");
-  api->first_tuple = (int (*) (void *)) dlsym (h, "db_query_first_tuple");
-  api->get_tuple_value = (int (*) (void *, int, DB_VALUE *)) dlsym (h, "db_query_get_tuple_value");
-  api->query_end = (int (*) (void *)) dlsym (h, "db_query_end");
-  api->close_session = (void (*) (void *)) dlsym (h, "db_close_session");
-  api->shutdown = (int (*) (void)) dlsym (h, "db_shutdown");
-  api->value_type = (DB_TYPE (*) (const DB_VALUE *)) dlsym (h, "db_value_type");
-  api->get_int = (int (*) (const DB_VALUE *)) dlsym (h, "db_get_int");
-  /* optional: only used to say WHY a session could not be opened */
-  api->error_string = (const char *(*)(int)) dlsym (h, "db_error_string");
-  api->handle = h;
-  if (api->set_client_type == NULL || api->login == NULL || api->restart == NULL || api->open_buffer == NULL
-      || api->compile == NULL || api->execute == NULL || api->first_tuple == NULL || api->get_tuple_value == NULL
-      || api->query_end == NULL || api->close_session == NULL || api->shutdown == NULL || api->value_type == NULL
-      || api->get_int == NULL)
-    {
-      dlclose (h);
-      fprintf (ctx->outfp, "(overlay skipped: cubrid client library has unexpected symbols)\n");
-      return false;
-    }
-
-  /* The symbols existing says nothing about the layout behind them.  Pass 2 hands
-     db_query_get_tuple_value a DB_VALUE on this function's stack, sized by the
-     headers this binary was built against, and the library writes through that
-     pointer - so a library from another release can write past the end of it.
-     DB_VALUE is 64 bytes up to 11.0 and 72 from 11.3 (DB_RESULTSET widened to
-     uint64_t and a length field was added), so a 10.2-built binary under an 11.3+
-     installation is an 8-byte stack overwrite, and the reverse misreads the value.
-     The major release must therefore match; mismatches skip the overlay, which is
-     only an optimisation over reading the volume files. */
-  {
-    /* version.h defines MAJOR_RELEASE_STRING unquoted (11.5.0), so it is stringified
-       here rather than used directly. */
-#define VM_STR2(x) #x
-#define VM_STR(x)  VM_STR2 (x)
-    static const char built_rel[] = VM_STR (MAJOR_RELEASE_STRING);
-    const char *(*relf) (void) = (const char *(*)(void)) dlsym (h, "_Z24rel_major_release_stringv");
-    const char *lib_rel = (relf != NULL) ? relf () : NULL;
-    int lib_maj = 0, lib_min = 0, our_maj = 0, our_min = 0;
-
-    /* Compare major.minor only.  What the two releases call "major" is not spelled
-       the same way - 10.2 reports "10.2" where 11.5 reports "11.5.0" - and it is
-       major.minor that decides the layout anyway (the 64 -> 72 byte change landed
-       in 11.3). */
-    if (lib_rel != NULL && sscanf (lib_rel, "%d.%d", &lib_maj, &lib_min) == 2
-	&& sscanf (built_rel, "%d.%d", &our_maj, &our_min) == 2
-	&& lib_maj == our_maj && lib_min == our_min)
-      {
-	/* same release line: the layout the headers describe is the one in the
-	   library, so Pass 2 may use it */
-      }
-    else
-      {
-	fprintf (ctx->outfp, "(overlay skipped: client library is %s, this build is %s - "
-		 "DB_VALUE layout may differ)\n", (lib_rel != NULL) ? lib_rel : "an unknown release", built_rel);
-	dlclose (h);
-	api->handle = NULL;
-	return false;
-      }
-#undef VM_STR
-#undef VM_STR2
-  }
-  return true;
-}
-
-static void
-volmap_db_api_close (VOLMAP_DB_API * api)
-{
-  if (api->handle != NULL)
-    {
-      dlclose (api->handle);
-    }
-}
-#else /* !VOLMAP_STANDALONE */
-/* linked build: thunks adapt the typed db_* API to the generic table */
-static void *
-vm_db_open_buffer (const char *sql)
-{
-  return (void *) db_open_buffer (sql);
-}
-
-static int
-vm_db_compile (void *session)
-{
-  return db_compile_statement ((DB_SESSION *) session);
-}
-
-static int
-vm_db_execute (void *session, int stmt_id, void **result)
-{
-  return db_execute_statement ((DB_SESSION *) session, stmt_id, (DB_QUERY_RESULT **) result);
-}
-
-static int
-vm_db_first_tuple (void *result)
-{
-  return db_query_first_tuple ((DB_QUERY_RESULT *) result);
-}
-
-static int
-vm_db_get_tuple_value (void *result, int index, DB_VALUE * value)
-{
-  return db_query_get_tuple_value ((DB_QUERY_RESULT *) result, index, value);
-}
-
-static int
-vm_db_query_end (void *result)
-{
-  return db_query_end ((DB_QUERY_RESULT *) result);
-}
-
-static void
-vm_db_close_session (void *session)
-{
-  db_close_session ((DB_SESSION *) session);
-}
-
-static DB_TYPE
-vm_db_value_type (const DB_VALUE * value)
-{
-  return DB_VALUE_TYPE (value);
-}
-
-static bool
-volmap_db_api_open (VOLMAP_CTX * ctx, VOLMAP_DB_API * api)
-{
-  (void) ctx;
-  api->set_client_type = db_set_client_type;
-  api->login = db_login;
-  api->restart = db_restart;
-  api->open_buffer = vm_db_open_buffer;
-  api->compile = vm_db_compile;
-  api->execute = vm_db_execute;
-  api->first_tuple = vm_db_first_tuple;
-  api->get_tuple_value = vm_db_get_tuple_value;
-  api->query_end = vm_db_query_end;
-  api->close_session = vm_db_close_session;
-  api->shutdown = db_shutdown;
-  api->value_type = vm_db_value_type;
-  api->get_int = db_get_int;
-  api->error_string = db_error_string;
-  api->handle = NULL;
-  return true;
-}
-
-static void
-volmap_db_api_close (VOLMAP_DB_API * api)
-{
-  (void) api;
-}
-#endif /* !VOLMAP_STANDALONE */
-
-/* pass 2 body shared by every build configuration */
-static void
-volmap_overlay (VOLMAP_CTX * ctx, const char *db_name)
-{
-  VOLMAP_DB_API api;
-
-  memset (&api, 0, sizeof (api));
-  if (!volmap_db_api_open (ctx, &api))
-    {
-      return;
-    }
-  api.set_client_type (7);	/* DB_CLIENT_TYPE_ADMIN_UTILITY (db_client_type.hpp) */
-  api.login ((ctx->ov_user != NULL) ? ctx->ov_user : "DBA", ctx->ov_passwd);
-  if (api.restart ("volmap", 1, db_name) != NO_ERROR)
-    {
-      /* Report the library's own reason: a stopped server and a password-protected
-         user are different failures and must not read the same. */
-      const char *why = (api.error_string != NULL) ? api.error_string (-1) : NULL;
-
-      if (why != NULL && why[0] != '\0')
-	{
-	  fprintf (ctx->outfp, "(overlay skipped: %s", why);
-	  /* only hint at credentials when that is actually what failed - suggesting
-	     a password while the server is down sends people the wrong way */
-	  if (ctx->ov_passwd == NULL && strstr (why, "password") != NULL)
-	    {
-	      fprintf (ctx->outfp, " - pass --password for %s", (ctx->ov_user != NULL) ? ctx->ov_user : "DBA");
-	    }
-	  fprintf (ctx->outfp, ")\n");
-	}
-      else
-	{
-	  fprintf (ctx->outfp, "(overlay skipped: no server session - map above is from volume files only)\n");
-	}
-      volmap_db_api_close (&api);
-      return;
-    }
-  fprintf (ctx->outfp, "%sOVERLAY (live server)%s  delta 0 = the on-disk map above matches the running server\n",
-	   ctx->plain ? "" : VM_BOLD, ctx->plain ? "" : VM_RESET);
-  {
-    int vi;
-
-    for (vi = 0; vi < ctx->nvols; vi++)
-      {
-	VOLMAP_VOLUME *vol = &ctx->vols[vi];
-	char sql[128];
-	void *session;
-	void *result = NULL;
-	int stmt_id;
-
-	if (!volmap_vol_selected (ctx, vol->volid))
-	  {
-	    continue;
-	  }
-	snprintf (sql, sizeof (sql), "show volume header of %d", (int) vol->volid);
-	session = api.open_buffer (sql);
-	if (session == NULL)
-	  {
-	    continue;
-	  }
-	stmt_id = api.compile (session);
-	if (stmt_id > 0 && api.execute (session, stmt_id, &result) >= 0 && result != NULL
-	    && api.first_tuple (result) == DB_CURSOR_SUCCESS)
-	  {
-	    DB_VALUE value;
-
-	    /* column 7 = Num_free_sectors (metadata_of_volume_header, show_meta.c) */
-	    if (api.get_tuple_value (result, 7, &value) == NO_ERROR && api.value_type (&value) == DB_TYPE_INTEGER)
-	      {
-		long long live_free_sect = api.get_int (&value);
-		long res = 0;
-		DKNSECTS s;
-
-		for (s = 0; s < vol->nsect_total; s++)
-		  {
-		    res += vol->stab[s];
-		  }
-		fprintf (ctx->outfp, "  [%3d] live free %lld sectors vs on-disk free %lld sectors (delta %lld)\n",
-			 vol->volid, live_free_sect, (long long) vol->nsect_total - res,
-			 (long long) vol->nsect_total - res - live_free_sect);
-	      }
-	  }
-	if (result != NULL)
-	  {
-	    api.query_end (result);
-	  }
-	api.close_session (session);
-      }
-  }
-  (void) api.shutdown ();
-  volmap_db_api_close (&api);
-}
 
 
 /* --check: integrity findings gathered from what pass 1 already knows */
@@ -10767,12 +10439,6 @@ volmap_usage (const char *argv0)
 	   "      --format=json        machine-readable output (volumes, files, findings)\n"
 	   "      --deep               full scan: record density + forwarding ratio\n"
 	   "      --full-sweep         probe every page of unowned sectors\n"
-	   "      --overlay            Pass 2: open a read-only server session and report the\n"
-	   "                           live-vs-on-disk delta (off by default: everything else\n"
-	   "                           here reads the volume files and never contacts the server)\n"
-	   "  -u, --user=NAME          user for --overlay (default DBA)\n"
-	   "      --password=PASS      password for --overlay\n"
-	   "      --no-overlay         skip the live-server overlay pass\n"
 	   "      --plain              ASCII output without ANSI colors\n"
 	   "      --tick=SEC           interactive auto-refresh period in seconds (default 2)\n"
 	   "      --warn-idle=PCT      report volumes whose idle space >= PCT%% as a finding (exit 2)\n"
@@ -10814,16 +10480,9 @@ volmap (UTIL_FUNCTION_ARG * arg)
   ctx.rows = utility_get_option_int_value (arg_map, VOLMAP_ROWS_S);
   ctx.deep = utility_get_option_bool_value (arg_map, VOLMAP_DEEP_S);
   ctx.full_sweep = utility_get_option_bool_value (arg_map, VOLMAP_FULL_SWEEP_S);
-  ctx.no_overlay = utility_get_option_bool_value (arg_map, VOLMAP_NO_OVERLAY_S);
-  ctx.overlay = utility_get_option_bool_value (arg_map, VOLMAP_OVERLAY_S);
-  ctx.ov_user = utility_get_option_string_value (arg_map, VOLMAP_USER_S, 0);
-  ctx.ov_passwd = utility_get_option_string_value (arg_map, VOLMAP_PASSWORD_S, 0);
-  if (!ctx.overlay && (ctx.ov_user != NULL || ctx.ov_passwd != NULL))
-    {
-      /* credentials without --overlay would be silently unused */
-      fprintf (stderr, "volmap: --user/--password apply to --overlay, which was not given\n");
-      return EXIT_FAILURE;
-    }
+  /* --no-overlay is still accepted and ignored: the live overlay was removed, and
+     refusing the flag would break command lines that carry it. */
+  (void) utility_get_option_bool_value (arg_map, VOLMAP_NO_OVERLAY_S);
   ctx.plain = utility_get_option_bool_value (arg_map, VOLMAP_PLAIN_S);
   ctx.full = utility_get_option_bool_value (arg_map, VOLMAP_FULL_S);
   ctx.interactive = utility_get_option_bool_value (arg_map, VOLMAP_INTERACTIVE_S);
@@ -11011,13 +10670,6 @@ volmap (UTIL_FUNCTION_ARG * arg)
 	    }
 	}
 
-      /* Pass 2 — optional live overlay */
-      /* --no-overlay is kept so existing invocations do not break, but the overlay
-         is off unless asked for: it is the one thing here that touches the server. */
-      if (ctx.overlay && !ctx.no_overlay && strstr (db_name, "_vinf") == NULL)
-	{
-	  volmap_overlay (&ctx, db_name);
-	}
     }
 
   for (vi = 0; vi < ctx.nvols; vi++)

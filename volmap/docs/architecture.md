@@ -14,10 +14,10 @@ volmap은 운영 중인 데이터베이스에 어떤 형태의 부담도 주지 
 | 자기검증 3중 | 볼륨 magic / FILE_HEADER self VFID / 페이지 prv.pageid — 불일치 항목은 폐기 (틀린 지도를 그리지 않음) |
 
 기동 중 DB에도, 정지된 DB에도 동일하게 동작한다 (CS/SA 모드 구분 자체가 없음).
-기동 중에는 더티 페이지 미반영분이 존재할 수 있으며, 선택적 Pass 2(오버레이)가 서버의
-실시간 빈 섹터 수와의 차이(Δ)를 보고해 신선도를 표시한다.
+기동 중에는 더티 페이지 미반영분이 존재할 수 있다. 그 차이를 보려면 `cub_top --bcb-dump`
+스냅샷을 `--bufmap` 으로 겹쳐 본다 — 페이지 단위 상주·더티와 LSA 비교까지 나온다.
 
-## 2. 2-패스 데이터 흐름
+## 2. 데이터 흐름
 
 ```
 Pass 1 — 볼륨 바이너리 직접 해석 (서버 호출 0, 항상 실행)
@@ -38,10 +38,6 @@ Pass 1 — 볼륨 바이너리 직접 해석 (서버 호출 0, 항상 실행)
   -B: cub_top --bcb-dump 스냅샷(CBCBMAP1) → 볼륨별 페이지 배열(0/clean/dirty) + 접두합 → 셀 배경 층,
       (volid,pageid) 정렬 배열 → 페이지 박스에서 메모리 LSA vs 디스크 prv.lsa 비교
 
-Pass 2 — 서버 오버레이 (선택, 서버 부재·실패 시 자동 생략)
-  db_restart 1회 → SHOW VOLUME HEADER → 볼륨별 live free vs on-disk free Δ
-  **배치 텍스트 출력에서만 실행** — -i(인터랙티브)·--json 경로에는 호출이 없다
-  완전 정적 빌드는 컴파일 단계에서 제외(-DVOLMAP_NO_DLOPEN); cub_volmap-dyn 은 수행
 ```
 
 핵심 아이디어는 **파일 자기발견(self-discovery)** 이다. 서버·카탈로그·csql에 묻지 않고
@@ -229,7 +225,7 @@ UI 스레드에서 **레인이 idle 해질 때까지 기다린 뒤** 수행한�
 **유지관리 대상은 ② 단독 바이너리다.** ①은 트리 통합 시의 참고 형태로 남긴다.
 
 **① 정식 유틸리티** — `cubrid volmap`. 기존 `cub_admin` dlopen 관례를 따르며
-(`volmap.c`가 cubridcs/cubridsa 양쪽에 컴파일), Pass 2 오버레이를 포함한다.
+(`volmap.c`가 cubridcs/cubridsa 양쪽에 컴파일).
 등록 방법은 [integration/cubrid-tree.md](../integration/cubrid-tree.md).
 
 **② 단독 바이너리** — `cub_volmap`. 완전 정적 링크(1.3MB, 동적 의존 0)로
@@ -237,9 +233,3 @@ UI 스레드에서 **레인이 idle 해질 때까지 기다린 뒤** 수행한�
 백업 볼륨 분석용. `volmap_standalone.cpp`가 프레임워크 심볼(옵션 접근자 4종,
 databases.txt 파서 3종)을 자체 구현해 CUBRID 라이브러리에 전혀 링크하지 않는다.
 
-**②-dyn 오버레이 가능형** — `cub_volmap-dyn` (glibc만 동적). 링크 타임 CUBRID
-의존은 동일하게 0이지만, 실행 시 `$CUBRID/lib/libcubridcs.so`를 **dlopen으로 발견하면**
-db_* 진입점 13개를 dlsym으로 해석해 Pass 2(라이브 서버 Δ 오버레이)를 트리 유틸리티와
-동일하게 수행한다. 라이브러리·서버가 없으면 "overlay skipped"로 조용히 강등된다.
-완전 정적 빌드에서는 dlopen을 컴파일 타임에 배제한다(-DVOLMAP_NO_DLOPEN) — 정적 glibc
-프로세스에 공유 glibc가 이중 적재되며 segfault함을 실측으로 확인했기 때문이다.

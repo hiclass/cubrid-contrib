@@ -83,26 +83,10 @@ for h in $HEADERS_OPTIONAL; do
 done
 
 # config.h and version.h are produced by CMake, not stored in the repository.
-# volmap needs only the feature-test macros below, plus the release strings: the
-# overlay compares MAJOR_RELEASE_STRING against the release the client library
-# reports, and skips Pass 2 when they differ.
-#
-# Two things matter here.  CMake writes these unquoted (MAJOR_RELEASE_STRING
-# 11.5.0), and volmap stringifies them, so quoting them would leave a literal
-# quote in the compared text and no build would ever match.  And the value has to
-# follow REF, or a binary built for one release would claim another's.
-#
-# Only a version tag says which release the headers came from.  A commit SHA or a
-# branch name does not, and naming a version anyway would be a guess: a build from
-# release/10.2 that claimed 11.5.0 would pass the overlay's release check against
-# an 11.5 client library, whose DB_VALUE is 8 bytes larger - the stack overwrite
-# the check exists to prevent.  Those builds get "unknown", which the check cannot
-# parse, so the overlay is skipped and only Pass 2 is lost.
-#
-# Both compile paths below pass -DVOLMAP_NO_DLOPEN, so binaries from this script
-# have no overlay in the first place; the release string matters for a build made
-# from these headers by other means.  Build with tools/build_standalone.sh against
-# a source checkout for a binary that can run Pass 2.
+# volmap needs only the feature-test macros below.  The release strings are
+# recorded for reference: a version tag names the release the headers came from,
+# a commit SHA or branch name does not, so those get "unknown" rather than a
+# guess that would misstate which headers the binary was built against.
 case "$REF" in
   v[0-9]*.[0-9]*) RV=${REF#v} ;;   # v11.4.6.1963 -> 11.4.6.1963
   *)              RV= ;;           # branch name or commit: release not determinable
@@ -236,21 +220,6 @@ INC="-I$SELF/../src -I$WORK/gen -I$WORK/stub -I$WORK/include \
  -I$WORK/src/executables -I$WORK/src/thread -I$WORK/src/transaction"
 
 echo "compiling"
-# glibc 2.34 merged libdl/libpthread into libc and re-versioned the symbols that
-# moved, so a build there records GLIBC_2.34 and will not start on anything older.
-# The old versions are still in the same libc, so on 2.34+ we ask for them
-# explicitly (src/volmap_glibc_compat.h) and the result runs on both.
-GLIBC_COMPAT=""
-if [ "$(uname -m)" = "x86_64" ]; then
-  gv=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)
-  if [ -n "$gv" ]; then
-    gmaj=${gv%%.*}; gmin=${gv##*.}
-    if [ "$gmaj" -gt 2 ] 2>/dev/null || { [ "$gmaj" -eq 2 ] && [ "$gmin" -ge 34 ]; } 2>/dev/null; then
-      GLIBC_COMPAT="-DVOLMAP_GLIBC_COMPAT"
-      echo "glibc $gv - pinning old symbol versions (runs on glibc 2.11+)"
-    fi
-  fi
-fi
 
 # Compile through a log instead of a pipe: a pipeline reports grep's status, and the
 # "|| true" that silences grep would swallow a compiler failure too.  The old binary
@@ -258,14 +227,14 @@ fi
 # failed build reported as "built".
 rm -f "$OUT"
 LOG="$WORK/build.log"
-if g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
+if g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE $COMPAT $INC \
      "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
      -static-libstdc++ -static-libgcc -static -o "$OUT" >"$LOG" 2>&1; then
   :                             # built; warnings stay in the log
 else
   echo "full-static unavailable - retrying with glibc dynamic" >&2
   rm -f "$OUT"
-  if ! g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE -DVOLMAP_NO_DLOPEN $COMPAT $GLIBC_COMPAT $INC \
+  if ! g++ -x c++ -std=gnu++17 -O2 -Wall -Wextra -DNDEBUG -DVOLMAP_STANDALONE $COMPAT $INC \
        "$SELF/../src/volmap.c" "$SELF/../src/volmap_standalone.cpp" \
        -static-libstdc++ -static-libgcc -o "$OUT" >"$LOG" 2>&1; then
     cat "$LOG" >&2
@@ -280,5 +249,3 @@ fi
 [ -n "$KEEP" ] || rm -rf "$WORK"
 echo "built: $OUT"
 file "$OUT" | cut -c1-100
-echo "  no live overlay in this build (--overlay): built with -DVOLMAP_NO_DLOPEN."
-echo "  for Pass 2, build with tools/build_standalone.sh against a source checkout."

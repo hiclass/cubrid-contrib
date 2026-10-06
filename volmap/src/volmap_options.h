@@ -104,17 +104,5 @@
 #define VOLMAP_HELP_S         'h'
 #define VOLMAP_HELP_L         "help"
 #endif
-#ifndef VOLMAP_OVERLAY_S
-#define VOLMAP_OVERLAY_S      10860
-#define VOLMAP_OVERLAY_L      "overlay"
-#endif
-#ifndef VOLMAP_USER_S
-#define VOLMAP_USER_S         'u'
-#define VOLMAP_USER_L         "user"
-#endif
-#ifndef VOLMAP_PASSWORD_S
-#define VOLMAP_PASSWORD_S     10861
-#define VOLMAP_PASSWORD_L     "password"
-#endif
 
 #endif /* _VOLMAP_OPTIONS_H_ */

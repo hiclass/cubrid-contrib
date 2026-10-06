@@ -21,9 +21,8 @@
  *
  * Reuses volmap.c verbatim (compiled and linked together) but provides tiny local
  * implementations of the handful of framework symbols it needs, so the result links
- * against NOTHING from the CUBRID libraries. Pass 1 (direct volume-file analysis)
- * works on any 10.0+ volume; Pass 2 (live-server overlay) is stubbed out and always
- * reports "overlay skipped", exactly like running against a stopped database.
+ * against NOTHING from the CUBRID libraries.  Direct volume-file analysis works on
+ * any 10.1+ volume, online or offline.
  *
  * Build (see tools/build_standalone.sh):
  *   g++ -std=gnu++17 -O2 -static volmap.c volmap_standalone.cpp -o volmap ...
@@ -239,15 +238,12 @@ main (int argc, char **argv)
     {VOLMAP_WARN_IDLE_L, 1, 0, VOLMAP_WARN_IDLE_S},
     {VOLMAP_TEMP_PATH_L, 1, 0, VOLMAP_TEMP_PATH_S},
     {VOLMAP_HELP_L, 0, 0, VOLMAP_HELP_S},
-    {VOLMAP_OVERLAY_L, 0, 0, VOLMAP_OVERLAY_S},
-    {VOLMAP_USER_L, 1, 0, VOLMAP_USER_S},
-    {VOLMAP_PASSWORD_L, 1, 0, VOLMAP_PASSWORD_S},
     {0, 0, 0, 0}
   };
   UTIL_FUNCTION_ARG arg;
   int opt;
 
-  while ((opt = getopt_long (argc, argv, "o:w:r:V:B:u:fimh", longopts, NULL)) != -1)
+  while ((opt = getopt_long (argc, argv, "o:w:r:V:B:fimh", longopts, NULL)) != -1)
     {
       switch (opt)
 	{
@@ -256,8 +252,6 @@ main (int argc, char **argv)
 	case VOLMAP_FORMAT_S:
 	case VOLMAP_BUFMAP_S:
 	case VOLMAP_TEMP_PATH_S:
-	case VOLMAP_USER_S:
-	case VOLMAP_PASSWORD_S:
 	  vs_set (opt, optarg, 0, false);
 	  break;
 	case VOLMAP_WIDTH_S:

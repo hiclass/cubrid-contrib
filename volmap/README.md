@@ -71,37 +71,16 @@ SRC=/path/to/cubrid-src bash tools/build_standalone.sh
 
 ### 산출물
 
-| 바이너리 | 크기 | 특성 |
-|---|---:|---|
-| `cub_volmap` | 1.3MB | 완전 정적, 의존 0 — **glibc 버전 요구 없음**(구 배포판 포함 어디서나 실행) |
-| `cub_volmap-dyn` | 0.15MB | glibc 동적 — 런타임 `dlopen`으로 라이브 오버레이(Pass 2) 가능. **빌드한 호스트의 glibc 이상이 필요**하다 |
+산출물은 **완전 정적 바이너리 하나**(`cub_volmap`, 1.3MB)다. glibc 참조가 **0건**이라
+구 배포판을 포함해 어디서든 돈다.
 
-`-dyn` 은 `.symver` 로 구버전 심볼을 고정하지만 `__libc_start_main` 하나는 CRT(`Scrt1.o`)
-참조라 소스에서 바꿀 수 없다. 그래서 glibc 2.34 이상에서 빌드하면 **그보다 낮은 배포판
-(RHEL/Rocky 8 등)에서 실행되지 않는다.** 구버전 환경에는 **정적 빌드(`cub_volmap`)** 를
-쓴다 — glibc 참조가 **0건**이라 어디서든 돈다. 대신 Pass 2(`--overlay`)는 쓸 수 없다.
+커널 하한은 빌드 호스트의 glibc 가 정한다(`readelf -n` 의 `NT_GNU_ABI_TAG`). 이 호스트에서
+빌드하면 **커널 3.2 이상**을 요구하므로, RHEL 6(커널 2.6.32) 같은 더 낮은 환경이 대상이면
+**그 장비에서 직접 빌드**한다 — C++17 컴파일러(GCC 7+, RHEL 6 은 devtoolset)가 필요하다.
 
-> 정적 빌드에서 `dlopen`은 쓰지 않는다. 정적 glibc에 공유 glibc가 이중 적재되어 segfault가 난다(`-DVOLMAP_NO_DLOPEN`).
-
-> **Pass 2 는 기본 off 다.** 이 도구의 나머지 전부는 볼륨 파일만 읽고 서버에 접속하지
-> 않는데, Pass 2 만 **서버 세션을 연다**(트랜잭션 인덱스 할당 등). 그래서 `--overlay` 로
-> 명시할 때만 실행한다 — 기본 실행은 `connect()` 호출이 **0건**임을 strace 로 확인했다.
->
-> | 옵션 | 뜻 |
-> |---|---|
-> | `--overlay` | Pass 2 실행 (서버 접속) |
-> | `-u, --user=NAME` | 접속 사용자 (기본 DBA) |
-> | `--password=PASS` | 비밀번호 |
->
-> 실패 사유는 `db_error_string()` 으로 구분해 출력한다 — 서버 정지와 비밀번호 오류는
-> 다른 문구로 나온다.
-
-> **Pass 2 는 빌드 버전과 같은 릴리스에서만 동작한다.** `dlopen` 한 `libcubridcs.so` 의
-> `rel_major_release_string()` 을 읽어 major.minor 가 다르면 오버레이를 생략한다.
-> Pass 2 는 **이 바이너리 스택의 `DB_VALUE`** 를 라이브러리에 넘기는데, 그 크기가
-> 버전마다 다르기 때문이다 — **11.0 까지 64B, 11.3 부터 72B**(`DB_RESULTSET` 이
-> `uint64_t` 로 넓어지고 length 필드 추가). 10.2 로 빌드한 바이너리를 11.3+ 설치본에서
-> 돌리면 **스택 8바이트를 넘겨 쓴다.** 생략해도 지도·요약은 볼륨 파일만으로 완전하다.
+> **서버에 접속하지 않는다.** 볼륨 파일만 `O_RDONLY` 로 읽는다. 버퍼풀 상태가 필요하면
+> `cub_top --bcb-dump` 가 떠낸 **스냅샷 파일**을 `--bufmap` 으로 읽는다 — 이때도 서버에는
+> 붙지 않는다. `--no-overlay` 는 예전 명령줄 호환을 위해 받아주기만 하고 아무 일도 하지 않는다.
 
 ### 구버전 호환 (build_fetch.sh 가 자동 처리)
 
