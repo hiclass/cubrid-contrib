@@ -83,24 +83,37 @@ for h in $HEADERS_OPTIONAL; do
 done
 
 # config.h and version.h are produced by CMake, not stored in the repository.
-# volmap needs only the feature-test macros below; the version strings are not
-# used by volmap at all, so nominal values are enough.
+# volmap needs only the feature-test macros below, plus the release strings: the
+# overlay compares MAJOR_RELEASE_STRING against the release the client library
+# reports, and skips Pass 2 when they differ.
+#
+# Two things matter here.  CMake writes these unquoted (MAJOR_RELEASE_STRING
+# 11.5.0), and volmap stringifies them, so quoting them would leave a literal
+# quote in the compared text and no build would ever match.  And the value has to
+# follow REF, or a binary built for one release would claim another's.
+case "$REF" in
+  v[0-9]*) RV=${REF#v} ;;          # v11.4.6.1963 -> 11.4.6.1963
+  *)       RV=11.5.0 ;;            # develop and other branch names
+esac
+RV_MAJ=$(echo "$RV" | cut -d. -f1)
+RV_MIN=$(echo "$RV" | cut -d. -f2)
+RV_PAT=$(echo "$RV" | cut -d. -f3); [ -n "$RV_PAT" ] || RV_PAT=0
 mkdir -p "$WORK/gen"
-cat > "$WORK/gen/version.h" <<'EOF'
+cat > "$WORK/gen/version.h" <<EOF
 #ifndef _VERSION_H_
 #define _VERSION_H_
-#define MAJOR_VERSION 11
-#define MINOR_VERSION 5
-#define PATCH_VERSION 0
+#define MAJOR_VERSION $RV_MAJ
+#define MINOR_VERSION $RV_MIN
+#define PATCH_VERSION $RV_PAT
 #define EXTRA_VERSION 0
-#define MAJOR_RELEASE_STRING "11.5"
-#define RELEASE_STRING "11.5.0"
-#define BUILD_NUMBER "11.5.0.0"
+#define MAJOR_RELEASE_STRING $RV_MAJ.$RV_MIN.$RV_PAT
+#define RELEASE_STRING $RV_MAJ.$RV_MIN.$RV_PAT
+#define BUILD_NUMBER "$RV"
 #define BUILD_OS "Linux"
 #define BUILD_TYPE "release"
-#define PACKAGE_STRING "CUBRID 11.5.0"
-#define PRODUCT_STRING "11.5.0"
-#define VERSION_STRING "11.5.0.0-standalone"
+#define PACKAGE_STRING "CUBRID $RV"
+#define PRODUCT_STRING "$RV"
+#define VERSION_STRING "$RV-standalone"
 #endif
 EOF
 
