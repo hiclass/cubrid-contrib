@@ -98,6 +98,11 @@ done
 # an 11.5 client library, whose DB_VALUE is 8 bytes larger - the stack overwrite
 # the check exists to prevent.  Those builds get "unknown", which the check cannot
 # parse, so the overlay is skipped and only Pass 2 is lost.
+#
+# Both compile paths below pass -DVOLMAP_NO_DLOPEN, so binaries from this script
+# have no overlay in the first place; the release string matters for a build made
+# from these headers by other means.  Build with tools/build_standalone.sh against
+# a source checkout for a binary that can run Pass 2.
 case "$REF" in
   v[0-9]*.[0-9]*) RV=${REF#v} ;;   # v11.4.6.1963 -> 11.4.6.1963
   *)              RV= ;;           # branch name or commit: release not determinable
@@ -107,12 +112,12 @@ if [ -n "$RV" ]; then
     RV_MIN=$(echo "$RV" | cut -d. -f2)
     RV_PAT=$(echo "$RV" | cut -d. -f3); [ -n "$RV_PAT" ] || RV_PAT=0
     RV_REL=$RV_MAJ.$RV_MIN.$RV_PAT
-    echo "release $RV_REL (from REF=$REF) - the live overlay is available"
+    echo "release $RV_REL (from REF=$REF)"
 else
     RV_MAJ=0; RV_MIN=0; RV_PAT=0
     RV_REL=unknown
     RV=unknown
-    echo "REF=$REF does not name a release - the live overlay (--overlay) will be skipped" >&2
+    echo "REF=$REF does not name a release - recording the version as unknown" >&2
 fi
 mkdir -p "$WORK/gen"
 cat > "$WORK/gen/version.h" <<EOF
@@ -275,3 +280,5 @@ fi
 [ -n "$KEEP" ] || rm -rf "$WORK"
 echo "built: $OUT"
 file "$OUT" | cut -c1-100
+echo "  no live overlay in this build (--overlay): built with -DVOLMAP_NO_DLOPEN."
+echo "  for Pass 2, build with tools/build_standalone.sh against a source checkout."
