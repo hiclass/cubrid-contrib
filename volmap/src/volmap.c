@@ -957,13 +957,9 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
     }
   if (ctx->nvols >= ctx->nvols_alloc)
     {
-      /* Grow on demand.  A well-kept database has a handful of volumes and a
-         neglected one can have thousands, so neither a small fixed array nor a
-         large one is right: this costs ~300 bytes per volume that actually exists.
-         Only two places add volumes - the initial load, which runs before the
-         worker threads start, and the [r] rescan, which already holds both lanes
-         idle behind the list_frozen barrier because it memmoves this same array.
-         So nothing can be holding a VOLMAP_VOLUME * across this realloc. */
+      /* Grow on demand: ~300 bytes per volume that exists.  Volumes are added only
+         by the initial load (before the worker threads start) and by the [r] rescan
+         (behind the list_frozen barrier), so no lane holds a VOLMAP_VOLUME * here. */
       int want = (ctx->nvols_alloc > 0) ? ctx->nvols_alloc * 2 : 16;
       VOLMAP_VOLUME *grown;
 
@@ -980,10 +976,8 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
       memset (grown + ctx->nvols_alloc, 0, (size_t) (want - ctx->nvols_alloc) * sizeof (*grown));
       if (grown != ctx->vols)
 	{
-	  /* The LRU fd cache holds VOLMAP_VOLUME pointers across calls, so a move
-	     leaves it pointing into freed memory - caught by ASan as a use-after-free
-	     the first time a cached volume was read again.  Rebase the entries that
-	     refer to this array; any others (there are none today) are dropped. */
+	  /* The LRU fd cache holds VOLMAP_VOLUME pointers across calls: rebase the
+	     entries that point into this array, drop anything else. */
 	  int k;
 
 	  for (k = 0; k < VOLMAP_MAX_OPEN_FDS; k++)
