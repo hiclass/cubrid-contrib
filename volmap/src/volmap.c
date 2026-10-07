@@ -6370,6 +6370,7 @@ static struct
   bool a_refresh_done;		/* completion note for the status bar */
   bool a_busy;			/* the batch lane is walking the volume array; the list must not be touched meanwhile */
   int a_resid_vi;		/* >= 0: re-read residency for this volume index */
+  unsigned list_gen;		/* bumped under a_mx whenever [r] changes the volume list */
   volatile unsigned ui_frames;	/* UI frame counter: shadow-reuse guard */
   /* Publish interlock.  ui_reading says the UI is dereferencing the per-volume arrays;
    * the commit may only swap the pointers while it is 0.  Both sides take pub_mx, so
@@ -6394,7 +6395,7 @@ static struct
   size_t b_buf_sz;
 } volmap_mt = {
   NULL, 0, 0, false, 0, -1, -1,
-  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0,
+  PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, false, -1, 0, 0,
   PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0,
   PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, false, 0, -1, -1, -1, -1, NULL, 0
 };
@@ -6442,6 +6443,13 @@ volmap_mt_refresh (VOLMAP_CTX * ctx, bool skip_scan)
 	  vol->sh_owner = (int *) malloc (vol->nsect_total * sizeof (int));
 	  vol->sh_alloc = (int *) calloc (vol->nsect_total, sizeof (int));
 	  vol->sh_pagebm = (UINT64 *) calloc (vol->nsect_total, sizeof (UINT64));
+	  if (vol->sh_owner != NULL)
+	    {
+	      memset (vol->sh_owner, 0xff, vol->nsect_total * sizeof (int));	/* -1 = no owner */
+	    }
+	  /* A shadow made just now holds no scan, so there is nothing to republish:
+	     scan whatever the caller asked. */
+	  skip_scan = false;
 	}
       if (vol->sh_stab == NULL || vol->sh_owner == NULL || vol->sh_alloc == NULL || vol->sh_pagebm == NULL)
 	{
@@ -6511,19 +6519,23 @@ volmap_mt_a_main (void *arg)
   unsigned commit_frame = 0;
   bool committed = false;
   bool pending_publish = false;	/* a scan waiting in the shadows for a frame boundary */
+  unsigned pending_gen = 0;	/* list_gen the pending scan was taken over */
   struct timespec last_prog = { 0, 0 };
 
   (void) arg;
   while (!volmap_mt.stop)
     {
-      bool do_refresh;
+      bool do_refresh, new_req, reuse;
+      unsigned gen;
       int resid_vi;
 
       pthread_mutex_lock (&volmap_mt.a_mx);
-      /* A pending publish re-arms a_refresh_req, which would otherwise skip the wait
-       * and spin: the UI it is waiting for can stay mid-frame indefinitely (the help
-       * screen holds ui_reading until it is closed).  Wait out the tick either way. */
-      if ((!volmap_mt.a_refresh_req || pending_publish) && volmap_mt.a_resid_vi < 0 && !ctx->scan_active)
+      /* Wait unless there is new work.  A pending publish is not new work - its retry
+       * waits out the tick, since the UI it waits for can stay mid-frame indefinitely
+       * (the help screen holds ui_reading until it is closed).  Nor is anything while
+       * the list is frozen: the UI wakes us when it lifts the barrier. */
+      if (volmap_mt.list_frozen
+	  || (!volmap_mt.a_refresh_req && volmap_mt.a_resid_vi < 0 && !ctx->scan_active))
 	{
 	  struct timespec dl;
 
@@ -6533,7 +6545,7 @@ volmap_mt_a_main (void *arg)
 	  dl.tv_nsec %= 1000000000L;
 	  (void) pthread_cond_timedwait (&volmap_mt.a_cv, &volmap_mt.a_mx, &dl);
 	}
-      do_refresh = volmap_mt.a_refresh_req;
+      new_req = volmap_mt.a_refresh_req;
       volmap_mt.a_refresh_req = false;
       resid_vi = volmap_mt.a_resid_vi;
       volmap_mt.a_resid_vi = -1;
@@ -6541,10 +6553,16 @@ volmap_mt_a_main (void *arg)
       if (volmap_mt.list_frozen)
 	{
 	  /* Same barrier as lane B: hold off while the UI is about to change the list. */
-	  do_refresh = false;
+	  volmap_mt.a_refresh_req = new_req;	/* keep a real request; the work is not lost */
+	  new_req = false;
 	  resid_vi = -1;
-	  volmap_mt.a_refresh_req = true;	/* re-arm; the work is not lost */
 	}
+      do_refresh = new_req || (pending_publish && !volmap_mt.list_frozen);
+      /* The pending scan may be republished only as it is: no new request asked for
+       * a fresh one, and the volume list is the one it was taken over.  [r] can add
+       * or drop volumes while the retry waits, and a new volume has no scan. */
+      reuse = pending_publish && !new_req && pending_gen == volmap_mt.list_gen;
+      gen = volmap_mt.list_gen;
       volmap_mt.a_busy = (do_refresh || resid_vi >= 0);
       pthread_mutex_unlock (&volmap_mt.a_mx);
       if (volmap_mt.stop)
@@ -6563,7 +6581,11 @@ volmap_mt_a_main (void *arg)
 
 	      nanosleep (&ts, NULL);
 	    }
-	  switch (volmap_mt_refresh (ctx, pending_publish))
+	  if (!reuse)
+	    {
+	      pending_gen = gen;	/* the list this scan is taken over */
+	    }
+	  switch (volmap_mt_refresh (ctx, reuse))
 	    {
 	    case VOLMAP_PUB_OK:
 	      pending_publish = false;
@@ -6580,10 +6602,7 @@ volmap_mt_a_main (void *arg)
 	       * in the shadows, so the retry republishes it instead of scanning again -
 	       * a UI that stays mid-frame (the help screen holds ui_reading for as long
 	       * as it is open) would otherwise re-read every file table each round. */
-	      pending_publish = true;
-	      pthread_mutex_lock (&volmap_mt.a_mx);
-	      volmap_mt.a_refresh_req = true;
-	      pthread_mutex_unlock (&volmap_mt.a_mx);
+	      pending_publish = true;	/* retried after the tick; a_refresh_req stays for new requests */
 	      break;
 
 	    case VOLMAP_PUB_FAILED:
@@ -8918,7 +8937,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	         4. drop the barrier and wake both lanes.  */
 	    {
 	      int guard;
-	      bool a_idle, b_idle;
+	      bool a_idle, b_idle, list_changed = false;
 
 	      volmap_mt.list_frozen = 1;
 
@@ -8953,6 +8972,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	         itself.  b_mx is still held: lane B cannot even re-enter its loop body. */
 	      if (a_idle && b_idle && volmap_scan_temp_volumes (ctx))
 		{
+		  list_changed = true;
 		  /* the list changed; the cursor may point at a volume that is gone */
 		  if (vi >= ctx->nvols)
 		    {
@@ -8962,6 +8982,14 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		}
 	      pthread_mutex_unlock (&volmap_mt.b_mx);
 
+	      /* Before the barrier drops, so lane A sees the new generation the moment it
+	         may run again: a scan pending over the old list must not be republished. */
+	      if (list_changed)
+		{
+		  pthread_mutex_lock (&volmap_mt.a_mx);
+		  volmap_mt.list_gen++;
+		  pthread_mutex_unlock (&volmap_mt.a_mx);
+		}
 	      volmap_mt.list_frozen = 0;
 	      pthread_mutex_lock (&volmap_mt.a_mx);
 	      pthread_cond_broadcast (&volmap_mt.a_cv);
