@@ -73,6 +73,9 @@
 #define VOLMAP_MAX_VOLID  32766
 /* the vinf entry naming the active log: LOG_DBLOG_ACTIVE_VOLID (log_volids.hpp) */
 #define VOLMAP_LGAT_VOLID (-2)
+/* pages sampled to decide whether the page watermark is present (volmap_probe_watermark) */
+#define VOLMAP_WM_SAMPLES     32
+#define VOLMAP_WM_MIN_SAMPLES 4
 #define VOLMAP_MAX_FILES  65536
 #define VOLMAP_SECT_NPAGES DISK_SECTOR_NPAGES
 
@@ -283,10 +286,16 @@ prv_user_offset (void)
  * them through the struct yields garbage (a 10.2 demodb reports next_vol 29231,
  * which is really two characters of the volume name).
  *
- * The version is not in the volume header, so it comes from the log header, where
- * db_release is a printable release string.  Its offset moved between releases
- * too, so the string is located by pattern rather than by a fixed offset - that is
- * the one thing that cannot itself be version-dependent. */
+ * No volume field records the release, but the layout does not need one: each of
+ * the two shapes is self-evident in the volume itself, so a volume is read on its
+ * own terms and the log is only a cross-check (volmap_vlayout_probe).
+ *
+ * The log can still be asked, and its header carries db_release as a printable
+ * string.  That offset moved between releases too, so the string is located by
+ * pattern rather than by a fixed offset.  Note the log states the release that
+ * last wrote it, not the one that created the volume: an upgraded 10.2 database
+ * has an 11.x log over 10.2-shaped volumes, which is a second reason the volume
+ * decides and the log only confirms. */
 typedef enum
 {
   VOLMAP_VLAY_UNKNOWN = 0,	/* version not determined: do not print shifted fields */
@@ -298,10 +307,11 @@ typedef enum
 /* The active log's path, as the vinf records it.  createdb --log-path puts the
    log elsewhere, and then guessing a sibling of the vinf finds nothing; the vinf
    lists the real path under LOG_DBLOG_ACTIVE_VOLID (-2), which is how the engine
-   locates it too (get_active_log_vol_path in migrate.c).  Returns false when the
-   vinf has no such entry, and the caller falls back to the sibling name. */
+   locates it too (get_active_log_vol_path in migrate.c).  Volume 0 is looked up
+   the same way, to probe the layout from the volume itself.  Returns false when
+   the vinf has no such entry. */
 static bool
-volmap_lgat_from_vinf (const char *vinf_path, char *out, size_t outsz)
+volmap_path_from_vinf (const char *vinf_path, int want, char *out, size_t outsz)
 {
   char line[PATH_MAX + 64];
   FILE *fp;
@@ -316,7 +326,7 @@ volmap_lgat_from_vinf (const char *vinf_path, char *out, size_t outsz)
       char path[PATH_MAX];
       int id;
 
-      if (sscanf (line, " %d %4095s", &id, path) == 2 && id == VOLMAP_LGAT_VOLID)
+      if (sscanf (line, " %d %4095s", &id, path) == 2 && id == want)
 	{
 	  snprintf (out, outsz, "%s", path);
 	  found = true;
@@ -343,7 +353,7 @@ volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
     {
       return false;
     }
-  if (!volmap_lgat_from_vinf (vinf_path, path, sizeof (path)))
+  if (!volmap_path_from_vinf (vinf_path, VOLMAP_LGAT_VOLID, path, sizeof (path)))
     {
       /* No -2 entry: fall back to the sibling name.  Replace the suffix of the
          file name only - searching the whole path would match a directory called
@@ -415,6 +425,151 @@ volmap_vlayout_of (const char *rel)
       return VOLMAP_VLAY_101;	/* 10.0 never gets this far - the header self-check rejects it */
     }
   return VOLMAP_VLAY_PRE_114;
+}
+
+static const char *
+volmap_vlayout_name (VOLMAP_VLAYOUT lay)
+{
+  switch (lay)
+    {
+    case VOLMAP_VLAY_101:
+      return "10.1";
+    case VOLMAP_VLAY_PRE_114:
+      return "10.2-11.3";
+    case VOLMAP_VLAY_114:
+      return "11.4+";
+    default:
+      return "unknown";
+    }
+}
+
+/* Does this volume carry the vol_creation field?  Tries both header shapes and
+   keeps the one that is internally consistent.
+ *
+ * vol_fullname is the first of the variable-length fields, so its offset is 0
+ * relative to var_fields, and the next two offsets run past it by the name's
+ * length.  With the wrong shape those three INT16s land on the name's characters
+ * or on the reserved zeros instead: a 10.2 demodb read as 11.4 gives
+ * off_to_vol_fullname 28527 ('on'), and an 11.5 volume read as <=11.3 gives all
+ * zeros.  Returns -1 when neither shape or both look right. */
+static int
+volmap_probe_vol_creation (const char *page0)
+{
+  const char *base = page0 + prv_user_offset ();
+  int shift, found = -1;
+
+  for (shift = 0; shift >= -8; shift -= 8)
+    {
+      INT16 nv, f_name, f_next, f_rem;
+
+      memcpy (&nv, base + offsetof (DISK_VOLUME_HEADER, next_volid) + shift, sizeof (nv));
+      memcpy (&f_name, base + offsetof (DISK_VOLUME_HEADER, offset_to_vol_fullname) + shift, sizeof (f_name));
+      memcpy (&f_next, base + offsetof (DISK_VOLUME_HEADER, offset_to_next_vol_fullname) + shift, sizeof (f_next));
+      memcpy (&f_rem, base + offsetof (DISK_VOLUME_HEADER, offset_to_vol_remarks) + shift, sizeof (f_rem));
+
+      if (f_name != 0 || f_next <= 0 || f_rem < f_next || nv < -1 || nv > VOLMAP_MAX_VOLID)
+	{
+	  continue;
+	}
+      if (found != -1)
+	{
+	  return -1;		/* ambiguous: let the caller fall back to the log */
+	}
+      found = (shift == 0) ? 1 : 0;
+    }
+  return found;
+}
+
+/* Does this volume's pages end with the watermark?  FILEIO_PAGE_WATERMARK is a
+   copy of prv.lsa (file_io.h), so a page that has one starts and ends with the
+   same 8 bytes.  10.1 has no watermark and those last bytes are user data, which
+   matches prv.lsa only by coincidence - hence several pages, all of which must
+   agree.  Sampling walks the file rather than the header's page counts, which are
+   themselves read through the layout being decided.  Returns -1 when too few
+   written pages could be sampled. */
+static int
+volmap_probe_watermark (int fd, int iopagesize)
+{
+  char *pg = (char *) malloc (iopagesize);
+  int hit = 0, seen = 0;
+  PAGEID p, npages;
+  struct stat st;
+
+  if (pg == NULL)
+    {
+      return -1;
+    }
+  if (fstat (fd, &st) != 0 || st.st_size < (off_t) iopagesize * 2)
+    {
+      free (pg);
+      return -1;
+    }
+  npages = (PAGEID) (st.st_size / iopagesize);
+  for (p = 1; p < npages && seen < VOLMAP_WM_SAMPLES; p++)
+    {
+      if (pread (fd, pg, iopagesize, (off_t) p * iopagesize) != iopagesize)
+	{
+	  break;
+	}
+      if (memcmp (pg, "\0\0\0\0\0\0\0\0", 8) == 0)
+	{
+	  continue;		/* never written: prv.lsa and the tail are both zero */
+	}
+      seen++;
+      hit += (memcmp (pg, pg + iopagesize - 8, 8) == 0);
+    }
+  free (pg);
+  if (seen < VOLMAP_WM_MIN_SAMPLES)
+    {
+      return -1;
+    }
+  return (hit == seen) ? 1 : 0;
+}
+
+/* The layout of the volume at path, decided from the volume alone.  Returns
+   VOLMAP_VLAY_UNKNOWN when the file cannot be read or neither shape fits. */
+static VOLMAP_VLAYOUT
+volmap_vlayout_probe (const char *path)
+{
+  char *page0;
+  DISK_VOLUME_HEADER *vhdr;
+  VOLMAP_VLAYOUT lay = VOLMAP_VLAY_UNKNOWN;
+  int fd, vc, wm;
+
+  fd = open (path, O_RDONLY);
+  if (fd < 0)
+    {
+      return VOLMAP_VLAY_UNKNOWN;
+    }
+  page0 = (char *) malloc (64 * 1024);
+  if (page0 == NULL || pread (fd, page0, 64 * 1024, 0) < 4096)
+    {
+      goto done;
+    }
+  vhdr = (DISK_VOLUME_HEADER *) (page0 + prv_user_offset ());
+  if (strncmp (vhdr->magic, CUBRID_MAGIC_DATABASE_VOLUME, strlen (CUBRID_MAGIC_DATABASE_VOLUME)) != 0
+      || vhdr->iopagesize < 1024 || vhdr->iopagesize > 64 * 1024)
+    {
+      goto done;
+    }
+
+  vc = volmap_probe_vol_creation (page0);
+  if (vc == 1)
+    {
+      lay = VOLMAP_VLAY_114;	/* vol_creation implies 11.4+, which has the watermark */
+      goto done;
+    }
+  if (vc == 0)
+    {
+      /* 10.1 .. 11.3; the watermark splits 10.1 off from the rest */
+      wm = volmap_probe_watermark (fd, vhdr->iopagesize);
+      lay = (wm == 0) ? VOLMAP_VLAY_101 : VOLMAP_VLAY_PRE_114;
+    }
+
+done:
+  free (page0);
+  close (fd);
+  return lay;
 }
 
 /* Size of the user area inside an io page.
@@ -10425,17 +10580,44 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
 	}
       (void) volmap_conf_temp_path (nm, ctx->temp_path, sizeof (ctx->temp_path));
     }
-  (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
-  ctx->vlayout = (int) volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
-  if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
-    {
-      /* The watermark layout is assumed (every release from 10.2 has it), but on a
-         10.1 volume that is wrong by 8 bytes - say so rather than be quietly off.
-         stderr, not outfp: this must not land in the middle of --format json. */
-      fprintf (stderr,
-	       "volmap: cannot read the release from the log header - assuming 10.2+ page layout;"
-	       " slot-level output would be 8 bytes off on a 10.1 volume\n");
-    }
+  /* The volume decides its own layout; the log is only a cross-check, so a missing,
+     relocated or unreadable log costs nothing.  stderr, not outfp: these must not
+     land in the middle of --format json. */
+  {
+    char vol0[PATH_MAX];
+    VOLMAP_VLAYOUT from_log;
+
+    ctx->vlayout = VOLMAP_VLAY_UNKNOWN;
+    if (volmap_path_from_vinf (ctx->vinf_path, 0, vol0, sizeof (vol0)))
+      {
+	ctx->vlayout = (int) volmap_vlayout_probe (vol0);
+      }
+
+    (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
+    from_log = volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
+
+    if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
+      {
+	ctx->vlayout = (int) from_log;
+      }
+    else if (from_log != VOLMAP_VLAY_UNKNOWN && from_log != (VOLMAP_VLAYOUT) ctx->vlayout)
+      {
+	/* Report rather than hide it: an upgraded database legitimately has a newer
+	   log over older volumes, and the volume is what is being read. */
+	fprintf (stderr, "volmap: the volumes are %s but the log says %s (release %s) - using the volumes\n",
+		 volmap_vlayout_name ((VOLMAP_VLAYOUT) ctx->vlayout), volmap_vlayout_name (from_log),
+		 ctx->db_release);
+      }
+
+    if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
+      {
+	/* The watermark layout is assumed (every release from 10.2 has it), but on a
+	   10.1 volume that is wrong by 8 bytes - say so rather than be quietly off. */
+	fprintf (stderr,
+		 "volmap: cannot determine the volume layout - assuming 10.2+ page layout;"
+		 " slot-level output would be 8 bytes off on a 10.1 volume\n");
+      }
+  }
 
   while (fgets (line, sizeof (line), fp) != NULL)
     {
