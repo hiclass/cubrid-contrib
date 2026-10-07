@@ -197,6 +197,9 @@ struct volmap_ctx
   /* header layout of these volumes: v11.4 inserted vol_creation, so the fields
      after it are 8 bytes earlier on an older volume (see VOLMAP_VLAYOUT) */
   int vlayout;
+  /* bumped by every volmap_refresh: lets the UI drop answers it cached from the
+     previous on-disk state (see volmap_ovf_owner_file) */
+  volatile unsigned refresh_gen;
   char db_release[32];
   VOLMAP_FILE *files;
   int nfiles;
@@ -3001,6 +3004,7 @@ volmap_refresh (VOLMAP_CTX * ctx)
   char *iopage = NULL;
   int prv = prv_user_offset ();
 
+  ctx->refresh_gen++;
   for (vi = 0; vi < ctx->nvols; vi++)
     {
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
@@ -4685,9 +4689,12 @@ volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx)
 {
   /* The describe line asks again on every frame for the same cell; remember the
      last answer so a cursor resting on an overflow page costs one walk, not one
-     per frame.  Keyed on the file table as well, which [r] can rebuild. */
+     per frame.  Keyed on the refresh generation too: the heap header's link may
+     not be on disk yet on a live database, so a miss - or a hit - holds only
+     until the next refresh rereads the volumes. */
   static const VOLMAP_FILE *memo_files;
   static int memo_nfiles = -1, memo_ovf = -1, memo_owner = -1;
+  static unsigned memo_gen;
   int i;
 
   (void) vol;
@@ -4695,10 +4702,12 @@ volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx)
     {
       return -1;
     }
-  if (memo_files == ctx->files && memo_nfiles == ctx->nfiles && memo_ovf == ovf_idx)
+  if (memo_files == ctx->files && memo_nfiles == ctx->nfiles && memo_ovf == ovf_idx
+      && memo_gen == ctx->refresh_gen)
     {
       return memo_owner;
     }
+  memo_gen = ctx->refresh_gen;
   memo_files = ctx->files;
   memo_nfiles = ctx->nfiles;
   memo_ovf = ovf_idx;
