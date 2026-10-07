@@ -7899,8 +7899,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	    {
 	      /* box 1: the sector grid, page selection highlighted */
 	      long l0pp = (total_pages + (long) ncells - 1) / ncells;
-	      int tone0, grid_rows2 = 0, psel_cell2 = -1;
-	      ssize_t got2 = 0;
+	      int tone0, psel_cell2 = -1;
 
 	      l0pp = ((l0pp + VOLMAP_SECT_NPAGES - 1) / VOLMAP_SECT_NPAGES) * VOLMAP_SECT_NPAGES;
 	      tone0 = volmap_map_tone_at (ctx, vol, (int) (sect * VOLMAP_SECT_NPAGES / l0pp), l0pp,
@@ -7946,8 +7945,6 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		    panel.base_pg = base;
 		    (void) volmap_panel_fill_sector_span (ctx, vol, &panel, base, ov_pg, tone0,
 							  &ov_sdel, &ov_sdead, &psel_cell2);
-		    (void) got2;
-		    (void) grid_rows2;
 		  }
 		  panel.hl_cell = psel_cell2;
 		  /* box 2: the selected page's byte distribution (slot highlight follows box 3) */
@@ -8009,22 +8006,12 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	   * two affected map cells and the right-hand panel, skip everything else */
 	  int oc = prev_cy * mapw + prev_cx;
 	  int nc = cur_y * mapw + cur_x;
-	  int r2;
 
 	  volmap_put_cell_reset ();
 	  printf ("\033[%d;%dH", 5 + prev_cy, prev_cx + 3);
 	  volmap_put_cell (cell_render[oc], false);
 	  printf ("\033[%d;%dH", 5 + cur_y, cur_x + 3);
 	  volmap_put_cell (cell_render[nc], true);
-
-	  if (false)
-	    {
-	      for (r2 = 0; r2 < maph; r2++)
-		{
-		  printf ("\033[0m\033[%d;%dH", 5 + r2, mapw + 1);
-		  volmap_panel_print_row (ctx, &panel, r2);
-		}
-	    }
 	  goto interactive_status;
 	}
 
@@ -8060,33 +8047,8 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	       *   ovshort = concise identity                    -> overlay info box */
 	      if (ov_focus == 3)
 		{
-		  long sect3 = ov_pg / VOLMAP_SECT_NPAGES;
-		  int ow3 = vol->owner[sect3];
-		  char label3[160] = "";
-
-		  if (ow3 >= 0)
-		    {
-		      VOLMAP_FILE *f3 = &ctx->files[ow3];
-		      int kind3 = volmap_kind_idx (f3->ftype);
-		      const char *nm = volmap_resolve_class_name (ctx, f3);
-
-		      if (nm == NULL || nm[0] == '\0')
-			{
-			  snprintf (label3, sizeof (label3), "%s", volmap_ftype_name (f3->ftype));
-			}
-		      else if (kind3 == 1)
-			{
-			  snprintf (label3, sizeof (label3), "%s%s %s", VOLMAP_TAG_I, nm,
-				    volmap_resolve_index_name (ctx, f3));
-			}
-		      else
-			{
-			  snprintf (label3, sizeof (label3), "%s%s", (kind3 == 0) ? VOLMAP_TAG_H : "", nm);
-			}
-		    }
 		  volmap_describe_slot (ctx, vol, ov_pg, ov_slot, ovinfo, sizeof (ovinfo));
 		  /* the info box FIRST line already names the file: the slot line is the OID */
-		  (void) label3;
 		  snprintf (ovshort, sizeof (ovshort), "OID %d|%ld|%d", (int) vol->volid, ov_pg, ov_slot);
 		}
 	      else if (ov_focus == 2)
@@ -8123,17 +8085,13 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		  char st1 = (vol->owner[sect1] >= 0) ? 'F' : (vol->stab[sect1] ? '_' : '.');
 		  int ow1 = vol->owner[sect1];
 		  long pp1 = ov_pg, al1 = 1;
-		  const char *arrow;
-		  int na = 0;
 
 		  volmap_describe_cell (ctx, vol, 1, &st1, &ow1, &pp1, &al1, 0, ovinfo, sizeof (ovinfo));
-		  (void) arrow;
-		  (void) na;
 		  {
 		    /* info box = SECTOR facts the bottom bar does not carry (the FULL
 		     * describe there already names the object): page composition from
 		     * the grid just built, file offset, residency and --deep counters */
-		    int c9, usern = 0, ftabn = 0, emptyn = 0, tden = 0;
+		    int c9, usern = 0, ftabn = 0, tden = 0;
 		    char off9[16], ln3[64] = "";
 
 		    for (c9 = 0; c9 < VOLMAP_SECT_NPAGES && c9 < panel.w * panel.rows; c9++)
@@ -8145,9 +8103,6 @@ volmap_interactive (VOLMAP_CTX * ctx)
 			    break;
 			  case '#':
 			    ftabn++;
-			    break;
-			  case '_':
-			    emptyn++;
 			    break;
 			  case 'E':
 			    tden++;
@@ -8180,7 +8135,6 @@ volmap_interactive (VOLMAP_CTX * ctx)
 				 "\xec\x84\xb9\xed\x84\xb0 %ld @ %s\n\xed\x95\xa0\xeb\x8b\xb9 %d/64 (data %d ftab %d%s)%s"),
 			      sect1, off9, usern + ftabn, usern, ftabn,
 			      (tden > 0) ? " E+" : "", ln3);
-		    (void) emptyn;
 		  }
 		}
 	    }
@@ -8482,33 +8436,9 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	       * real inputs.  Decode every compatibility jamo AND decompose composed
 	       * syllables (U+AC00..) into their choseong/jungseong/jongseong key
 	       * strings; the first key dispatches now, the rest queue up. */
-	      static const char *jamo_keys[51] = {	/* U+3131..U+3163 */
-		"r", "R", "rt", "s", "sw", "sg", "e", "E", "f", "fr", "fa", "fq", "ft", "fx", "fv", "fg",
-		"a", "q", "Q", "qt", "t", "T", "d", "w", "W", "c", "z", "x", "v", "g",
-		"k", "o", "i", "O", "j", "p", "u", "P", "h", "hk", "ho", "hl", "y",
-		"n", "nj", "np", "nl", "b", "m", "ml", "l"
-	      };
-	      static const char *cho_keys[19] = {
-		"r", "R", "s", "e", "E", "f", "a", "q", "Q", "t", "T", "d", "w", "W", "c", "z", "x", "v", "g"
-	      };
-	      static const char *jong_keys[28] = {
-		"", "r", "R", "rt", "s", "sw", "sg", "e", "f", "fr", "fa", "fq", "ft", "fx", "fv", "fg",
-		"a", "q", "qt", "t", "T", "d", "w", "c", "z", "x", "v", "g"
-	      };
 	      unsigned int cp = ((unsigned int) (ch & 0x0F) << 12) | ((unsigned int) (k2 & 0x3F) << 6) | (k3 & 0x3F);
-	      char keys[8] = "";
+	      const char *keys = volmap_hangul_to_keys (cp);
 
-	      if (cp >= 0x3131 && cp <= 0x3163)
-		{
-		  snprintf (keys, sizeof (keys), "%s", jamo_keys[cp - 0x3131]);
-		}
-	      else if (cp >= 0xAC00 && cp <= 0xD7A3)
-		{
-		  unsigned int sy = cp - 0xAC00;
-
-		  snprintf (keys, sizeof (keys), "%s%s%s", cho_keys[sy / 588],
-			    jamo_keys[30 + (sy % 588) / 28], jong_keys[sy % 28]);
-		}
 	      if (keys[0] == '\0')
 		{
 		  goto interactive_input;	/* not Hangul: ignore */
