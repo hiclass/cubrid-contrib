@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stddef.h>
 #include <ctype.h>
 #include <fcntl.h>
@@ -10512,15 +10513,18 @@ volmap_conf_temp_path (const char *db_name, char *out, size_t outsz)
 	    {
 	      e[1] = '\0';
 	    }
-	  in_common = (strncmp (s, "[common]", 8) == 0);
-	  in_db = (db_name != NULL && db_name[0] != '\0' && strcmp (s, want) == 0);
+	  /* The engine lowercases section names and keys as it parses (ini_str_lower
+	     in ini_parser.c), so [COMMON] and TEMP_VOLUME_PATH are accepted there and
+	     must be matched the same way here. */
+	  in_common = (strncasecmp (s, "[common]", 8) == 0);
+	  in_db = (db_name != NULL && db_name[0] != '\0' && strcasecmp (s, want) == 0);
 	  continue;
 	}
       if (!in_common && !in_db)
 	{
 	  continue;
 	}
-      if (strncmp (s, "temp_volume_path", 16) != 0)
+      if (strncasecmp (s, "temp_volume_path", 16) != 0)
 	{
 	  continue;
 	}
