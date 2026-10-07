@@ -6667,10 +6667,29 @@ volmap_mt_a_main (void *arg)
 	  struct timespec now;
 	  bool idle;
 	  bool done;
+	  bool go;
 
+	  /* Discovery walks the volume array too - and its last step, the --full-sweep
+	     pass 2, runs after scan_active has dropped, when [r] no longer refuses.
+	     Hold a_busy across the step, like any other work, so [r] waits for it. */
+	  pthread_mutex_lock (&volmap_mt.a_mx);
+	  go = !volmap_mt.list_frozen;
+	  if (go)
+	    {
+	      volmap_mt.a_busy = true;
+	    }
+	  pthread_mutex_unlock (&volmap_mt.a_mx);
+	  if (!go)
+	    {
+	      continue;
+	    }
 	  clock_gettime (CLOCK_MONOTONIC, &now);
 	  idle = (now.tv_sec - volmap_last_key_sec) > 2;
 	  done = volmap_discover_step (ctx, 8192, idle);
+	  pthread_mutex_lock (&volmap_mt.a_mx);
+	  volmap_mt.a_busy = false;
+	  pthread_cond_broadcast (&volmap_mt.a_cv);
+	  pthread_mutex_unlock (&volmap_mt.a_mx);
 	  clock_gettime (CLOCK_MONOTONIC, &now);
 	  if (done
 	      || (now.tv_sec - last_prog.tv_sec) * 1000 + (now.tv_nsec - last_prog.tv_nsec) / 1000000 >= 150)
