@@ -71,6 +71,8 @@
 /* highest volid the engine issues: LOG_MAX_DBVOLID = VOLID_MAX - 1 = SHRT_MAX - 1.
    Temp volumes count down from here, so -V must cover the whole range. */
 #define VOLMAP_MAX_VOLID  32766
+/* the vinf entry naming the active log: LOG_DBLOG_ACTIVE_VOLID (log_volids.hpp) */
+#define VOLMAP_LGAT_VOLID (-2)
 #define VOLMAP_MAX_FILES  65536
 #define VOLMAP_SECT_NPAGES DISK_SECTOR_NPAGES
 
@@ -293,7 +295,40 @@ typedef enum
   VOLMAP_VLAY_114		/* >= 11.4: vol_creation present (matches the struct) */
 } VOLMAP_VLAYOUT;
 
-/* Read <db>_lgat and return its release string in rel[] ("" if not found). */
+/* The active log's path, as the vinf records it.  createdb --log-path puts the
+   log elsewhere, and then guessing a sibling of the vinf finds nothing; the vinf
+   lists the real path under LOG_DBLOG_ACTIVE_VOLID (-2), which is how the engine
+   locates it too (get_active_log_vol_path in migrate.c).  Returns false when the
+   vinf has no such entry, and the caller falls back to the sibling name. */
+static bool
+volmap_lgat_from_vinf (const char *vinf_path, char *out, size_t outsz)
+{
+  char line[PATH_MAX + 64];
+  FILE *fp;
+  bool found = false;
+
+  if (vinf_path == NULL || vinf_path[0] == '\0' || (fp = fopen (vinf_path, "r")) == NULL)
+    {
+      return false;
+    }
+  while (fgets (line, sizeof (line), fp) != NULL)
+    {
+      char path[PATH_MAX];
+      int id;
+
+      if (sscanf (line, " %d %4095s", &id, path) == 2 && id == VOLMAP_LGAT_VOLID)
+	{
+	  snprintf (out, outsz, "%s", path);
+	  found = true;
+	  break;
+	}
+    }
+  fclose (fp);
+  return found;
+}
+
+/* Read the active log header and return its release string in rel[] ("" if not
+   found). */
 static bool
 volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
 {
@@ -308,19 +343,21 @@ volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
     {
       return false;
     }
-  /* <db>_vinf and <db>_lgat sit side by side.  Replace the suffix of the file
-     name only: searching the whole path would match a directory called e.g.
-     my_vinf_dir and build a path that does not exist, and failing to read the
-     log header means the version is unknown and the 10.2+ page layout assumed. */
-  dot = strrchr (vinf_path, '/');
-  dot = strstr ((dot != NULL) ? dot + 1 : vinf_path, "_vinf");
-  if (dot == NULL || strcmp (dot, "_vinf") != 0)
+  if (!volmap_lgat_from_vinf (vinf_path, path, sizeof (path)))
     {
-      return false;		/* only a trailing _vinf names a volume info file */
-    }
-  if (snprintf (path, sizeof (path), "%.*s_lgat", (int) (dot - vinf_path), vinf_path) >= (int) sizeof (path))
-    {
-      return false;
+      /* No -2 entry: fall back to the sibling name.  Replace the suffix of the
+         file name only - searching the whole path would match a directory called
+         e.g. my_vinf_dir and build a path that does not exist. */
+      dot = strrchr (vinf_path, '/');
+      dot = strstr ((dot != NULL) ? dot + 1 : vinf_path, "_vinf");
+      if (dot == NULL || strcmp (dot, "_vinf") != 0)
+	{
+	  return false;		/* only a trailing _vinf names a volume info file */
+	}
+      if (snprintf (path, sizeof (path), "%.*s_lgat", (int) (dot - vinf_path), vinf_path) >= (int) sizeof (path))
+	{
+	  return false;
+	}
     }
   fp = fopen (path, "rb");
   if (fp == NULL)
