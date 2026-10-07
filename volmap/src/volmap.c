@@ -73,6 +73,9 @@
 #define VOLMAP_MAX_VOLID  32766
 /* the vinf entry naming the active log: LOG_DBLOG_ACTIVE_VOLID (log_volids.hpp) */
 #define VOLMAP_LGAT_VOLID (-2)
+/* highest major release whose layout this tool knows; a larger one reads as the
+   newest layout, which is what VOLMAP_VLAY_114 already means */
+#define VOLMAP_MAX_KNOWN_MAJOR 99
 /* pages sampled to decide whether the page watermark is present (volmap_probe_watermark) */
 #define VOLMAP_WM_SAMPLES     32
 #define VOLMAP_WM_MIN_SAMPLES 4
@@ -413,6 +416,13 @@ volmap_vlayout_of (const char *rel)
   int maj = 0, min = 0;
 
   if (rel == NULL || sscanf (rel, "%d.%d", &maj, &min) != 2)
+    {
+      return VOLMAP_VLAY_UNKNOWN;
+    }
+  /* The string is found by scanning for a digits.digits run, so binary bytes can
+     produce one by chance.  Only a release this tool knows about is accepted;
+     anything else is no answer rather than a wrong one. */
+  if (maj < 10 || maj > VOLMAP_MAX_KNOWN_MAJOR || min < 0 || min > 99)
     {
       return VOLMAP_VLAY_UNKNOWN;
     }
@@ -10587,11 +10597,20 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
     char vol0[PATH_MAX];
     VOLMAP_VLAYOUT from_log;
 
+    /* Any permanent volume answers this, so take the first one that does rather
+       than requiring volid 0 - a vinf may list only the volumes being looked at. */
     ctx->vlayout = VOLMAP_VLAY_UNKNOWN;
-    if (volmap_path_from_vinf (ctx->vinf_path, 0, vol0, sizeof (vol0)))
+    rewind (fp);
+    while (ctx->vlayout == VOLMAP_VLAY_UNKNOWN && fgets (line, sizeof (line), fp) != NULL)
       {
-	ctx->vlayout = (int) volmap_vlayout_probe (vol0);
+	int id;
+
+	if (sscanf (line, " %d %4095s", &id, vol0) == 2 && id >= 0)
+	  {
+	    ctx->vlayout = (int) volmap_vlayout_probe (vol0);
+	  }
       }
+    rewind (fp);
 
     (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
     from_log = volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
