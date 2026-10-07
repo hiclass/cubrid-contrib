@@ -10119,7 +10119,7 @@ volmap_json_escape (const char *in, char *out, int outsz)
 static int
 volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 {
-  int nvol_printed = 0;
+  int nvol_printed = 0, nvol_selected = 0;
   FILE *fp = ctx->outfp;
   int vi, fi;
 
@@ -10137,6 +10137,13 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
      or an automation asking for one volume gets the whole database.  The separator is
      driven by what has actually been printed, not by the loop index - skipping a
      volume with an index-based comma would emit a trailing one and break the parse. */
+  /* -V can filter volumes out, so the last one to be printed is not known from the
+     index: count them first, then the comma can go where the files array puts it. */
+  nvol_selected = 0;
+  for (vi = 0; vi < ctx->nvols; vi++)
+    {
+      nvol_selected += volmap_vol_selected (ctx, ctx->vols[vi].volid);
+    }
   nvol_printed = 0;
   for (vi = 0; vi < ctx->nvols; vi++)
     {
@@ -10163,14 +10170,13 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	}
       char epath[2 * PATH_MAX];
 
-      fprintf (fp, "%s    {\"volid\": %d, \"path\": \"%s\", \"purpose\": \"%s\", \"iopagesize\": %d,"
+      fprintf (fp, "    {\"volid\": %d, \"path\": \"%s\", \"purpose\": \"%s\", \"iopagesize\": %d,"
 	       " \"sectors_total\": %d,"
 	       " \"sectors_reserved\": %ld, \"pages_allocated\": %lld, \"owner_switches\": %ld,"
 	       " \"unknown_sectors\": %ld, \"tde_pages_probed\": %ld,"
 	       " \"idle_pages\": %lld, \"idle_pct\": %.3f, \"fragmentation_pct\": %.3f,"
 	       " \"media_rotational\": %d,"
-	       " \"buffered_pages\": %ld, \"dirty_pages\": %ld, \"buffered_freed_pages\": %ld}%s",
-	       nvol_printed ? ",\n" : "",
+	       " \"buffered_pages\": %ld, \"dirty_pages\": %ld, \"buffered_freed_pages\": %ld}%s\n",
 	       vol->volid, volmap_json_escape (vol->path, epath, (int) sizeof (epath)),
 	       (vol->purpose == DB_TEMPORARY_DATA_PURPOSE) ? "temporary" : "permanent", vol->iopagesize,
 	       vol->nsect_total, res, (long long) alloc, switches,
@@ -10187,12 +10193,8 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	       volmap_media_rotational (vol->path),
 	       ctx->bufmap_loaded ? vol->buf_total : -1L,
 	       ctx->bufmap_loaded ? vol->buf_dirty : -1L, ctx->bufmap_loaded ? vol->buf_freed : -1L,
-	       "");
+	       (nvol_printed < nvol_selected - 1) ? "," : "");
       nvol_printed++;
-    }
-  if (nvol_printed)
-    {
-      fprintf (fp, "\n");
     }
   fprintf (fp, "  ],\n");
   if (ctx->bufmap_loaded)
