@@ -2787,6 +2787,7 @@ volmap_peek_page (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long pageid, char *out,
 }
 
 static int volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx);
+static const char *volmap_json_escape (const char *in, char *out, int outsz);
 static void volmap_describe_cell_base (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long per_pages, const char *cell_state,
 					const int *cell_owner, const long *cell_p0, const long *cell_alloc_arr, int cell,
 					char *out, size_t outsz);
@@ -10084,7 +10085,8 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
 		qsort (fr, (size_t) nfr, sizeof (VOLMAP_FRAG), volmap_frag_cmp);
 		for (t = 0; t < nfr && t < 2; t++)
 		  {
-		    char lab[192], plab[192];
+		    char lab[192], plab[192], elab[2 * 192], eplab[2 * 192];
+		    const char *olab, *oplab;
 
 		    if (fr[t].extents <= 1 || fr[t].peer_idx < 0)
 		      {
@@ -10092,12 +10094,15 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
 		      }
 		    volmap_frag_label (ctx, fr[t].file_idx, lab, sizeof (lab));
 		    volmap_frag_label (ctx, fr[t].peer_idx, plab, sizeof (plab));
+		    /* the same arguments feed the JSON and the text form: escape for JSON only */
+		    olab = as_json ? volmap_json_escape (lab, elab, (int) sizeof (elab)) : lab;
+		    oplab = as_json ? volmap_json_escape (plab, eplab, (int) sizeof (eplab)) : plab;
 		    VM_FINDING ("{\"finding\": \"fragmented_object\", \"volid\": %d, \"object\": \"%s\","
 				" \"sectors\": %ld, \"extents\": %ld, \"interleaved_with\": \"%s\", \"boundaries\": %ld}",
 				"[vol %d] '%s' occupies %ld sectors in %ld extents,"
 				" interleaved with '%s' at %ld boundaries"
 				" (sequential read restarts %ld times vs %ld ideal) [%s]",
-				vol->volid, lab, fr[t].sectors, fr[t].extents, plab, fr[t].peer_boundaries,
+				vol->volid, olab, fr[t].sectors, fr[t].extents, oplab, fr[t].peer_boundaries,
 				fr[t].extents, (long) 1, volmap_media_note (volmap_media_rotational (vol->path)));
 		  }
 		free (fr);
