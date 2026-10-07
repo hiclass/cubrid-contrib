@@ -2,4 +2,3 @@
 # to a commit, a header REF or a toolchain, it does not follow source edits, and
 # a stale one can mask a failed build.  Build from source with tools/ instead.
 /cub_volmap
-/cub_volmap-dyn
