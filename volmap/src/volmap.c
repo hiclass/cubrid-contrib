@@ -4514,7 +4514,20 @@ volmap_describe_vhdr (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, char *out, size_t o
     }
   vhdr = (const DISK_VOLUME_HEADER *) (iopage + prv_user_offset ());
   t = (time_t) vhdr->db_creation;
-  strftime (ts, sizeof (ts), "%Y-%m-%d %H:%M", localtime (&t));
+  {
+    /* db_creation comes off the disk: a torn page 0 can hold a value localtime
+       cannot represent.  Show the raw value then, rather than crash or hide it. */
+    struct tm tmv;
+
+    if (localtime_r (&t, &tmv) != NULL)
+      {
+	strftime (ts, sizeof (ts), "%Y-%m-%d %H:%M", &tmv);
+      }
+    else
+      {
+	snprintf (ts, sizeof (ts), "?(%lld)", (long long) vhdr->db_creation);
+      }
+  }
 
   /* Everything up to db_creation is at the same offset in every release, so it is
      printed unconditionally.  chkpt_lsa and next_volid follow vol_creation, which
