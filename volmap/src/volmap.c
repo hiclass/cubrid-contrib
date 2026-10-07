@@ -1210,7 +1210,8 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   vol->fd = -1;
   if (volmap_vol_fd (vol) < 0)
     {
-      fprintf (ctx->outfp, "volmap: cannot open %s: %s\n", path, strerror (errno));
+      /* diagnostics go to stderr: outfp may be a --format json document or -o file */
+      fprintf (stderr, "volmap: cannot open %s: %s\n", path, strerror (errno));
       return ER_FAILED;
     }
 
@@ -1224,13 +1225,13 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   vhdr = (DISK_VOLUME_HEADER *) (iopage + prv);
   if (strncmp (vhdr->magic, CUBRID_MAGIC_DATABASE_VOLUME, strlen (CUBRID_MAGIC_DATABASE_VOLUME)) != 0)
     {
-      fprintf (ctx->outfp, "volmap: %s is not a CUBRID volume (bad magic)\n", path);
+      fprintf (stderr, "volmap: %s is not a CUBRID volume (bad magic)\n", path);
       free (iopage);
       goto error;
     }
   if (vhdr->sect_npgs != VOLMAP_SECT_NPAGES || vhdr->iopagesize < 1024 || vhdr->nsect_total <= 0)
     {
-      fprintf (ctx->outfp, "volmap: %s header self-check failed (sect_npgs=%d iopagesize=%d)\n",
+      fprintf (stderr, "volmap: %s header self-check failed (sect_npgs=%d iopagesize=%d)\n",
 	       path, vhdr->sect_npgs, vhdr->iopagesize);
       free (iopage);
       goto error;
@@ -10652,13 +10653,13 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
       DB_INFO *dir = NULL, *db;
       if (cfg_read_directory (&dir, false) != NO_ERROR || dir == NULL)
 	{
-	  fprintf (ctx->outfp, "volmap: cannot read databases.txt - set CUBRID_DATABASES (or CUBRID) to the directory holding it\n");
+	  fprintf (stderr, "volmap: cannot read databases.txt - set CUBRID_DATABASES (or CUBRID) to the directory holding it\n");
 	  return ER_FAILED;
 	}
       db = cfg_find_db_list (dir, db_name_or_vinf);
       if (db == NULL)
 	{
-	  fprintf (ctx->outfp, "volmap: unknown database '%s' - check databases.txt, or pass the *_vinf file path directly\n",
+	  fprintf (stderr, "volmap: unknown database '%s' - check databases.txt, or pass the *_vinf file path directly\n",
 		   db_name_or_vinf);
 	  cfg_free_directory (dir);
 	  return ER_FAILED;
@@ -10670,7 +10671,7 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
   fp = fopen (vinf_path, "r");
   if (fp == NULL)
     {
-      fprintf (ctx->outfp, "volmap: cannot open %s: %s\n", vinf_path, strerror (errno));
+      fprintf (stderr, "volmap: cannot open %s: %s\n", vinf_path, strerror (errno));
       return ER_FAILED;
     }
 
