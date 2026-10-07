@@ -10398,7 +10398,7 @@ volmap_scan_temp_dir (VOLMAP_CTX * ctx, const char *dir, const char *prefix, siz
       /* The name carries the volid: fileio_make_volume_temp_name () writes
          <db>_t<volid>, unchanged from 10.1 to 11.5.  Reading it here means an
          unselected volume is never opened at all - it costs no fd, no header read,
-         and no slot in the volume array, which is what the 256 limit runs out of. */
+         and does not grow the volume array (about 300 bytes a volume). */
       {
 	char *vend = NULL;
 	long tvolid = strtol (de->d_name + plen, &vend, 10);
