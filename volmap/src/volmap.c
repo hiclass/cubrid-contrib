@@ -6414,11 +6414,21 @@ volmap_mt_wake (void)
 }
 
 /* Rebuild the volume metadata in the shadow arrays, then swap the read side.
- * Runs on worker A only.  Returns false when the swap was abandoned because the UI
- * was still reading - the scan is then discarded and retried, never published half
- * way, so a frame can not mix an old owner with a new reservation. */
-static bool
-volmap_mt_refresh (VOLMAP_CTX * ctx)
+ * Runs on worker A only.  The scan is never published half way, so a frame can not
+ * mix an old owner with a new reservation.
+ *
+ * skip_scan republishes a scan that is already sitting in the shadows: the caller
+ * uses it after VOLMAP_PUB_PENDING so an abandoned swap costs one more swap attempt
+ * rather than another full pass over every file table. */
+typedef enum
+{
+  VOLMAP_PUB_OK = 0,		/* scanned (or not) and published */
+  VOLMAP_PUB_PENDING,		/* scan is in the shadows, the UI was mid-frame: retry the swap */
+  VOLMAP_PUB_FAILED		/* no shadow memory: nothing to retry, do not re-arm */
+} VOLMAP_PUBRES;
+
+static VOLMAP_PUBRES
+volmap_mt_refresh (VOLMAP_CTX * ctx, bool skip_scan)
 {
   int vi;
 
@@ -6435,14 +6445,17 @@ volmap_mt_refresh (VOLMAP_CTX * ctx)
 	}
       if (vol->sh_stab == NULL || vol->sh_owner == NULL || vol->sh_alloc == NULL || vol->sh_pagebm == NULL)
 	{
-	  return false;		/* no shadow memory: skip this refresh (map keeps the old state) */
+	  return VOLMAP_PUB_FAILED;	/* no shadow memory: the map keeps the old state */
 	}
       vol->w_stab = vol->sh_stab;
       vol->w_owner = vol->sh_owner;
       vol->w_alloc = vol->sh_alloc;
       vol->w_pagebm = vol->sh_pagebm;
     }
-  (void) volmap_refresh (ctx);	/* every write lands in the shadows */
+  if (!skip_scan)
+    {
+      (void) volmap_refresh (ctx);	/* every write lands in the shadows */
+    }
   /* Publish at a frame boundary.  The four pointers are swapped one at a time, and a
    * frame reads them together (reservation, owner, allocation, page bitmap), so a
    * commit landing mid-frame would draw a mix of the old and new scan.  Wait for the
@@ -6469,7 +6482,7 @@ volmap_mt_refresh (VOLMAP_CTX * ctx)
     if (volmap_mt.ui_reading)
       {
 	pthread_mutex_unlock (&volmap_mt.pub_mx);
-	return false;		/* UI still mid-frame: keep the scan in the shadows and retry */
+	return VOLMAP_PUB_PENDING;	/* keep the scan in the shadows; retry the swap only */
       }
   }
   for (vi = 0; vi < ctx->nvols; vi++)
@@ -6488,7 +6501,7 @@ volmap_mt_refresh (VOLMAP_CTX * ctx)
       vol->pagebm = vol->w_pagebm;
     }
   pthread_mutex_unlock (&volmap_mt.pub_mx);
-  return true;
+  return VOLMAP_PUB_OK;
 }
 
 static void *
@@ -6497,6 +6510,7 @@ volmap_mt_a_main (void *arg)
   VOLMAP_CTX *ctx = volmap_mt.ctx;
   unsigned commit_frame = 0;
   bool committed = false;
+  bool pending_publish = false;	/* a scan waiting in the shadows for a frame boundary */
   struct timespec last_prog = { 0, 0 };
 
   (void) arg;
@@ -6506,7 +6520,10 @@ volmap_mt_a_main (void *arg)
       int resid_vi;
 
       pthread_mutex_lock (&volmap_mt.a_mx);
-      if (!volmap_mt.a_refresh_req && volmap_mt.a_resid_vi < 0 && !ctx->scan_active)
+      /* A pending publish re-arms a_refresh_req, which would otherwise skip the wait
+       * and spin: the UI it is waiting for can stay mid-frame indefinitely (the help
+       * screen holds ui_reading until it is closed).  Wait out the tick either way. */
+      if ((!volmap_mt.a_refresh_req || pending_publish) && volmap_mt.a_resid_vi < 0 && !ctx->scan_active)
 	{
 	  struct timespec dl;
 
@@ -6546,22 +6563,33 @@ volmap_mt_a_main (void *arg)
 
 	      nanosleep (&ts, NULL);
 	    }
-	  if (volmap_mt_refresh (ctx))
+	  switch (volmap_mt_refresh (ctx, pending_publish))
 	    {
+	    case VOLMAP_PUB_OK:
+	      pending_publish = false;
 	      committed = true;
 	      commit_frame = volmap_mt.ui_frames;
 	      pthread_mutex_lock (&volmap_mt.a_mx);
 	      volmap_mt.a_refresh_done = true;
 	      pthread_mutex_unlock (&volmap_mt.a_mx);
 	      volmap_mt_wake ();
-	    }
-	  else
-	    {
-	      /* The swap was abandoned to keep the frame consistent; ask for it again so
-	       * the scan that is already in the shadows gets published next time round. */
+	      break;
+
+	    case VOLMAP_PUB_PENDING:
+	      /* The swap was abandoned to keep the frame consistent.  The scan is still
+	       * in the shadows, so the retry republishes it instead of scanning again -
+	       * a UI that stays mid-frame (the help screen holds ui_reading for as long
+	       * as it is open) would otherwise re-read every file table each round. */
+	      pending_publish = true;
 	      pthread_mutex_lock (&volmap_mt.a_mx);
 	      volmap_mt.a_refresh_req = true;
 	      pthread_mutex_unlock (&volmap_mt.a_mx);
+	      break;
+
+	    case VOLMAP_PUB_FAILED:
+	      /* Out of shadow memory: retrying cannot help, so do not re-arm. */
+	      pending_publish = false;
+	      break;
 	    }
 	}
       if (resid_vi >= 0 && resid_vi < ctx->nvols)
