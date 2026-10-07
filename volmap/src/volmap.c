@@ -10854,9 +10854,20 @@ volmap (UTIL_FUNCTION_ARG * arg)
       ctx.check = true;		/* a threshold alert implies the findings report + exit-2 contract */
     }
   {
+    /* The database name: the argument itself, or the vinf file name without its
+       _vinf suffix.  The bufmap snapshot names the database, so "demodb_vinf"
+       would never match it. */
+    static char label[256];
     const char *base = strrchr (db_name, '/');
+    size_t len;
 
-    ctx.db_label = (base != NULL) ? base + 1 : db_name;
+    snprintf (label, sizeof (label), "%s", (base != NULL) ? base + 1 : db_name);
+    len = strlen (label);
+    if (len > 5 && strcmp (label + len - 5, "_vinf") == 0)
+      {
+	label[len - 5] = '\0';
+      }
+    ctx.db_label = label;
   }
   {
     const char *fmt = utility_get_option_string_value (arg_map, VOLMAP_FORMAT_S, 0);
