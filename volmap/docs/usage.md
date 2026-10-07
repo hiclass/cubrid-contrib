@@ -12,11 +12,12 @@ cub_volmap [옵션] <database-name | vinf-경로>
 
 > `-w`·`-r`·`--wide` 는 배치 출력을 위한 것이다. 인터랙티브(`-i`)에서 함께 주더라도
 > 오류로 막지는 않으며, 화면 크기에 맞춘 자동 배치가 우선한다.
-  -V, --volume=N[,N]   지정 볼륨만 출력
+  -V, --volume=N[,N]   지정 볼륨만 출력. 소견(findings)과 --check 종료코드도 지정 볼륨 기준
   -f, --full           1칸=1페이지(16KB), 줄 수 무제한
   -m, --residency      배경색 = OS 페이지캐시 상주 (mmap+mincore)
   -B, --bufmap=FILE    배경색 = cub_server 버퍼풀 상주(청록)/dirty(자주) — FILE 은 `cub_top --bcb-dump FILE` 스냅샷.
                        인터랙티브는 b 토글, 틱(--tick)·r 마다 파일이 바뀌었으면 자동 재읽기. db 이름 불일치 스냅샷은 거부
+                       (DB 이름·`<db>_vinf` 경로 어느 쪽으로 실행해도 `_vinf` 를 뗀 DB 이름으로 대조)
       --deep           전수 스캔: 레코드 밀도·포워딩 비율 (+ TUI 패널 L0 del/dead 집계).
                        스캔이 끌어들인 페이지 캐시는 종료 시 OS에 자동 반납(FADV_DONTNEED) —
                        스캔 전 mincore 스냅샷과 대조해 4KB 단위로 원래 캐시에 없던 구간만 반납하므로
@@ -125,10 +126,16 @@ volmap --format json cbench | python3 -m json.tool
 `--bufmap` 시 `buffered_pages`/`dirty_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
 `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
 
+- **stdout 은 JSON 문서만 담는다.** 볼륨 열기 실패·레이아웃 판별 경고 같은 진단 메시지는 stderr 로만 나간다
+  (`-o` 파일도 같다). 라이브 서버에서 spill 볼륨이 스캔 도중 사라져도 문서는 깨지지 않는다.
+- **`-V` 는 `volumes[]` 와 `findings[]` 를 함께 거른다.** `--check` 종료코드 2 는 지정한 볼륨에 소견이 있을 때만
+  나오므로, 특정 볼륨만 감시하는 경보에 그대로 쓸 수 있다.
+- 클래스·인덱스 이름은 JSON 문자열로 이스케이프된다(따옴표·백슬래시가 든 식별자 포함). 텍스트 리포트는 원래 이름 그대로다.
+
 ## 5. 활용 예
 
 ```bash
-cubrid volmap cbench                       # 전체 지도 + 서버 Δ 오버레이
+cubrid volmap cbench                       # 전체 지도
 cubrid volmap -m cbench                    # 어느 영역이 메모리에 올라와 있나
 cubrid volmap -i cbench                    # a+m 켜고 loaddb/백업/스필이 볼륨·캐시를 채우는 모습 관찰
 cubrid volmap -i --deep cbench             # 패널에서 섹터 단위 del/dead 집계까지
