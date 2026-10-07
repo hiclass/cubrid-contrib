@@ -9966,6 +9966,13 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
       long res = 0;
       INT64 alloc = 0;
 
+      /* -V narrows the findings as it narrows the volumes: --check's exit status
+         must speak for the volumes asked about, not the rest of the database */
+      if (!volmap_vol_selected (ctx, vol->volid))
+	{
+	  continue;
+	}
+
       for (s = 0; s < vol->nsect_total; s++)
 	{
 	  res += vol->stab[s];
@@ -10105,7 +10112,8 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
     }
   for (fi = 0; fi < ctx->nfiles; fi++)
     {
-      if (ctx->files[fi].sectors_seen == 0 && ctx->files[fi].n_sector_total > 0)
+      if (ctx->files[fi].sectors_seen == 0 && ctx->files[fi].n_sector_total > 0
+	  && volmap_vol_selected (ctx, ctx->files[fi].vfid.volid))
 	{
 	  VM_FINDING ("{\"finding\": \"stale_file_entry\", \"vfid\": \"%d|%d\"}",
 		      "[file %d|%d] header exists but no sectors matched - dropped/reused during scan",
