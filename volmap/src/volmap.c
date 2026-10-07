@@ -10169,7 +10169,7 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	       " \"unknown_sectors\": %ld, \"tde_pages_probed\": %ld,"
 	       " \"idle_pages\": %lld, \"idle_pct\": %.3f, \"fragmentation_pct\": %.3f,"
 	       " \"media_rotational\": %d,"
-	       " \"buffered_pages\": %ld, \"dirty_pages\": %ld, \"buffered_freed_pages\": %ld}%s\n",
+	       " \"buffered_pages\": %ld, \"dirty_pages\": %ld, \"buffered_freed_pages\": %ld}%s",
 	       nvol_printed ? ",\n" : "",
 	       vol->volid, volmap_json_escape (vol->path, epath, (int) sizeof (epath)),
 	       (vol->purpose == DB_TEMPORARY_DATA_PURPOSE) ? "temporary" : "permanent", vol->iopagesize,
@@ -10312,7 +10312,7 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
   }
   fprintf (fp, "  \"findings\": [\n");
   int nfind = volmap_findings (ctx, fp, true);
-  fprintf (fp, "\n  ]\n}\n");
+  fprintf (fp, "%s  ]\n}\n", nfind ? "\n" : "");
   return nfind;
 }
 
