@@ -29,9 +29,13 @@
 #      instead.  v11.4 inserting vol_creation into DISK_VOLUME_HEADER is the
 #      case this exists for.
 #
-# A structure that is not found at all counts as a change: renaming it, or moving
-# it to a file this script does not fetch, would otherwise skip every comparison
-# for it and report a clean run.
+# The report has three parts, and only the second decides the exit status:
+#   history       changes between consecutive releases - informational, since a
+#                 change the copy already follows needs no action
+#   current copy  storage_ondisk_layout.hpp against the newest release, and any
+#                 structure not found at all (renamed, or moved to a file this
+#                 script does not fetch) - these fail the check
+#   develop       with --develop only - a warning, never a failure
 #
 # Usage:
 #   sh tools/check-releases.sh              # structures + build (slow)
@@ -42,8 +46,8 @@
 # --develop reports what the next release will bring, before it ships.  It is
 # opt-in because develop moves: a change there is a warning, not a defect.
 #
-# Exit status: 0 clean, 1 a build failed, 2 a structure changed or went missing,
-#              3 both.
+# Exit status: 0 clean, 1 a build failed, 2 the copy needs updating (out of date
+#              with the newest release, or a structure went missing), 3 both.
 set -u
 
 SELF=$(cd "$(dirname "$0")" && pwd)
@@ -147,67 +151,87 @@ missing = [t for t in tags if not per[t]]
 if missing:
     print("  could not read sources for: " + " ".join(missing))
 
-changed = False
+def diff(a, b):
+    for line in difflib.unified_diff(a, b, lineterm=''):
+        if line.startswith(('+', '-')) and not line.startswith(('+++', '---')):
+            print(f"      {line}")
 
-# A structure that is not found at all is the regression this script exists for:
-# renaming it, or moving it to a file that is not fetched, would otherwise make
-# every later comparison a silent skip.
 def supported(tag):
     """volmap reads 10.1 and up; 10.0 is the pre-redesign format its header
     self-check rejects, and those structures do not exist there."""
     m = re.match(r'v(\d+)\.(\d+)', tag)
     return m is None or (int(m.group(1)), int(m.group(2))) >= (10, 1)
 
-absent = False
-for t in tags:
-    if not per[t] or not supported(t):
+releases = [t for t in tags if per[t] and t != "develop"]
+develop = "develop" if "develop" in tags and per.get("develop") else None
+
+# 1. History - what changed between consecutive releases.  Informational only:
+#    a change that the copy already follows (11.3 -> 11.4 vol_creation) is not
+#    something to fix, so it must not fail the check.
+print("  -- history (informational) --")
+seen = False
+chain = releases + ([develop] if develop else [])
+for prev_tag, t in zip(chain, chain[1:]):
+    for name in WANTED:
+        a, b = per[prev_tag].get(name), per[t].get(name)
+        if a is None or b is None or a == b:
+            continue
+        seen = True
+        print(f"  CHANGED {name}: {prev_tag} -> {t}")
+        diff(a, b)
+if not seen:
+    print("  none")
+
+# 2. What needs action today - these fail the check.
+#    A structure not found at all is the regression this script exists for:
+#    renaming it, or moving it to a file that is not fetched, would otherwise make
+#    every comparison a silent skip.
+print("  -- current copy (fails the check) --")
+fail = False
+for t in releases:
+    if not supported(t):
         continue
     gone = [n for n in WANTED if n not in per[t]]
     if gone:
-        absent = True
+        fail = True
         print(f"  NOT FOUND in {t}: " + ", ".join(gone))
-if absent:
-    print("  -> a copied structure was renamed or moved; update WANTED and the"
-          " file list above, then re-run")
-
-prev_tag = None
-for t in tags:
-    if not per[t]:
-        continue
-    if prev_tag is not None:
-        for name in WANTED:
-            a, b = per[prev_tag].get(name), per[t].get(name)
-            if a is None or b is None or a == b:
-                continue
-            changed = True
-            print(f"  CHANGED {name}: {prev_tag} -> {t}")
-            for line in difflib.unified_diff(a, b, lineterm=''):
-                if line.startswith(('+', '-')) and not line.startswith(('+++', '---')):
-                    print(f"      {line}")
-    prev_tag = t
-
-# the copy in this tree against the newest release
-newest = [t for t in tags if per[t]]
-if newest:
-    newest = newest[-1]
-    mine = structs(open(local, encoding='utf-8', errors='replace').read())
-    gone = [n for n in WANTED if n not in mine]
-    if gone:
-        absent = True
-        print("  NOT FOUND in storage_ondisk_layout.hpp: " + ", ".join(gone))
+mine = structs(open(local, encoding='utf-8', errors='replace').read())
+gone = [n for n in WANTED if n not in mine]
+if gone:
+    fail = True
+    print("  NOT FOUND in storage_ondisk_layout.hpp: " + ", ".join(gone))
+if releases:
+    newest = releases[-1]
     for name in WANTED:
         a, b = mine.get(name), per[newest].get(name)
         if a is None or b is None or a == b:
             continue
-        changed = True
+        fail = True
         print(f"  COPY OUT OF DATE {name}: storage_ondisk_layout.hpp vs {newest}")
-        for line in difflib.unified_diff(a, b, lineterm=''):
-            if line.startswith(('+', '-')) and not line.startswith(('+++', '---')):
-                print(f"      {line}")
+        diff(a, b)
+print("  -> update src/storage_ondisk_layout.hpp and docs/ondisk-format.md" if fail
+      else f"  storage_ondisk_layout.hpp matches {releases[-1] if releases else '?'}")
 
-print("  no structure changes" if not (changed or absent) else
-      "  -> update src/storage_ondisk_layout.hpp and docs/ondisk-format.md")
-sys.exit(2 if (changed or absent) else 0)
+# 3. develop - the next release, before it ships.  A warning, never a failure:
+#    develop moves, and nothing in it is released yet.
+if develop:
+    print("  -- develop (warning only) --")
+    warn = False
+    gone = [n for n in WANTED if n not in per[develop]]
+    if gone:
+        warn = True
+        print("  NOT FOUND in develop: " + ", ".join(gone))
+    for name in WANTED:
+        a, b = mine.get(name), per[develop].get(name)
+        if a is None or b is None or a == b:
+            continue
+        warn = True
+        print(f"  NEXT RELEASE {name}: storage_ondisk_layout.hpp vs develop")
+        diff(a, b)
+    if not warn:
+        print("  none")
+
+sys.exit(2 if fail else 0)
 PY
     # Any non-zero status counts, not just 2: an exception exits 1, and swallowing
     # that would report a clean run on a check that never finished.
