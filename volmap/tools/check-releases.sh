@@ -32,9 +32,10 @@
 # The report has three parts, and only the second decides the exit status:
 #   history       changes between consecutive releases - informational, since a
 #                 change the copy already follows needs no action
-#   current copy  storage_ondisk_layout.hpp against the newest release, and any
+#   current copy  storage_ondisk_layout.hpp against the newest release, any
 #                 structure not found at all (renamed, or moved to a file this
-#                 script does not fetch) - these fail the check
+#                 script does not fetch), and any supported release whose
+#                 sources could not be fetched - these fail the check
 #   develop       with --develop only - a warning, never a failure
 #
 # Usage:
@@ -107,7 +108,8 @@ if [ "$do_structs" = "1" ]; then
         mkdir -p "$WORK/$t"
         for f in storage/disk_manager.c storage/file_manager.c \
                  storage/file_manager.h storage/slotted_page.h; do
-            curl -fsSL "$RAW/$t/src/$f" -o "$WORK/$t/$(basename "$f")" 2>/dev/null
+            curl -fsSL "$RAW/$t/src/$f" -o "$WORK/$t/$(basename "$f")" 2>/dev/null \
+                || echo "$t $f" >>"$WORK/fetch-failed"
         done
     done
 
@@ -147,9 +149,17 @@ def read(d):
     return acc
 
 per = {t: read(os.path.join(work, t)) for t in tags}
-missing = [t for t in tags if not per[t]]
-if missing:
-    print("  could not read sources for: " + " ".join(missing))
+
+# Files that could not be fetched, per tag.  A tag that could not be read is not
+# skipped quietly: the comparison would fall back to an older release and could
+# pass without ever seeing the newest format.
+failed = {}
+try:
+    for line in open(os.path.join(work, "fetch-failed")):
+        t, f = line.split(None, 1)
+        failed.setdefault(t, []).append(f.strip())
+except OSError:
+    pass
 
 def diff(a, b):
     for line in difflib.unified_diff(a, b, lineterm=''):
@@ -188,6 +198,12 @@ if not seen:
 #    every comparison a silent skip.
 print("  -- current copy (fails the check) --")
 fail = False
+unread = False
+for t in tags:
+    if t == "develop" or not supported(t) or (per[t] and t not in failed):
+        continue
+    fail = unread = True
+    print(f"  COULD NOT READ {t}: " + (", ".join(failed.get(t, [])) or "no structures found"))
 for t in releases:
     if not supported(t):
         continue
@@ -209,11 +225,19 @@ if releases:
         fail = True
         print(f"  COPY OUT OF DATE {name}: storage_ondisk_layout.hpp vs {newest}")
         diff(a, b)
-print("  -> update src/storage_ondisk_layout.hpp and docs/ondisk-format.md" if fail
-      else f"  storage_ondisk_layout.hpp matches {releases[-1] if releases else '?'}")
+if unread:
+    print("  -> a source could not be fetched (network, or the file moved in that"
+          " release): fix the file list above, then re-run")
+if fail and not unread:
+    print("  -> update src/storage_ondisk_layout.hpp and docs/ondisk-format.md")
+if not fail:
+    print(f"  storage_ondisk_layout.hpp matches {releases[-1] if releases else '?'}")
 
 # 3. develop - the next release, before it ships.  A warning, never a failure:
 #    develop moves, and nothing in it is released yet.
+if "develop" in tags and (not develop or "develop" in failed):
+    print("  -- develop (warning only) --")
+    print("  COULD NOT READ develop: " + (", ".join(failed.get("develop", [])) or "no structures found"))
 if develop:
     print("  -- develop (warning only) --")
     warn = False
