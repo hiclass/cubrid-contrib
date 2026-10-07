@@ -571,9 +571,11 @@ volmap_vlayout_probe (const char *path)
     }
   if (vc == 0)
     {
-      /* 10.1 .. 11.3; the watermark splits 10.1 off from the rest */
+      /* 10.1 .. 11.3; the watermark splits 10.1 off from the rest.  Too few pages
+         to sample (a copy cut short, say) is no answer: leave it UNKNOWN so the next
+         volume or the log decides, rather than assume the watermark is there. */
       wm = volmap_probe_watermark (fd, vhdr->iopagesize);
-      lay = (wm == 0) ? VOLMAP_VLAY_101 : VOLMAP_VLAY_PRE_114;
+      lay = (wm == 0) ? VOLMAP_VLAY_101 : (wm == 1) ? VOLMAP_VLAY_PRE_114 : VOLMAP_VLAY_UNKNOWN;
     }
 
 done:
