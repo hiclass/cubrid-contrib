@@ -8646,7 +8646,15 @@ volmap_interactive (VOLMAP_CTX * ctx)
 				      {
 					volmap_ov_sect_base = 0;
 				      }
-				    l0_psel = volmap_ov_sect_base;
+				    {
+				      /* the window's first page, as an absolute page (see below) */
+				      long cp = panel.sel_lo + volmap_ov_sect_base;
+
+				      l0_psel_sect = (DKNSECTS) (cp / VOLMAP_SECT_NPAGES);
+				      ov_sect_off = 0;
+				      l0_psel = (int) (cp % VOLMAP_SECT_NPAGES);
+				      l0_anchor_pg = cp;
+				    }
 				    ov_focus = 1;
 				    ov_slot = 0;
 				    force_full = true;
@@ -8658,8 +8666,18 @@ volmap_interactive (VOLMAP_CTX * ctx)
 						 && panel.base_pg + prow * gws + ocol <= panel.sel_hi)))
 				  {
 				    /* grey cells outside the map cell are not selectable by click either, matching the arrows */
+				    /* The grid starts at the map cell's first page, so the click names
+				       an absolute page; l0_psel is an offset within the anchor sector.
+				       Re-anchor on the clicked page's sector - storing the grid index
+				       as the offset lands elsewhere whenever the cell starts
+				       mid-sector.  The cell is unchanged, so the anchor stays put. */
+				    long cp = panel.base_pg + (long) prow * gws + ocol;
+
 				    ov_focus = 1;
-				    l0_psel = pk;
+				    l0_psel_sect = (DKNSECTS) (cp / VOLMAP_SECT_NPAGES);
+				    ov_sect_off = 0;
+				    l0_psel = (int) (cp % VOLMAP_SECT_NPAGES);
+				    l0_anchor_pg = cp;
 				    ov_slot = 0;
 				    status2[0] = '\0';
 				  }
