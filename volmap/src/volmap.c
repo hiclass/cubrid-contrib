@@ -4668,15 +4668,30 @@ volmap_hangul_to_keys (unsigned int cp)
 static int
 volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx)
 {
+  /* The describe line asks again on every frame for the same cell; remember the
+     last answer so a cursor resting on an overflow page costs one walk, not one
+     per frame.  Keyed on the file table as well, which [r] can rebuild. */
+  static const VOLMAP_FILE *memo_files;
+  static int memo_nfiles = -1, memo_ovf = -1, memo_owner = -1;
   int i;
 
+  (void) vol;
   if (ovf_idx < 0 || ovf_idx >= ctx->nfiles)
     {
       return -1;
     }
+  if (memo_files == ctx->files && memo_nfiles == ctx->nfiles && memo_ovf == ovf_idx)
+    {
+      return memo_owner;
+    }
+  memo_files = ctx->files;
+  memo_nfiles = ctx->nfiles;
+  memo_ovf = ovf_idx;
+  memo_owner = -1;
   for (i = 0; i < ctx->nfiles; i++)
     {
       VOLMAP_FILE *hf = &ctx->files[i];
+      VOLMAP_VOLUME *hv;
       char *iop;
       long hpg;
       int guess;
@@ -4685,7 +4700,13 @@ volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx)
 	{
 	  continue;
 	}
-      iop = volmap_scratch (ctx, vol->iopagesize);
+      /* the heap header lives in the heap's own volume, not the one on screen */
+      hv = volmap_find_vol (ctx, hf->vfid.volid);
+      if (hv == NULL)
+	{
+	  continue;
+	}
+      iop = volmap_scratch (ctx, hv->iopagesize);
       if (iop == NULL)
 	{
 	  return -1;
@@ -4701,16 +4722,16 @@ volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx)
 	  int ovol, ofid;
 
 	  hpg = (long) hf->vfid.fileid + guess;
-	  if (hpg < 0 || hpg >= (long) vol->nsect_total * VOLMAP_SECT_NPAGES)
+	  if (hpg < 0 || hpg >= (long) hv->nsect_total * VOLMAP_SECT_NPAGES)
 	    {
 	      break;
 	    }
-	  if (!volmap_read_iopage (vol, (PAGEID) hpg, iop))
+	  if (!volmap_read_iopage (hv, (PAGEID) hpg, iop))
 	    {
 	      continue;
 	    }
 	  pr = (const FILEIO_PAGE_RESERVED *) iop;
-	  if (pr->ptype != PAGE_HEAP || pr->pageid != (PAGEID) hpg)
+	  if (pr->ptype != PAGE_HEAP || pr->pageid != (PAGEID) hpg || pr->volid != hf->vfid.volid)
 	    {
 	      continue;
 	    }
@@ -4720,7 +4741,7 @@ volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx)
 	    {
 	      continue;
 	    }
-	  us = vol->user_size;
+	  us = hv->user_size;
 	  wslot = *(const unsigned int *) (ud + us - 4);	/* slot 0 */
 	  off = (int) (wslot & 0x3FFF);
 	  ln = (int) ((wslot >> 14) & 0x3FFF);
@@ -4733,6 +4754,7 @@ volmap_ovf_owner_file (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int ovf_idx)
 	  if (ofid > 0 && ovol == (int) ctx->files[ovf_idx].vfid.volid
 	      && ofid == (int) ctx->files[ovf_idx].vfid.fileid)
 	    {
+	      memo_owner = i;
 	      return i;
 	    }
 	  break;
