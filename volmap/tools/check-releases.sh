@@ -30,12 +30,21 @@
 #      instead.  v11.4 inserting vol_creation into DISK_VOLUME_HEADER is the
 #      case this exists for.
 #
+# A structure that is not found at all counts as a change: renaming it, or moving
+# it to a file this script does not fetch, would otherwise skip every comparison
+# for it and report a clean run.
+#
 # Usage:
 #   sh tools/check-releases.sh              # structures + build (slow)
 #   sh tools/check-releases.sh --structs    # structures only (fast, no compiler)
 #   sh tools/check-releases.sh --builds     # builds only
+#   sh tools/check-releases.sh --develop    # also compare against upstream develop
 #
-# Exit status: 0 clean, 1 a build failed, 2 a structure changed, 3 both.
+# --develop reports what the next release will bring, before it ships.  It is
+# opt-in because develop moves: a change there is a warning, not a defect.
+#
+# Exit status: 0 clean, 1 a build failed, 2 a structure changed or went missing,
+#              3 both.
 set -u
 
 SELF=$(cd "$(dirname "$0")" && pwd)
@@ -44,14 +53,16 @@ API=${API:-https://api.github.com/repos/CUBRID/cubrid/releases?per_page=100}
 RAW=${RAW:-https://raw.githubusercontent.com/CUBRID/cubrid}
 KEEP=${KEEP:-0}
 
-do_structs=1; do_builds=1
-case "${1:-}" in
-  --structs) do_builds=0 ;;
-  --builds)  do_structs=0 ;;
-  -h|--help) sed -n '18,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  "")        ;;
-  *)         echo "unknown option: $1" >&2; exit 2 ;;
-esac
+do_structs=1; do_builds=1; with_develop=0
+for a in "$@"; do
+  case "$a" in
+    --structs)   do_builds=0 ;;
+    --builds)    do_structs=0 ;;
+    --develop)   with_develop=1 ;;
+    -h|--help)   sed -n '18,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)           echo "unknown option: $a" >&2; exit 2 ;;
+  esac
+done
 
 mkdir -p "$WORK" || exit 1
 [ "$KEEP" = "1" ] || trap 'rm -rf "$WORK"' EXIT
@@ -78,6 +89,10 @@ PY
 )
 [ -n "$TAGS" ] || { echo "no usable tags in the API response" >&2; exit 1; }
 echo "  $(echo "$TAGS" | wc -w) release lines: $TAGS"
+# develop sorts after every release, so it becomes the newest in the comparison and
+# the local copy is checked against it.  Opt-in: it moves, and a change there is a
+# warning about the next release rather than something to fix today.
+[ "$with_develop" = "1" ] && TAGS="$TAGS develop"
 
 rc=0
 
@@ -134,6 +149,28 @@ if missing:
     print("  could not read sources for: " + " ".join(missing))
 
 changed = False
+
+# A structure that is not found at all is the regression this script exists for:
+# renaming it, or moving it to a file that is not fetched, would otherwise make
+# every later comparison a silent skip.
+def supported(tag):
+    """volmap reads 10.1 and up; 10.0 is the pre-redesign format its header
+    self-check rejects, and those structures do not exist there."""
+    m = re.match(r'v(\d+)\.(\d+)', tag)
+    return m is None or (int(m.group(1)), int(m.group(2))) >= (10, 1)
+
+absent = False
+for t in tags:
+    if not per[t] or not supported(t):
+        continue
+    gone = [n for n in WANTED if n not in per[t]]
+    if gone:
+        absent = True
+        print(f"  NOT FOUND in {t}: " + ", ".join(gone))
+if absent:
+    print("  -> a copied structure was renamed or moved; update WANTED and the"
+          " file list above, then re-run")
+
 prev_tag = None
 for t in tags:
     if not per[t]:
@@ -155,6 +192,10 @@ newest = [t for t in tags if per[t]]
 if newest:
     newest = newest[-1]
     mine = structs(open(local, encoding='utf-8', errors='replace').read())
+    gone = [n for n in WANTED if n not in mine]
+    if gone:
+        absent = True
+        print("  NOT FOUND in storage_ondisk_layout.hpp: " + ", ".join(gone))
     for name in WANTED:
         a, b = mine.get(name), per[newest].get(name)
         if a is None or b is None or a == b:
@@ -165,11 +206,17 @@ if newest:
             if line.startswith(('+', '-')) and not line.startswith(('+++', '---')):
                 print(f"      {line}")
 
-print("  no structure changes" if not changed else
+print("  no structure changes" if not (changed or absent) else
       "  -> update src/storage_ondisk_layout.hpp and docs/ondisk-format.md")
-sys.exit(2 if changed else 0)
+sys.exit(2 if (changed or absent) else 0)
 PY
-    [ $? -eq 2 ] && rc=$((rc + 2))
+    # Any non-zero status counts, not just 2: an exception exits 1, and swallowing
+    # that would report a clean run on a check that never finished.
+    case $? in
+      0) ;;
+      2) rc=$((rc + 2)) ;;
+      *) echo "  the structure check did not finish" >&2; rc=$((rc + 2)) ;;
+    esac
 fi
 
 # ---- builds ---------------------------------------------------------------
