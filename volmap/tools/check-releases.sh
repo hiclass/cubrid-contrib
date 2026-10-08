@@ -304,7 +304,10 @@ if [ "$do_builds" = "1" ]; then
             echo "skipped (no volmap build before 10.2)"
             continue
         fi
-        if REF="$t" WORK="$WORK/build-$t" OUT="$WORK/cub_volmap-$t" \
+        # Set OUT from the outer WORK first: in a prefix assignment list a later
+        # word already sees the WORK assigned before it.
+        out="$WORK/cub_volmap-$t"
+        if REF="$t" WORK="$WORK/build-$t" OUT="$out" \
            sh "$SELF/build_fetch.sh" >"$WORK/$t.log" 2>&1; then
             echo "OK"
         else
