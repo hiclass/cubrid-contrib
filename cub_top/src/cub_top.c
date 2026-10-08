@@ -6808,7 +6808,7 @@ static void hout(const char *fmt,...){
    from mode keys to concepts. */
 /* Name, usage and options: what -h prints, and the first page of the live h help */
 static void usage_opts(void){
-    hout("cub_top (C) — CUBRID 메모리 관측 (단일 파일 C99, 외부 의존 0)\n\n사용: cub_top <모드> [옵션] [db명]");
+    hout("사용: cub_top <모드> [옵션] [db명]");
     for(int i=0;i<NOPTS;i++){
         /* Pad by display width: a Hangul key such as [db명] is wider than its byte count says */
         char kb[64]; snprintf(kb,sizeof kb,"%s%s%s",OPTS[i].key,OPTS[i].meta[0]?" ":"",OPTS[i].meta);
