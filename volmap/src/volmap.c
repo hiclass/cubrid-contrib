@@ -10455,11 +10455,21 @@ volmap_scan_temp_dir (VOLMAP_CTX * ctx, const char *dir, const char *prefix, siz
   return changed;
 }
 
+/* Same directory, however each path is spelled (trailing slash, symlink, relative) */
+static int
+volmap_same_dir (const char *a, const char *b)
+{
+  struct stat sa, sb;
+
+  return stat (a, &sa) == 0 && stat (b, &sb) == 0 && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
 static int
 volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
 {
   char dircopy[PATH_MAX], basecopy[PATH_MAX], prefix[PATH_MAX];
   char *dirp, *basep, *suffix;
+  const char *live, *other;
   size_t plen;
   int vi, changed = 0;
 
@@ -10482,17 +10492,46 @@ volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
     }
   plen = strlen (prefix);
 
+  /* The engine creates and removes temp volumes only in temp_volume_path, or in the
+     database directory when that is unset (boot_make_temp_volume_fullname).  After
+     the setting changes, files left in the other directory are never cleaned up, so
+     the engine's directory is the live one and wins a volid clash. */
+  live = dirp;
+  other = NULL;
+  if (ctx->temp_path[0] != '\0' && !volmap_same_dir (ctx->temp_path, dirp))
+    {
+      live = ctx->temp_path;
+      other = dirp;
+    }
+
   /* Drop temp volumes that vanished - keeping one whose file is gone draws an
-     empty shell.  Non-temp volumes (listed in the vinf) are left alone, told
+     empty shell - and leftovers outside the live directory once the live one has
+     the same file.  Non-temp volumes (listed in the vinf) are left alone, told
      apart by name. */
   for (vi = 0; vi < ctx->nvols;)
     {
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
       const char *b = strrchr (vol->path, '/');
+      int drop = 0;
 
       b = (b != NULL) ? b + 1 : vol->path;
-      if (strncmp (b, prefix, plen) == 0 && b[plen] >= '0' && b[plen] <= '9'
-	  && access (vol->path, R_OK) != 0)
+      if (strncmp (b, prefix, plen) == 0 && b[plen] >= '0' && b[plen] <= '9')
+	{
+	  drop = (access (vol->path, R_OK) != 0);
+	  if (!drop && other != NULL)
+	    {
+	      char vdir[PATH_MAX], lpath[PATH_MAX];
+
+	      snprintf (vdir, sizeof (vdir), "%s", vol->path);
+	      if (!volmap_same_dir (dirname (vdir), live)
+		  && (size_t) snprintf (lpath, sizeof (lpath), "%s/%s", live, b) < sizeof (lpath)
+		  && access (lpath, R_OK) == 0)
+		{
+		  drop = 1;
+		}
+	    }
+	}
+      if (drop)
 	{
 	  volmap_vol_release (vol);
 	  /* close the gap by shifting the array down (volume order is also screen order) */
@@ -10509,20 +10548,13 @@ volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
       vi++;
     }
 
-  /* add newly created temp volumes, skipping volumes already held.  Two directories
-     may hold them: the database directory, and temp_volume_path when the server
-     is configured to spill elsewhere.  Whether they are the same directory is
-     decided by device and inode, since the two paths may be spelled differently. */
-  changed |= volmap_scan_temp_dir (ctx, dirp, prefix, plen);
-  if (ctx->temp_path[0] != '\0')
+  /* add newly created temp volumes, skipping volumes already held: the live
+     directory first, so its volume wins a volid clash, then the other one, whose
+     files are shown only when the live directory has no volume of that volid. */
+  changed |= volmap_scan_temp_dir (ctx, live, prefix, plen);
+  if (other != NULL)
     {
-      struct stat sa, sb;
-
-      if (stat (ctx->temp_path, &sa) != 0 || stat (dirp, &sb) != 0 || sa.st_dev != sb.st_dev
-	  || sa.st_ino != sb.st_ino)
-	{
-	  changed |= volmap_scan_temp_dir (ctx, ctx->temp_path, prefix, plen);
-	}
+      changed |= volmap_scan_temp_dir (ctx, other, prefix, plen);
     }
   return changed;
 }
