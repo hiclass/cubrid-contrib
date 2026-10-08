@@ -200,7 +200,7 @@ debug 로 빌드하고 그 DWARF 에서 뽑는다. 구조체 오프셋은 컴파
 | [docs/views.md](docs/views.md) | 화면 구성과 글리프 문법 |
 | [docs/portability.md](docs/portability.md) | 이식성 계층, 구 커널·구 glibc 대응 |
 | [docs/limitations.md](docs/limitations.md) | 제한 사항과 검증 범위 |
-| [examples/](examples/) | 텍스트 출력 캡처 9종 (트리·terse·JSON·도움말·기록 파일·재생 terse 등). 대시보드·시계열 화면은 [docs/](docs/) 의 스크린샷 |
+| [examples/](examples/) | 텍스트 출력 캡처 8종 (트리·terse·JSON·도움말·dwoff·비 소유 계정 terse·기록 파일·재생 terse). 대시보드·시계열 화면은 [docs/](docs/) 의 스크린샷 |
 | [offsets/README.md](offsets/README.md) | 오프셋 표의 의미와 새 버전 표 생성 |
 
 ## 검증
