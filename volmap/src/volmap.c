@@ -197,9 +197,10 @@ struct volmap_ctx
   /* header layout of these volumes: v11.4 inserted vol_creation, so the fields
      after it are 8 bytes earlier on an older volume (see VOLMAP_VLAYOUT) */
   int vlayout;
-  /* bumped by every volmap_refresh: lets the UI drop answers it cached from the
-     previous on-disk state (see volmap_ovf_owner_file) */
-  volatile unsigned refresh_gen;
+  /* bumped when a refresh is published: lets the UI drop answers it cached from the
+     previous on-disk state (see volmap_ovf_owner_file).  Written under pub_mx while
+     no frame is in progress, or by the UI thread itself, so frames read it safely. */
+  unsigned refresh_gen;
   char db_release[32];
   VOLMAP_FILE *files;
   int nfiles;
@@ -3020,7 +3021,6 @@ volmap_refresh (VOLMAP_CTX * ctx)
   char *iopage = NULL;
   int prv = prv_user_offset ();
 
-  ctx->refresh_gen++;
   for (vi = 0; vi < ctx->nvols; vi++)
     {
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
@@ -6572,6 +6572,7 @@ volmap_mt_refresh (VOLMAP_CTX * ctx, bool skip_scan)
       vol->alloc = vol->w_alloc;
       vol->pagebm = vol->w_pagebm;
     }
+  ctx->refresh_gen++;		/* with the swap: cached answers expire when the new map is shown */
   pthread_mutex_unlock (&volmap_mt.pub_mx);
   return VOLMAP_PUB_OK;
 }
@@ -8388,6 +8389,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		  goto interactive_input;	/* repaint arrives with the completion wakeup */
 		}
 	      (void) volmap_refresh (ctx);
+	      ctx->refresh_gen++;
 	      force_full = true;
 	      if (ctx->residency)
 		{
@@ -9044,6 +9046,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	    else
 	      {
 		(void) volmap_refresh (ctx);
+		ctx->refresh_gen++;
 		force_full = true;
 		snprintf (status2, sizeof (status2), "%s",
 			  L ("refreshed (incremental)",
