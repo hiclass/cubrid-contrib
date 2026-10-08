@@ -24,6 +24,10 @@
 #   REF=v11.5.0 sh tools/build_fetch.sh     # a specific tag or commit
 #   KEEP=1 sh tools/build_fetch.sh          # keep the fetched headers
 #
+# The headers go to a directory this run creates: WORK if it does not exist yet,
+# otherwise a fresh subdirectory of it, so nothing already there is touched.  It is
+# removed on exit, failures included, unless KEEP=1.
+#
 # Why headers at all: volmap reads on-disk structures through the engine's own
 # declarations, so offsets are computed by the compiler rather than hard-coded.
 # That is the point of the design - and its cost is needing these headers.
@@ -65,8 +69,14 @@ src/transaction/log_lsa.hpp
 # Present from 11.4 onwards only.
 HEADERS_OPTIONAL="src/base/memory_cwrapper.h"
 
+if [ -e "$WORK" ]; then
+  WORK=$(mktemp -d "$WORK/build_fetch.XXXXXX")
+else
+  mkdir -p "$WORK"
+fi
+[ "${KEEP:-0}" = 1 ] || trap 'rm -rf "$WORK"' EXIT
+
 echo "fetching headers from $REPO @ $REF"
-rm -rf "$WORK"
 for h in $HEADERS; do
   mkdir -p "$WORK/$(dirname "$h")"
   if ! curl -fsSL "$REPO/$REF/$h" -o "$WORK/$h"; then
@@ -238,14 +248,13 @@ else
        -static-libstdc++ -static-libgcc -o "$OUT" >"$LOG" 2>&1; then
     cat "$LOG" >&2
     echo "build failed for REF=$REF" >&2
-    [ -n "$KEEP" ] || rm -rf "$WORK"
     exit 1
   fi
 fi
 
 [ -x "$OUT" ] || { echo "compiler reported success but $OUT is missing" >&2; exit 1; }
 
-[ -n "$KEEP" ] || rm -rf "$WORK"
+[ "${KEEP:-0}" = 1 ] && echo "headers kept in $WORK"
 echo "built: $OUT"
 file "$OUT" | cut -c1-100
 

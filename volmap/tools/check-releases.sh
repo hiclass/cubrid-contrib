@@ -54,8 +54,9 @@
 #              of date with the newest release, or a structure went missing),
 #              3 both, 64 usage error.
 #
-# The work directory is removed on exit unless KEEP=1; a WORK given by the caller
-# that already existed is left in place.  Logs of failed builds are kept in a
+# The run works only in a directory it creates: WORK if it does not exist yet,
+# otherwise a fresh subdirectory of it, so nothing already there is touched.  That
+# directory is removed on exit unless KEEP=1.  Logs of failed builds are kept in a
 # separate directory, which the report names.
 set -u
 
@@ -76,18 +77,20 @@ for a in "$@"; do
   esac
 done
 
-# Remove only a work directory this run created: a WORK given by the caller may
-# hold files of theirs.  INT/TERM/HUP exit through the EXIT trap so an interrupted
+# A WORK given by the caller may hold files of theirs, so an existing one gets a
+# fresh subdirectory.  INT/TERM/HUP exit through the EXIT trap so an interrupted
 # run cleans up too.
-created=0
-[ -e "$WORK" ] || created=1
-mkdir -p "$WORK" || exit 1
-cleanup () { [ "$created" = "1" ] && [ "$KEEP" != "1" ] && rm -rf "$WORK"; }
+if [ -e "$WORK" ]; then
+    WORK=$(mktemp -d "$WORK/volmap-releases.XXXXXX") || exit 1
+else
+    mkdir -p "$WORK" || exit 1
+fi
+cleanup () { [ "$KEEP" != "1" ] && rm -rf "$WORK"; }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-LOGS=${TMPDIR:-/tmp}/volmap-build-logs.$$      # created on the first failed build
+LOGS=""                                         # created on the first failed build
 
 # Builds need the headers volmap includes, which exist from 10.2 on (10.0 and 10.1
 # lack cubrid_getopt.h).  Non-numeric refs (develop) pass.
@@ -130,7 +133,6 @@ rc=0
 if [ "$do_structs" = "1" ]; then
     echo
     echo "== on-disk structures =="
-    rm -f "$WORK/fetch-failed"          # a reused WORK must not carry an old run's failures
     for t in $TAGS; do
         mkdir -p "$WORK/$t"
         for f in storage/disk_manager.c storage/file_manager.c \
@@ -312,7 +314,8 @@ if [ "$do_builds" = "1" ]; then
             echo "OK"
         else
             # Keep only the log; the downloads and binaries go with the work directory.
-            mkdir -p "$LOGS" && cp "$WORK/$t.log" "$LOGS/$t.log"
+            [ -n "$LOGS" ] || LOGS=$(mktemp -d "${TMPDIR:-/tmp}/volmap-build-logs.XXXXXX")
+            cp "$WORK/$t.log" "$LOGS/$t.log"
             # develop is the next release: its build failing is a warning, not a failure
             if [ "$t" = "develop" ]; then
                 echo "FAILED  (warning only - see $LOGS/$t.log)"
