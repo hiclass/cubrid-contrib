@@ -496,12 +496,14 @@ volmap_probe_vol_creation (const char *page0)
 /* Does this volume's pages end with the watermark?  FILEIO_PAGE_WATERMARK is a
    copy of prv.lsa (file_io.h), so a page that has one starts and ends with the
    same 8 bytes.  10.1 has no watermark and those last bytes are user data, which
-   matches prv.lsa only by coincidence - hence several pages, all of which must
-   agree.  Sampling walks the file rather than the header's page counts, which are
+   matches prv.lsa only by coincidence.  The decision is by majority, so a torn page
+   (read during a server write, or left by a crash) cannot flip the layout: at least
+   3/4 matching means present, at most one means absent, anything between is no
+   answer.  Sampling walks the file rather than the header's page counts, which are
    themselves read through the layout being decided.  Returns -1 when too few
-   written pages could be sampled. */
+   written pages could be sampled or the vote is undecided. */
 static int
-volmap_probe_watermark (int fd, int iopagesize)
+volmap_probe_watermark (const char *path, int fd, int iopagesize)
 {
   char *pg = (char *) malloc (iopagesize);
   int hit = 0, seen = 0;
@@ -536,7 +538,21 @@ volmap_probe_watermark (int fd, int iopagesize)
     {
       return -1;
     }
-  return (hit == seen) ? 1 : 0;
+  if (hit >= seen * 3 / 4)
+    {
+      if (hit < seen)
+	{
+	  fprintf (stderr, "volmap: %s: %d of %d sampled pages do not end with their watermark"
+		   " (torn or being written)\n", path, seen - hit, seen);
+	}
+      return 1;
+    }
+  if (hit <= 1)
+    {
+      return 0;
+    }
+  fprintf (stderr, "volmap: %s: watermark found on %d of %d sampled pages - layout undecided\n", path, hit, seen);
+  return -1;
 }
 
 /* The layout of the volume at path, decided from the volume alone.  Returns
@@ -577,7 +593,7 @@ volmap_vlayout_probe (const char *path)
       /* 10.1 .. 11.3; the watermark splits 10.1 off from the rest.  Too few pages
          to sample (a copy cut short, say) is no answer: leave it UNKNOWN so the next
          volume or the log decides, rather than assume the watermark is there. */
-      wm = volmap_probe_watermark (fd, vhdr->iopagesize);
+      wm = volmap_probe_watermark (path, fd, vhdr->iopagesize);
       lay = (wm == 0) ? VOLMAP_VLAY_101 : (wm == 1) ? VOLMAP_VLAY_PRE_114 : VOLMAP_VLAY_UNKNOWN;
     }
 
