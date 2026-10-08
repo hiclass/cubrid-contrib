@@ -36,7 +36,8 @@
 #                 structure not found at all (renamed, or moved to a file this
 #                 script does not fetch), and any supported release whose
 #                 sources could not be fetched - these fail the check
-#   develop       with --develop only - a warning, never a failure
+#   develop       with --develop only - a warning, never a failure (structures
+#                 and build alike)
 #
 # Usage:
 #   sh tools/check-releases.sh              # structures + build (slow)
@@ -47,8 +48,9 @@
 # --develop reports what the next release will bring, before it ships.  It is
 # opt-in because develop moves: a change there is a warning, not a defect.
 #
-# Exit status: 0 clean, 1 a build failed, 2 the copy needs updating (out of date
-#              with the newest release, or a structure went missing), 3 both.
+# Exit status: 0 clean, 1 a release build failed, 2 the copy needs updating (out
+#              of date with the newest release, or a structure went missing),
+#              3 both, 64 usage error.
 set -u
 
 SELF=$(cd "$(dirname "$0")" && pwd)
@@ -63,8 +65,8 @@ for a in "$@"; do
     --structs)   do_builds=0 ;;
     --builds)    do_structs=0 ;;
     --develop)   with_develop=1 ;;
-    -h|--help)   sed -n '18,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)           echo "unknown option: $a" >&2; exit 2 ;;
+    -h|--help)   sed -n '18,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+    *)           echo "unknown option: $a (see --help)" >&2; exit 64 ;;
   esac
 done
 
@@ -277,9 +279,14 @@ if [ "$do_builds" = "1" ]; then
            sh "$SELF/build_fetch.sh" >"$WORK/$t.log" 2>&1; then
             echo "OK"
         else
-            echo "FAILED  (see $WORK/$t.log)"
-            failed="$failed $t"
             KEEP=1; trap - EXIT          # keep the logs for a failure
+            # develop is the next release: its build failing is a warning, not a failure
+            if [ "$t" = "develop" ]; then
+                echo "FAILED  (warning only - see $WORK/$t.log)"
+            else
+                echo "FAILED  (see $WORK/$t.log)"
+                failed="$failed $t"
+            fi
         fi
     done
     [ -n "$failed" ] && { echo "  failed:$failed"; rc=$((rc + 1)); }
