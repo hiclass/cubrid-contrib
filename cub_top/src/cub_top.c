@@ -6699,7 +6699,6 @@ static void print_opts_line(int argc,char**argv){
    Colour changes nothing, so piped output is the same text. */
 static void help_line(const char *s){
     if(!s){ putchar('\n'); return; }
-    if(!isatty(STDOUT_FILENO)){ printf("%s\n",s); return; }   /* A pipe or file gets plain text */
     if(strstr(s,"──")){ printf("\033[1;36m%s\033[0m\n",s); return; }
     /* When a line starts with a key or option, highlight just that part */
     if(s[0]==' '&&s[1]==' '&&(s[2]=='['||s[2]=='-'||(s[2]>='1'&&s[2]<='9'))){
@@ -6798,7 +6797,7 @@ static void hout(const char *fmt,...){
                         snprintf(g_hbuf[HELPMAX-1],1024,
                                  "%s","⚠ 도움말이 HELPMAX 에서 잘렸다 — 값을 늘릴 것");
                         g_hln[HELPMAX-1]=g_hbuf[HELPMAX-1]; g_hn=HELPMAX; } }
-        else       { help_line((p[0]&&p[0]!='\f')?p:NULL); }   /* CLI: a page break becomes a blank line */
+        else       { if(p[0]&&p[0]!='\f') printf("%s\n",p); else putchar('\n'); }   /* CLI: plain text; a page break becomes a blank line */
         if(!nl) break;
         p=nl+1;
         if(!*p) break;                  /* A trailing newline does not create a blank line */
@@ -6811,8 +6810,10 @@ static void hout(const char *fmt,...){
 static void usage_opts(void){
     hout("cub_top (C) — CUBRID 메모리 관측 (단일 파일 C99, 외부 의존 0)\n\n사용: cub_top <모드> [옵션] [db명]");
     for(int i=0;i<NOPTS;i++){
+        /* Pad by display width: a Hangul key such as [db명] is wider than its byte count says */
         char kb[64]; snprintf(kb,sizeof kb,"%s%s%s",OPTS[i].key,OPTS[i].meta[0]?" ":"",OPTS[i].meta);
-        hout("  %-18s %s",kb,OPTS[i].desc);
+        int pad=18-disp_w(kb); if(pad<0) pad=0;
+        hout("  %s%*s %s",kb,pad,"",OPTS[i].desc);
     }
     hout("");
 }
