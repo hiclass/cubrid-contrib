@@ -16,7 +16,7 @@
 #
 # Regression: a recording must replay to the same values it captured.
 #
-# The check is mechanical rather than visual: --replay ... -t re-emits the frame
+# The check is mechanical rather than visual: --replay ... -d re-emits the frame
 # through the same terse path the recorder used, so a recorded frame and its
 # replay must agree key for key.  Values that are true of the run rather than of
 # the frame (which options were passed, whether this is a replay) are excluded.
@@ -31,7 +31,7 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 REC="$TMP/rec.jsonl"
 
 # A recording needs a live frame; without a server there is nothing to record.
-"$BIN" -t 2>/dev/null | grep -q '^server.up=1' || { echo "SKIP: cub_server not running"; exit 0; }
+"$BIN" -d 2>/dev/null | grep -q '^server.up=1' || { echo "SKIP: cub_server not running"; exit 0; }
 
 # --record is live-only (-b/-p); a short live run records a few frames without a tty.
 "$BIN" -b --record "$REC" >/dev/null 2>&1 &
@@ -60,11 +60,11 @@ else
     echo "  skip JSON validation (no python3)"
 fi
 
-# 2) round trip: replay re-emits what was recorded.  --json keeps quoted strings whole
+# 2) round trip: replay re-emits what was recorded.  --dump-json keeps quoted strings whole
 #    and numbers typed, so text keys (reasons, verdict) compare exactly.
-"$BIN" --replay "$REC" --json >"$TMP/out" 2>/dev/null
+"$BIN" --replay "$REC" --dump-json >"$TMP/out" 2>/dev/null
 if [ ! -s "$TMP/out" ]; then
-    echo "  FAIL --replay --json produced nothing"; bad=1
+    echo "  FAIL --replay --dump-json produced nothing"; bad=1
 else
     if command -v python3 >/dev/null; then
         python3 - "$REC" "$TMP/out" <<'PY' || bad=1
@@ -100,7 +100,7 @@ fi
 
 # 3) a replay must read no /proc of any process - it is a file, not a measurement
 if command -v strace >/dev/null; then
-    strace -f -e trace=openat -o "$TMP/st" "$BIN" --replay "$REC" -t >/dev/null 2>&1
+    strace -f -e trace=openat -o "$TMP/st" "$BIN" --replay "$REC" -d >/dev/null 2>&1
     n=$(grep -cE '"/proc/[0-9]' "$TMP/st" 2>/dev/null | head -1)
     [ -n "$n" ] || n=0
     if [ "${n:-0}" -ne 0 ]; then

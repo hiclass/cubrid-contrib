@@ -24,7 +24,7 @@ BIN=${CUBMEM_BIN:-"$ROOT/cub_top"}
 [ -x "$BIN" ] || { echo "SKIP: no binary ($BIN) - run build.sh first"; exit 0; }
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-"$BIN" -t --dump-hist >"$TMP/terse" 2>"$TMP/hist" || true
+"$BIN" -d --dump-hist >"$TMP/terse" 2>"$TMP/hist" || true
 
 grep -q '^server.up=1' "$TMP/terse" || { echo "SKIP: cub_server not running"; exit 0; }
 [ -s "$TMP/hist" ] || { echo "FAIL: no --dump-hist output"; exit 1; }

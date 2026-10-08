@@ -1,19 +1,19 @@
-옵션 --heap   ·   실시간 화면: cub_top -b · 시계열: -p · 동적 메모리 상세: --heap · 모니터링 연동: -t · 도움말: -h
+옵션 -t --heap   ·   실시간 화면: cub_top -b · 시계열: -p · 동적 메모리 상세: --heap · 모니터링 연동: -d · 도움말: -h
 
 [@cbench]
-CUBRID 메모리 드릴다운 (C)  db=cbench  pid=131566  ⏱ 2026-10-08 09:12:32
-설정으로 설명: cubrid.conf 파라미터 81% (768.3M) / 설명 안 되는 영역 19% — 후자는 아래 동적 메모리 상세(B=정확, A=크기 추정)로 분해
+CUBRID 메모리 드릴다운 (C)  db=cbench  pid=131566  ⏱ 2026-10-08 09:48:46
+설정으로 설명: cubrid.conf 파라미터 82% (768.3M) / 설명 안 되는 영역 18% — 후자는 아래 동적 메모리 상세(B=정확, A=크기 추정)로 분해
 기호  ● 측정  ◐ 예약  ◌ 추정  ? 미귀속(아래 동적 메모리 상세가 분해)
 OS RAM  188.0G
-├─ used  117.7G (63%)
-├─ cached  106.2G
-├─ avail  70.4G
+├─ used  118.4G (63%)
+├─ cached  87.0G
+├─ avail  69.6G
 ├─ swap  off
-├─ CUBRID engine  1003.3M (0.52% of RAM)
-│  ├─ ● server+master  946.4M  (VmSize 5.7G, worker 117)
-│  │  ├─ ● data_buffer    512.3M / alloc 520.4M  (설정 512.0M, 할당 102% 정상)  최근접근 93%
-│  │  ├─ ● log_buffer     256.0M / alloc 264.1M  (설정 256.0M, 할당 103% 정상)  최근접근 92%
-│  │  ├─ ◌ dynamic-heap   162.7M / alloc 469.1M  최근접근 95%
+├─ CUBRID engine  982.0M (0.51% of RAM)
+│  ├─ ● server+master  941.2M  (VmSize 5.7G, worker 117)
+│  │  ├─ ● data_buffer    512.3M / alloc 520.4M  (설정 512.0M, 할당 102% 정상)  최근접근 92%
+│  │  ├─ ● log_buffer     256.0M / alloc 264.1M  (설정 256.0M, 할당 103% 정상)  최근접근 90%
+│  │  ├─ ◌ dynamic-heap   162.9M / alloc 469.1M  최근접근 94%
 │  │  │  ├─ ● [B] plan cache (xcache)    569K   (entries=4, engine-tracked)
 │  │  │  ├─ ● [B] result cache (query)   0B   (비활성 (max_query_cache_entries=0) — 미사용)
 │  │  │  ├─ ● [B] filter pred cache      0B   (counter=0 x120 — 미사용)
@@ -24,27 +24,27 @@ OS RAM  188.0G
 │  │  │  ├─ ◌ [B] vacuum data            184B   (struct only)
 │  │  │  ├─ ◌ [A] db_private heap base (64K each) 270.8M
 │  │  │  ├─ ◌ [A] page-pair block (32K)  64K
-│  │  │  ├─ ◌ [A] MVCC snapshot (est, 80B) 999K
+│  │  │  ├─ ◌ [A] MVCC snapshot (est, 80B) 1004K
 │  │  │  ├─ ◌ [A] large work block (>=1M) 56.0M
-│  │  │  ├─ ◌ [A] query working mem (64K~1M) 30.2M
+│  │  │  ├─ ◌ [A] query working mem (64K~1M) 30.3M
 │  │  │  ├─ ◌ [A] working buffer (8K~64K) 10.8M
-│  │  │  ├─ ◌ [A] small/misc (<8K)       15.2M
-│  │  │  └─ ◌ [A] total 384.0M  (과대계상 - 221.3M = 136% — 30% 초과, 재분석 권고)
-│  │  ├─ ◐ thread stacks  1.2M / alloc 888.1M  (thread_stacksize 1.0M 는 HA 경로 전용 — 워커는 OS 기본 8MB)  최근접근 95%
-│  │  ├─ ● code (.so)     11.0M / alloc 27.5M  최근접근 97%
-│  │  ├─ ● bin/shm etc    280K / alloc 7.3M  최근접근 100%
+│  │  │  ├─ ◌ [A] small/misc (<8K)       15.4M
+│  │  │  └─ ◌ [A] total 384.3M  (과대계상 - 221.4M = 136% — 30% 초과, 재분석 권고)
+│  │  ├─ ◐ thread stacks  1.3M / alloc 888.1M  (thread_stacksize 1.0M 는 HA 경로 전용 — 워커는 OS 기본 8MB)  최근접근 95%
+│  │  ├─ ● code (.so)     9.1M / alloc 27.5M  최근접근 99%
+│  │  ├─ ● bin/shm etc    64K / alloc 7.3M  최근접근 100%
 │  │  ├─ ◐ glibc arena    0B / alloc 3.6G  (가상 예약 — 물리 메모리 0)
-│  │  └─ ◐ PL server(JVM) — 서버가 기동하는 별도 프로세스  56.9M
+│  │  └─ ◐ PL server(JVM) — 서버가 기동하는 별도 프로세스  40.8M
 │  └─ ● broker+CAS (3-tier 별도 계층)  0B
 ├─ ◌ 용량 (수요 대비 상한, 0ms)
-│  ├─ ● 수요  장치 2977 IOPS · 이 서버 261 IOPS · 읽기 0B/s 쓰기 30K/s
-│  ├─ ● 지연  요청당 3.31ms (읽기 3.70 / 쓰기 3.26) · 큐 9.86 · 사용률 100%
-│  ├─ ● 프로파일  평균 요청 92.0KB · 읽기 5% → 상한 칸 [>64KB / write-heavy]
-│  ├─ ◌ 상한  2977 IOPS (같은 칸, 사용률 100% 시점 관측, 10-08 09:12) → 현재 100% 사용
+│  ├─ ● 수요  장치 2287 IOPS · 이 서버 261 IOPS · 읽기 0B/s 쓰기 37K/s
+│  ├─ ● 지연  요청당 5.30ms (읽기 4.46 / 쓰기 5.41) · 큐 12.11 · 사용률 100%
+│  ├─ ● 프로파일  평균 요청 94.8KB · 읽기 4% → 상한 칸 [>64KB / write-heavy]
+│  ├─ ◌ 상한  2287 IOPS (같은 칸, 사용률 100% 시점 관측, 10-08 09:48) → 현재 100% 사용
 │  ├─ ◌ 버퍼  히트 100.0% (출처: turnover) · 적재 초당 0페이지 · 재적재 0%
 │  ├─ ◌ 엔진 카운터 정지 — 
-│  └─ 판정  ⚠ IOPS 2977 로 상한 2977 근접 (100%, >64KB/write-heavy) — 대기 3.3ms·큐 9.9 로 적체 없음: 한계 단정 불가(상한 근접)
-├─ ◌ 버퍼풀 (페이지 슬롯 29ms)  상주 32768/32768 (100%)  dirty 0 (상주의 0.0%)  flushing 0
+│  └─ 판정  ⚠ IOPS 2287 / 상한 2287 (100%, >64KB/write-heavy), 대기 5.3ms 큐 12.1 — 용량 한계: IOPS 증설 또는 읽기 감축
+├─ ◌ 버퍼풀 (페이지 슬롯 25ms)  상주 32768/32768 (100%)  dirty 0 (상주의 0.0%)  flushing 0
 │  ├─ 존  hot 6789 · warm 1632 · cold 24347 · void 0 · free 0   (victim 은 cold 에서, dirty 는 건너뜀)
 │  ├─ vol 0   상주 27456 (429.0M)  dirty 0
 │  ├─ vol 3   상주 2008 (31.4M)  dirty 0
@@ -52,16 +52,16 @@ OS RAM  188.0G
 │  ├─ vol 5   상주 1471 (23.0M)  dirty 0
 │  ├─ vol 1   상주 1 (16K)  dirty 0
 │  ├─ vol 4   상주 1 (16K)  dirty 0
-│  ├─ 로그  append 4059212|13752  flushed(nxio) 4059212|13752  → 아직 디스크에 안 내려간 로그 0 페이지
+│  ├─ 로그  append 4059212|14232  flushed(nxio) 4059212|14232  → 아직 디스크에 안 내려간 로그 0 페이지
 │  └─ dirty 없음 — 버퍼 내용이 볼륨에 전부 반영됨
 └─ CPU · I/O (cub_server + device)
    ├─ ● cpu  2%  (코어 1개=100%, 호스트 64코어)
    ├─ ● disk read  0B/s  (누적 84.9G)
-   ├─ ● disk write  30K/s  (누적 835.7M)
-   ├─ ● iops  read 129/s  write 133/s
+   ├─ ● disk write  37K/s  (누적 885.2M)
+   ├─ ● iops  read 128/s  write 132/s
    ├─ ◌ cache absorb  idle (rchar 13K/s — 판단하기엔 요청 읽기가 너무 적음)
    ├─ ● blkio wait  0.00%  (전 스레드 합 — 100%를 넘을 수 있음; 비동기 대기는 안 잡힘)
-   └─ ● dev sda  util 100% ⚠ 포화  r 14.2M/s
+   └─ ● dev sda  util 100% ⚠ 포화  r 7.7M/s
 
 메모리 파라미터 (cubrid.conf)   ● 사용량까지 관측   ◐ 설정만 — 사용량은 dynamic-heap 에 합산됨
   ● data_buffer_size                     512.0M   페이지 버퍼

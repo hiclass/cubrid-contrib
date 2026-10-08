@@ -19,7 +19,7 @@
 # English mode; this recurred across six plot panels and some 40 tree strings.
 #
 # Every --ascii output mode is checked, not just the tree.  The machine-readable
-# modes matter most: -t and --json are parsed by monitoring, and a Korean value
+# modes matter most: -d and --dump-json are parsed by monitoring, and a Korean value
 # there breaks the consumer rather than merely looking wrong.
 #
 # --heap is included per mode because method A/B reason strings are produced only
@@ -36,7 +36,7 @@ gcc -O2 -std=gnu99 -o "$BIN" "$SRC" 2>/dev/null || { echo "-> FAIL (compile fail
 # So the UTF-8 lead bytes 0xEA-0xED of Hangul syllables are matched as bytes.
 HANGUL=$'[\xea-\xed][\x80-\xbf][\x80-\xbf]'
 
-if ! "$BIN" --ascii --heap 2>/dev/null | grep -q 'cub_server'; then
+if ! "$BIN" --ascii --heap -t 2>/dev/null | grep -q 'cub_server'; then
     echo "-> SKIP (cub_server not running - no tree body)"; exit 0
 fi
 
@@ -66,18 +66,18 @@ check() {   # check <label> <args...>
 }
 
 echo "--ascii output modes (0 Hangul required)"
-check "tree"          --ascii
-check "tree --heap"   --ascii --heap
-check "terse -t"      --ascii -t
-check "terse -t --heap" --ascii --heap -t
-check "--json"        --ascii --json
-check "--json --heap" --ascii --heap --json
+check "tree -t"            --ascii -t
+check "tree -t --heap"     --ascii --heap -t
+check "dump -d"            --ascii -d
+check "dump -d --heap"     --ascii --heap -d
+check "--dump-json"        --ascii --dump-json
+check "--dump-json --heap" --ascii --heap --dump-json
 
 # Korean mode must keep its Korean - an over-eager fix that made everything English
 # would otherwise pass every check above.
-KO=$("$BIN" --heap -t 2>/dev/null | LC_ALL=C grep -c "$HANGUL")
+KO=$("$BIN" --heap -d 2>/dev/null | LC_ALL=C grep -c "$HANGUL")
 if [ "${KO:-0}" -eq 0 ]; then
-    echo "  FAIL Korean mode lost its Korean (-t --heap has none)"; bad=1
+    echo "  FAIL Korean mode lost its Korean (-d --heap has none)"; bad=1
 else
     echo "  ok   Korean mode still Korean ($KO lines)"
 fi

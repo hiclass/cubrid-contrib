@@ -52,13 +52,14 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 ## 사용
 
 ```sh
-./cub_top                      # 드릴다운 트리 (기본, 1회 출력)
-./cub_top -t                   # terse key=value (모니터링 연동)
-./cub_top --json               # -t 와 같은 내용·같은 순서를 JSON 으로
-./cub_top -b                   # 라이브 대시보드
+./cub_top -t                   # 드릴다운 트리 (터미널용, 1회 출력)
+./cub_top -d                   # key=value 덤프 (모니터링 연동)
+./cub_top --dump-json          # -d 와 같은 내용·같은 순서를 JSON 으로
+./cub_top -b                   # btop형 대시보드 (라이브, -i 와 같음)
 ./cub_top -p                   # 시계열 플롯 (4패널, p 로 대시보드와 전환)
-./cub_top --heap               # 동적 힙 분해까지 (방법 A 포함)
-./cub_top <db명>               # 그 DB 를 본다 (생략 시 알파벳순 첫 번째)
+./cub_top -t --heap            # 트리에 동적 힙 분해까지 (방법 A 포함)
+./cub_top -t <db명>            # 그 DB 를 본다 (생략 시 알파벳순 첫 번째)
+./cub_top                      # 도움말 (옵션 목록) — -h, --help 와 같음
 ```
 
 ![live dashboard](docs/dashboard.png)
@@ -103,10 +104,13 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 |---|---|
 | 0 | 정상 |
 | 1 | 실행 중 실패 (예: `--replay` 파일을 읽을 수 없음) |
-| 2 | **사용법 오류** — 알 수 없는 옵션, 옵션 값 누락·숫자가 아닌 값, 없는 DB, DB 를 둘 이상 지정, `-p` 와 `-t` 동시 지정, `--record` 경로 쓰기 불가, 라이브가 아닌 모드의 `--record`, `--record` 와 `--replay` 동시 지정 |
+| 2 | **사용법 오류** — 출력 모드(`-t`·`-d`/`--dump-json`·`-b`/`-p`) 없이 DB 이름이나 옵션만 줌, 모드를 둘 이상 지정, `--replay` 에 `-t`, 알 수 없는 옵션, 옵션 값 누락·숫자가 아닌 값, 없는 DB, DB 를 둘 이상 지정, `--record` 경로 쓰기 불가, 라이브가 아닌 모드의 `--record`, `--record` 와 `--replay` 동시 지정 |
 
-사용법 오류는 반드시 2로 끝난다. 오타 난 `--jsn` 을 조용히 무시하고 0으로 끝내면
+사용법 오류는 반드시 2로 끝난다. 오타 난 `--dump-jsn` 을 조용히 무시하고 0으로 끝내면
 종료 코드만 보는 호출자에게 **JSON 을 받은 것처럼** 보이기 때문이다.
+
+`--bcb-dump F` 만 주면(출력 모드 없이) 버퍼풀 스냅샷 파일을 한 번 쓰고 한 줄로 알린다 —
+`cub_volmap --bufmap F` 에 넘길 파일만 필요할 때 쓴다.
 
 | 옵션 | 뜻 |
 |---|---|
@@ -133,11 +137,11 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 ```sh
 ./cub_top -b --record incident.jsonl      # 현장: 보면서 기록
 ./cub_top --replay incident.jsonl         # 어디서든: 그대로 재생
-./cub_top --replay incident.jsonl -t      # 기계 판독 (프레임마다 terse)
+./cub_top --replay incident.jsonl -d      # 기계 판독 (프레임마다 key=value 덤프)
 ```
 
-기록은 `-t`·`--json` 이 내보내는 **바로 그 키**를 한 줄에 한 프레임씩 담은 JSONL 이다
-(프레임당 약 7KB). 기록을 만드는 경로도 `-t` 와 같은 함수라 **출력이 이원화되지 않으며**,
+기록은 `-d`·`--dump-json` 이 내보내는 **바로 그 키**를 한 줄에 한 프레임씩 담은 JSONL 이다
+(프레임당 약 7KB). 기록을 만드는 경로도 `-d` 와 같은 함수라 **출력이 이원화되지 않으며**,
 `jq` 로 바로 읽힌다.
 
 인스턴스별 키는 `instance.<DB이름>.*` 이다. 한 호스트에서 같은 이름의 DB 가 둘 이상 돌면(업그레이드 중
@@ -200,7 +204,7 @@ debug 로 빌드하고 그 DWARF 에서 뽑는다. 구조체 오프셋은 컴파
 | [docs/views.md](docs/views.md) | 화면 구성과 글리프 문법 |
 | [docs/portability.md](docs/portability.md) | 이식성 계층, 구 커널·구 glibc 대응 |
 | [docs/limitations.md](docs/limitations.md) | 제한 사항과 검증 범위 |
-| [examples/](examples/) | 텍스트 출력 캡처 8종 (트리·terse·JSON·도움말·dwoff·비 소유 계정 terse·기록 파일·재생 terse). 대시보드·시계열 화면은 [docs/](docs/) 의 스크린샷 |
+| [examples/](examples/) | 텍스트 출력 캡처 8종 (트리·덤프·JSON 덤프·도움말·dwoff·비 소유 계정 덤프·기록 파일·재생 덤프). 대시보드·시계열 화면은 [docs/](docs/) 의 스크린샷 |
 | [offsets/README.md](offsets/README.md) | 오프셋 표의 의미와 새 버전 표 생성 |
 
 ## 검증
@@ -212,10 +216,10 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 
 | 스크립트 | 무엇을 보장하는가 |
 |---|---|
-| `check-hist.sh` | 플롯·대시보드·terse 세 경로가 같은 시점에 같은 값 (22항목) |
+| `check-hist.sh` | 플롯·대시보드·덤프(`-d`) 세 경로가 같은 시점에 같은 값 (22항목) |
 | `check-replay.sh` | 기록 → 재생 → 재출력이 원본과 키 단위로 동일 + 재생이 `/proc` 미접근 |
 | `check-ascii.sh` | `--ascii` 6개 출력모드에 한글 0, 한글 모드는 보존 |
-| `check-json.sh` | `--json` 이 `-t` 와 키 집합·순서 동일 |
+| `check-json.sh` | `--dump-json` 이 `-d` 와 키 집합·순서 동일 |
 | `check-offsets.sh` | 소스 오프셋 상수가 골든 표와 일치 |
 | `test-guard.sh` | 오프셋을 훼손하면 게이트가 **실제로 막는지** |
 

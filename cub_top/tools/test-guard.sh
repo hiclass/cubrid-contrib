@@ -33,7 +33,7 @@ say(){ printf "  %-34s %s\n" "$1" "$2"; }
 #      heapB.table=table-11.5        the corrupted table was adopted (FAIL)
 sed 's/#define OFF_LF_ALLOCCNT     12/#define OFF_LF_ALLOCCNT     11/' "$SRC" > "$TMP/bad1.c"
 if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev/null; then
-  raw=$("$TMP/bad1" -t 2>/dev/null)
+  raw=$("$TMP/bad1" -d 2>/dev/null)
   tbl=$(printf '%s' "$raw" | grep -o 'heapB.table="[^"]*"')
   en=$(printf '%s' "$raw" | grep -o 'heapB.enabled=[01]')
   if printf '%s' "$raw" | grep -q '^server.up=0'; then
@@ -58,7 +58,7 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
     CACHE="/var/tmp/cub_top.dw-$(id -u)-$SZ-$MT.tbl"   # the name cub_top reads (uid-scoped)
     cp -f "$CACHE" "$TMP/cache.bak" 2>/dev/null
     printf 'OFF_PGBUF_NBUF 4\n' > "$CACHE"
-    raw=$("$TMP/bad1" -t 2>/dev/null)
+    raw=$("$TMP/bad1" -d 2>/dev/null)
     en=$(printf '%s' "$raw" | grep -o 'heapB.enabled=[01]')
     tbl2=$(printf '%s' "$raw" | grep -o 'heapB.table="[^"]*"')
     # With the cache corrupted (so the DWARF candidate fails too), the result must be
@@ -76,7 +76,7 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
     elif [ "$en" = "heapB.enabled=0" ]; then
         say "corrupted cache -> probe downgrade" "PASS(B OFF)"
     elif [ "$tbl2" = 'heapB.table="offsets-embedded"' ]; then
-        good=$(sized "$("$ROOT/cub_top" --heap -t 2>/dev/null)"); mine=$(sized "$raw")
+        good=$(sized "$("$ROOT/cub_top" --heap -d 2>/dev/null)"); mine=$(sized "$raw")
         if [ -n "$good" ] && [ "$mine" = "$good" ]; then
             say "corrupted cache -> embedded rescue" "PASS(sized items match the healthy build)"
         else

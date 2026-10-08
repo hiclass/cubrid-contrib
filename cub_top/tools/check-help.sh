@@ -14,69 +14,62 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-# Regression: help completeness.
-# hout()'s fixed buffer (HOUT_MAX) and the collection array (HELPMAX) truncate silently,
-# so the help is checked to arrive whole.
-# The last line, the required sections and UTF-8 integrity are checked to prevent that.
+# Regression: help.
+#   -h  is a CLI help: the usage line and the option list, printed in place - no pager,
+#       no explanation sections, no colour when it is not a terminal.
+#   h   (live) carries the explanations.  hout()'s fixed buffer (HOUT_MAX) and the
+#       collection array (HELPMAX) truncate silently, so both live help texts are
+#       collected here without a terminal and checked to arrive whole.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/src/cub_top.c"
-BIN="$(mktemp -u /tmp/cub_top-help.XXXXXX)"
-trap 'rm -f "$BIN"' EXIT
-gcc -O2 -std=gnu99 -o "$BIN" "$SRC" 2>/dev/null || { echo "-> FAIL (compile failed)"; exit 1; }
-
-ERR="$("$BIN" -h 2>&1 >/dev/null)"
-OUT="$("$BIN" -h 2>/dev/null)"
-N=$(printf '%s\n' "$OUT" | wc -l)
+TMP=$(mktemp -d /tmp/cub_top-help.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
+gcc -O2 -std=gnu99 -o "$TMP/bin" "$SRC" 2>/dev/null || { echo "-> FAIL (compile failed)"; exit 1; }
 bad=0
-echo "help: $N lines"
 
-# 1) A hout/HELPMAX truncation warning fails immediately
-if [ -n "$ERR" ]; then echo "  truncation warning: $ERR"; bad=1
-else echo "  ok  no truncation warning"; fi
-if printf '%s' "$OUT" | grep -q 'HELPMAX 에서 잘렸다'; then
-    echo "  FAIL HELPMAX exceeded"; bad=1; fi
-
-# 2) The last line being present proves the block was emitted in full
-if printf '%s' "$OUT" | tail -1 | grep -q 'portability.md'; then
-    echo "  ok  last line reached"
-else echo "  FAIL last line missing - the help was cut short"; bad=1; fi
-
-# 3) Each section must survive (an overflow drops them from the end)
-#    -h (CLI) carries only the concept and option sections; the mode-key sections must be absent.
-for sec in "환경변수 CUBRID" "여러 데이터베이스" "두 가지 라이브 화면" \
-           "대시보드 화면 구성" "CPU 와 load" "wa  iowait" "D스레드 n/m" "I/O 판정문" \
-           "파라미터 귀속률" "프로세스 박스가 PSS 인 이유" "관측 등급" "각 항목이 알려주는 것"; do
-    if printf '%s' "$OUT" | grep -qF "$sec"; then :; else
-        echo "  FAIL missing: $sec"; bad=1; fi
+# ---- 1) -h: the option page only ----
+ERR="$("$TMP/bin" -h 2>&1 >/dev/null)"; OUT="$("$TMP/bin" -h 2>/dev/null)"; RC=$?
+echo "-h: $(printf '%s\n' "$OUT" | wc -l) lines"
+[ "$RC" -eq 0 ] && [ -z "$ERR" ] && echo "  ok  exit 0, nothing on stderr" || { echo "  FAIL exit $RC / stderr: $ERR"; bad=1; }
+for opt in "-t, --tty" "-d, --dump" "--dump-json" "-b, -i, --live" "-p, --plot" "--replay" "-h, --help"; do
+    printf '%s\n' "$OUT" | grep -qF -- "$opt" || { echo "  FAIL option missing from -h: $opt"; bad=1; }
 done
-[ $bad -eq 0 ] && echo "  ok  all 12 required sections present"
-# -h is the CLI context, so no mode-key section may appear
-for kx in "대시보드 키 (지금 이 화면)" "시계열 키 (지금 이 화면)"; do
-    if printf '%s' "$OUT" | grep -qF "$kx"; then
-        echo "  FAIL a mode-key section leaked into -h: $kx"; bad=1; fi
+[ $bad -eq 0 ] && echo "  ok  every mode option listed"
+if printf '%s' "$OUT" | grep -q '──'; then echo "  FAIL an explanation section leaked into -h"; bad=1
+else echo "  ok  no explanation section (those are in live h)"; fi
+if printf '%s' "$OUT" | grep -q "$(printf '\033')"; then echo "  FAIL ANSI escapes in piped -h"; bad=1
+else echo "  ok  no ANSI escapes when piped"; fi
+# Without a mode the same page is printed; a DB name alone is a usage error (exit 2).
+[ "$("$TMP/bin" 2>/dev/null)" = "$OUT" ] && echo "  ok  no arguments prints the same page" || { echo "  FAIL no-argument output differs from -h"; bad=1; }
+"$TMP/bin" somedb >/dev/null 2>&1; [ $? -eq 2 ] && echo "  ok  a DB name without a mode exits 2" || { echo "  FAIL a DB name without a mode did not exit 2"; bad=1; }
+
+# ---- 2) live h: both help texts collected without a terminal ----
+cat >"$TMP/h.c" <<C
+#define main cub_top_main
+#include "$SRC"
+#undef main
+int main(int c,char**v){ (void)c;
+    g_hn=0; g_hcap=1; usage_modal(v[1][0]=='p'?2:1); g_hcap=0;
+    for(int i=0;i<g_hn;i++) puts(g_hln[i]?g_hln[i]:"");
+    fprintf(stderr,"%d\n",g_hn); return 0; }
+C
+gcc -O2 -std=gnu99 -w -o "$TMP/h" "$TMP/h.c" 2>/dev/null || { echo "-> FAIL (help harness compile failed)"; exit 1; }
+HM=$(grep -m1 '#define HELPMAX' "$SRC" | awk '{print $3}')
+for mode in dash plot; do
+    LIVE="$("$TMP/h" $mode 2>"$TMP/n")"; N=$(cat "$TMP/n")
+    echo "live h ($mode): $N lines"
+    printf '%s' "$LIVE" | grep -q 'HELPMAX 에서 잘렸다' && { echo "  FAIL HELPMAX exceeded"; bad=1; }
+    [ "$N" -lt $((HM-20)) ] && echo "  ok  line count has margin ($N < HELPMAX $HM - 20)" || { echo "  FAIL $N lines is at or near HELPMAX $HM"; bad=1; }
+    printf '%s' "$LIVE" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && echo "  ok  UTF-8 intact" || { echo "  FAIL UTF-8 broken"; bad=1; }
+    if [ $mode = dash ]; then
+        req="대시보드 · 키|환경변수 CUBRID|여러 데이터베이스|CPU 와 load|wa  iowait|D스레드 n/m|I/O 판정문|파라미터 귀속률|프로세스 박스가 PSS 인 이유|관측 등급|각 항목이 알려주는 것"
+    else
+        req="시계열 · 키|환경변수 CUBRID|여러 데이터베이스"
+    fi
+    miss=0; IFS='|'; for sec in $req; do printf '%s' "$LIVE" | grep -qF "$sec" || { echo "  FAIL missing: $sec"; miss=1; bad=1; }; done; unset IFS
+    [ $miss -eq 0 ] && echo "  ok  required sections present"
 done
-[ $bad -eq 0 ] && echo "  ok  no mode-key section in -h (CLI context)"
-
-# 4) UTF-8 integrity: truncation cuts mid-sequence and leaves a broken character
-if printf '%s' "$OUT" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
-    echo "  ok  UTF-8 intact"
-else echo "  FAIL UTF-8 broken - cut at a buffer boundary"; bad=1; fi
-
-# 5) Help line count must stay below HELPMAX with margin; overflow truncates the live h pager.
-NL=$(printf '%s\n' "$OUT" | wc -l)
-HM=$(grep -m1 '#define HELPMAX' "$(dirname "$0")/../src/cub_top.c" | awk '{print $3}')
-if [ -n "$HM" ] && [ "$NL" -lt $((HM-20)) ]; then
-    echo "  ok  line count has margin ($NL < HELPMAX $HM - 20)"
-else echo "  FAIL ${NL} help lines is at or near HELPMAX ${HM:-?} - raise HELPMAX"; bad=1; fi
-
-# 6) The per-mode key help must be defined in the source (the section live h leads with).
-#    Live h needs a tty and cannot run here, so only its definition and wiring are checked.
-for fn in "help_keys_dash" "help_keys_plot" "usage_modal(view?2:1)"; do
-    if grep -qF "$fn" "$SRC"; then :; else
-        echo "  FAIL per-mode key help missing: $fn"; bad=1; fi
-done
-[ $bad -eq 0 ] && echo "  ok  per-mode key help defined and wired"
 
 [ $bad -eq 0 ] && { echo "→ PASS"; exit 0; }
 echo "→ FAIL"; exit 1

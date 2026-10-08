@@ -6634,10 +6634,10 @@ static void auto_lang(int force_ko){
 
 static const opt_t OPTS[]={
  {"[db명]",      "", "볼 데이터베이스 (생략 시 알파벳순 첫 번째, 라이브에서 < > 로 이동)"},
- {"(없음)",      "", "드릴다운 트리 (기본, 1회 출력)"},
- {"-t",          "", "terse key=value (모니터링 연동·백데이터)"},
- {"--json",      "", "-t 와 같은 내용을 JSON 오브젝트로 (키·값·순서 동일, -t 자동 포함)"},
- {"-b, --live",  "", "btop 대시보드 (라이브)"},
+ {"-t, --tty",   "", "드릴다운 트리 (터미널용, 1회 출력)"},
+ {"-d, --dump",  "", "key=value 덤프 (모니터링 연동·백데이터)"},
+ {"--dump-json", "", "-d 와 같은 내용을 JSON 오브젝트로 (키·값·순서 동일)"},
+ {"-b, -i, --live","", "btop형 대시보드 (라이브)"},
  {"--heap",      "", "방법 A(힙 히스토그램) 포함"},
  {"--ascii",     "", "라벨을 영문으로 강제 (자동: 비 UTF-8 로케일·한글 폭 미지원 tty 는 영문)"},
  {"--ko",        "", "한글 라벨 강제 (자동 판정이 영문으로 잘못 내렸을 때)"},
@@ -6650,7 +6650,7 @@ static const opt_t OPTS[]={
  {"--capacity-state","F","용량 상한(포화 시 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정"},
  {"-p, --plot",  "", "시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)"},
  {"--interval",  "S","샘플 창(초, 0.05~3600, 기본 0.5)"},
- {"--record", "F", "라이브(-b/-p) 프레임을 파일 F 로 기록 (JSONL — -t/--json 과 같은 키, --replay 와 병용 불가)"},
+ {"--record", "F", "라이브(-b/-p) 프레임을 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가)"},
  {"--replay", "F", "기록 파일 F 를 재생 (서버·/proc 불필요, -b/-p 키 그대로)"},
  {"--replay-speed", "N", "재생 배속 (1=실측 간격, 0=최대속도, 기본 1)"},
  {"--dump-hist", "", "히스토리 1샘플을 stderr 로 덤프 (수치 대조·진단용)"},
@@ -6686,9 +6686,9 @@ static void print_opts_line(int argc,char**argv){
     /* Listing every option does not say what to do next (-h already has them), so this
        shows only the entry points a newcomer can run straight away. */
     printf(g_ascii?"opts %s   ·   live: cub_top -b · timeseries: -p · heap detail: --heap"
-                  " · machine output: -t · help: -h\n"
+                  " · machine output: -d · help: -h\n"
                   :"옵션 %s   ·   실시간 화면: cub_top -b · 시계열: -p · 동적 메모리 상세: --heap"
-                  " · 모니터링 연동: -t · 도움말: -h\n",
+                  " · 모니터링 연동: -d · 도움말: -h\n",
            used[0]?used:(g_ascii?"(default)":"(기본)"));
 }
 
@@ -6699,6 +6699,7 @@ static void print_opts_line(int argc,char**argv){
    Colour changes nothing, so piped output is the same text. */
 static void help_line(const char *s){
     if(!s){ putchar('\n'); return; }
+    if(!isatty(STDOUT_FILENO)){ printf("%s\n",s); return; }   /* A pipe or file gets plain text */
     if(strstr(s,"──")){ printf("\033[1;36m%s\033[0m\n",s); return; }
     /* When a line starts with a key or option, highlight just that part */
     if(s[0]==' '&&s[1]==' '&&(s[2]=='['||s[2]=='-'||(s[2]>='1'&&s[2]<='9'))){
@@ -6767,9 +6768,8 @@ static int help_pager(const char *const *ln,int n){
         else if(k=='b'||k=='p'||k=='k'||k==0x7f||k==0x08||k==TUI_KEY_LEFT||k==TUI_KEY_UP||k==TUI_KEY_PGUP){ if(pg>0) pg--; }
     }
 }
-/* Help line collector: the text usage() builds is also captured as an array for the
-   pager.  Two copies of the wording would inevitably drift, so usage() stays the only
-   place it is written. */
+/* Help line collector: the text hout() is given is printed for -h, or captured as an
+   array for the live h pager, so each help text is written in one place only. */
 #define HELPMAX 400   /* About 206 lines today and growing; an overflow leaves a warning below */
 static char  g_hbuf[HELPMAX][1024];
 static const char *g_hln[HELPMAX];
@@ -6807,227 +6807,14 @@ static void hout(const char *fmt,...){
 /* The CLI preamble (name, usage, options) is not needed in live h - it is already
    running.  Keeping it separate from the shared concepts section lets live go straight
    from mode keys to concepts. */
-static void usage_common(void);
-static void usage(void){
-    hout("cub_top (C) — CUBRID 메모리 관측 (단일 파일 C99, 외부 의존 0)\n\n사용: cub_top [옵션]");
+/* Name, usage and options: what -h prints, and the first page of the live h help */
+static void usage_opts(void){
+    hout("cub_top (C) — CUBRID 메모리 관측 (단일 파일 C99, 외부 의존 0)\n\n사용: cub_top <모드> [옵션] [db명]");
     for(int i=0;i<NOPTS;i++){
         char kb[64]; snprintf(kb,sizeof kb,"%s%s%s",OPTS[i].key,OPTS[i].meta[0]?" ":"",OPTS[i].meta);
         hout("  %-18s %s",kb,OPTS[i].desc);
     }
     hout("");
-    usage_common();
-}
-static void usage_common(void){
-    hout(
-"\f\n── 환경변수 CUBRID ──\n"
-"  CUBRID=<설치경로>  설정 시 시작할 때 한 번 '<경로>/bin/cubrid paramdump <db>' 를 실행해\n"
-"  서버가 실제로 적용 중인 파라미터를 읽는다(셸을 거치지 않고 execvp, 최대 5초).\n"
-"  없으면 <경로>/conf/cubrid.conf 를 직접 파싱하고, 그것도 없으면 아래가 모두 빠진다:\n"
-"    · data_buffer/log_buffer 의 '설정 대비 %' 판정 — 설정값이 없어 초과 여부를 알 수 없다\n"
-"    · 파라미터 귀속률 — 설정으로 설명되는 몫을 셀 수 없어 표시되지 않는다\n"
-"    · DB 페이지 크기 — data_buffer_size/pages 로 역산한다(실패 시 16KB 로 가정)\n"
-"    · 방법 B 자기검증 — num_buffers 와 data_buffer_pages 대조가 불가해 힙 B 가 꺼진다\n"
-"    · 렌즈2(설정초과)·하단 '메모리 파라미터' 표 전체\n"
-"  즉 RSS/PSS 같은 실측은 그대로 나오지만, '왜 이만큼인가' 를 설명하는 축이 사라진다.\n"
-"\f\n── 여러 데이터베이스(인스턴스) ──\n"
-"  cub_top <db명>     그 DB 를 본다.  생략하면 가동 중인 것 중 알파벳순 첫 번째\n"
-"  라이브에서 < > 로 이동. 상세 추적은 화면에 보이는 DB 하나뿐이고,\n"
-"  나머지는 총량만 집계한다(clear_refs 를 전부에 돌리면 대상 서버가 느려지기 때문).\n"
-"  terse 는 instance.<db>.* 로 모든 인스턴스를 내보내며 tracked=1 이 현재 추적 대상이다.\n"
-"\f\n── 두 가지 라이브 화면 ──\n"
-"  대시보드(-b)  현재 상태 한 장. p 로 시계열과 오간다. 키는 라이브 h 도움말 첫 절 참조.\n"
-"  시계열(-p)    같은 값의 시간 흐름(4패널 A~D). p 로 대시보드로 돌아온다.\n"
-"  배치(-t · --json · 옵션 없이)  한 번 수집해 텍스트로 낸다 — 모니터링·보고서 연동용.\n"
-"\f\n── 대시보드 화면 구성 (위에서 아래로) ──\n"
-"  ① OS 컨텍스트(호스트 CPU·메모리·인스턴스) ② 프로세스(티어별 PSS·코어)\n"
-"  ③ RSS · 서버(영역·값 4열) ④ 동적 메모리 상세(B/A) ⑤ 메모리 추이(+load) ⑥ I/O 순으로 쌓인다.\n"
-"  아래 절 설명도 같은 순서다 — 화면에서 보이는 자리 그대로 찾아 내려가면 된다.\n"
-"\f\n── ① OS 컨텍스트 — CPU 와 load ──\n"
-"  CPU 32c/64t     물리 32 코어 / 논리 64 스레드. 다르면 하이퍼스레딩이다.\n"
-"                  물리보다 많은 부하는 같은 코어를 나눠 쓰는 것이라 선형으로 안 빨라진다.\n"
-"  total|used|pct  total=논리코어, used=사용 중 코어 수, pct=전체 사용률.\n"
-"                  used 는 '몇 코어어치가 돌고 있나' 라 프로세스 박스의 코어 수와 바로 비교된다.\n"
-"  막대(게이지)    코어를 바쁜 순으로 정렬해 왼쪽부터 그린 것 — 합계가 아니라 분포다.\n"
-"                  색으로 구분한다 — 적색=포화(≥95%%) 주황=높음(≥50%%)\n"
-"                  녹색=중간(≥10%%) 회색=유휴. 글리프는 다른 게이지와 같다.\n"
-"                  used 12 이 12코어에 고르게 퍼진 것인지 6개가 100%%인지는 합계로는\n"
-"                  구분되지 않는다 — 뒤엣것이 병목이고, 왼쪽 붉은 구간의 폭이 그것이다.\n"
-"                  ※ 코어가 막대 폭보다 많으면 한 칸이 여러 코어를 대표하며 그 구간의\n"
-"                    최댓값을 그린다(포화를 평균으로 감추지 않기 위함). 그래서 칸 수에\n"
-"                    코어 수를 곱해 읽으면 안 된다 — 정확한 개수는 옆의 sat 숫자를 볼 것.\n"
-"  sat N           포화 코어 수 — 사용률 95%% 이상인 코어가 몇 개인가.\n"
-"                  포화 직전(50~95%%)은 막대의 주황 구간이 보여준다.\n"
-"                  btop 의 코어별 미터에서 100%% 칸을 세는 것과 같은 값이다.\n"
-"                  이 값이 물리코어 수에 근접하면 CPU 가 병목이다. 반대로 used 는 큰데\n"
-"                  sat 이 0 이면 부하가 고르게 퍼진 것이라 아직 여유가 있다.\n"
-"  us  user        사용자 코드. 질의 처리·정렬·조인 등 엔진이 실제 일한 몫\n"
-"  sy  system      커널. I/O 발행, 락, 컨텍스트 스위치. us 대비 과도하면 경합을 의심\n"
-"  load 1/5/15     최근 1·5·15분 평균 실행대기 태스크 수. CPU 사용률이 아니다 —\n"
-"                  리눅스에서는 D 상태(디스크 대기)도 포함하므로, CPU 가 한가해도\n"
-"                  I/O 가 막히면 올라간다. 논리코어 수(64)를 넘으면 대기가 쌓이는 중.\n"
-"                  전체 호스트 값이라 인스턴스별로 나눌 수 없어 박스 제목에 둔다.\n"
-"\f\n── ② 프로세스 박스가 PSS 인 이유 · 티어별 CPU ──\n"
-"  PSS = 공유 페이지를 쓰는 프로세스 수로 나눠 배분한 상주량.\n"
-"  libcubrid.so 10M 을 5개가 공유하면 각자 2M 로 잡힌다 → 행을 다 더해도 이중 계상이\n"
-"  없어 All 합계가 성립한다. RSS 로 재면 같은 페이지가 여러 번 세어져 합이 부풀려진다.\n"
-"  프로세스 박스   각 티어(master/server/pl/broker/CAS) 앞의 숫자가 그 티어의 코어 수.\n"
-"                  전부 더하면 OS 의 used 이하여야 정상이다(나머지는 CUBRID 밖 프로세스).\n"
-"                  색으로 크기를 구분한다 — 회색 · =유휴, 청록 <1코어, 노랑 1코어 이상,\n"
-"                  주황=눈에 띄는 부하, 적색=물리코어 수 초과. 0 은 숫자 대신 · 로 눌러\n"
-"                  실제로 돌고 있는 티어만 눈에 들어오게 했다.\n"
-"  ※ 다른 도구와 대조할 때\n"
-"    · server 의 CPU 는 top 과 같은 '1코어=100%' 규약이라 100% 를 넘을 수 있다.\n"
-"      OS 박스의 코어 수와 견주려면 100 으로 나눌 것(terse 는 tier.*_cores 로 이미 환산).\n"
-"    · Memory 의 used 는 MemTotal-MemAvailable 로 top 과 같은 정의다.\n"
-"      htop 은 Shmem 을 달리 처리해 수 GB 낮게 나오는데, 오차가 아니라 정의 차이다.\n"
-"\f\n── ③ RSS · 서버 — 각 항목이 알려주는 것 ──\n"
-"  data_buffer     페이지 버퍼. 설정보다 큰 게 정상(BCB·victim 배열이 같은 매핑에 포함)\n"
-"  log_buffer      로그 버퍼. 선할당이라 설정≈상주\n"
-"  dynamic-heap    정렬·캐시·세션이 섞인 동적 힙 → 아래 [B]/[A] 로 분해\n"
-"  thread stacks   워커 스택. 예약 크고 상주 극소가 정상\n"
-"  glibc arena     할당자 예약. 상주 0이면 물리 메모리 미사용\n"
-"  (설정 X, 할당 Y%)  설정 대비 매핑 비율. >105% 면 초과\n"
-"  핫 N%           상주 중 실제 접근 비율. 낮으면 올려두고 안 만지는 메모리\n"
-"  Σ 합계          4열의 합. rss 합 = 프로세스 RSS(항등). 프로세스 박스의 PSS 와는\n"
-"                  공유 .so 배분만큼 다르며(오류 아님), 그 값이 라벨에 함께 적힌다.\n"
-"\f\n── 파라미터 귀속률 — 화면 표기 \"설정으로 설명 N%%\" (영역 박스 제목 옆) ──\n"
-"  서버 메모리 중 cubrid.conf 설정으로 '왜 이만큼인지' 설명되는 비율.\n"
-"    귀속   data_buffer(data_buffer_size), log_buffer(log_buffer_size)\n"
-"    비귀속 dynamic-heap, thread stacks, code(.so) 등 — 설정으로 통제되지 않는 부분\n"
-"  읽는 법:\n"
-"    높다(90%대)   정상. 메모리 대부분이 설정대로다\n"
-"    떨어진다      dynamic-heap 이 자라고 있다는 뜻 — 아래 heap 박스로 내려가\n"
-"                  무엇이 늘었는지 확인할 것([a] 로 방법 A 를 돌리면 더 쪼개진다)\n"
-"  즉 이 값은 'heap 박스를 들여다볼 필요가 있는가' 를 알려주는 신호다.\n"
-"\f\n── 관측 등급 (값 왼쪽 1글자) ──\n"
-"  ● 측정    OS/엔진이 직접 보고. 신뢰 가능\n"
-"  ◐ 예약    매핑만 확인 — 실사용과 크게 다를 수 있음\n"
-"  ◌ 추정    크기 패턴 추정 — 상대 비중만\n"
-"  ? 미귀속  아직 분해되지 않음 — 해석하지 말 것\n"
-"\f\n── ④ 동적 메모리 상세(= glibc malloc 힙) — B=정확 · A=크기 추정 ──\n"
-"  ※ 여기서 '힙'은 프로세스의 동적 할당 영역(malloc)이다. 테이블 데이터가 저장되는\n"
-"     스토리지의 '힙 파일'(HFID)과는 다른 것이며, 그쪽은 cub_volmap 이 다룬다.\n"
-"  [B] 항목        엔진이 직접 보고하는 값 → 정확. plan·결과·필터 캐시·락·세션·카탈로그·연결\n"
-"  lock table (tran)  lk_Gl.tran_lock_table — 트랜잭션별 락 보유 슬롯이다.\n"
-"                  num_trans x 152B 로, 접속 상한에 비례해 미리 잡힌다.\n"
-"                  ※ cubrid lockdb 의 \"Object Lock Table\" 과는 다른 구조다.\n"
-"                    저쪽은 잠긴 객체의 LK_ENTRY/LK_RES 풀(예: 1000개 242K)이고\n"
-"                    이쪽은 트랜잭션 슬롯(예: 101개 15K)이라 값이 다른 것이 정상이다.\n"
-"  [A] 항목        glibc 청크 분포 추정. 정렬·해시 작업버퍼 등 B가 못 잡는 것\n"
-"  [A] overcount   A 합계가 상주 초과(free 청크·비상주 포함) — 정상, 상한으로 읽을 것\n"
-"\f\n── ⓑ 실행 계정 — 서버를 띄운 계정으로 실행할 것 ──\n"
-"  root 일 필요는 없다. 서버를 띄운 계정(보통 cubrid)이면 전 기능이 동작한다.\n"
-"  그 계정이 아니면 커널 ptrace 검사로 mem/smaps/io 가 막혀 55개 키가 빠진다\n"
-"  (영역별 분해·PSS·동적 메모리 상세 B·버퍼풀 BCB·로그 LSA·proc_iops·hot).\n"
-"  남는 것: OS 전체·장치 I/O·cubrid.conf·서버 총량(status 폴백으로 VmRSS 는 살린다).\n"
-"  못 본 값은 0 으로 내지 않고 perm.limited=1 과 사유를 함께 표기한다 — 0 으로 내면\n"
-"  모니터링이 '메모리를 안 쓴다' 로 오독한다. 자세한 대조표는 docs/limitations.md §15.\n"
-"\f\n── ⓐ 용량(capacity) — 증설·축소·개선을 무엇으로 판단하나 ──\n"
-"  숲 관점의 축이다: 수요(지금 얼마 쓰나) · 상한(이 환경이 얼마까지 되나) · 헤드룸(남은 여유).\n"
-"  수요   dev IOPS = 장치 전체, this server IOPS = 이 인스턴스 귀속(/proc/<pid>/io).\n"
-"  지연   await = 요청당 대기(ms). IOPS 는 낮은데 await 가 크면 'IOPS 증설'이 아니라\n"
-"         '더 빠른 스토리지'가 답이다. queue = 평균 큐 깊이.\n"
-"  상한   포화(사용률 90%% 이상) 또는 큐가 쌓인 순간의 IOPS 를 그 환경의 실효 상한으로 기억한다.\n"
-"         **하나의 숫자로 기억하지 않는다.** 같은 장치라도 4KB 랜덤과 128KB 순차는 IOPS 상한이\n"
-"         자릿수로 다르므로, I/O 프로파일 = 평균 요청 크기(<8KB / 8-64KB / >64KB) x 읽기 비중\n"
-"         (write-heavy <30%% / mixed / read-heavy >70%%) 9칸으로 나눠 칸마다 따로 기억하고,\n"
-"         지금 프로파일과 **같은 칸**의 상한하고만 비교한다. 다른 칸 값을 빌려 쓰면\n"
-"         (128KB 로 잰 상한을 4KB 워크로드에 적용) '여유 있다' 는 거짓 판정이 나온다.\n"
-"         --capacity-state FILE 로 보존하면 재실행해도 칸별 상한을 이어서 판정한다.\n"
-"         그 칸이 한 번도 포화하지 않았으면 '이 칸은 미관측'으로 표기한다(추정을 사실로 위장하지 않는다).\n"
-"  버퍼   히트율의 출처가 두 가지다.\n"
-"         perfmon   엔진 카운터가 **이미 돌고 있을 때**(statdump·csql ;histo 등 watcher 존재)\n"
-"                   그 값을 읽는다. 우리가 watcher 를 만들지는 않는다(무침습 절대 조건).\n"
-"         turnover  카운터가 정지면 BCB 스냅샷 두 장의 VPID 집합 차이로 회전율을 낸다.\n"
-"                   적재 pg/s = 미스, 재적재%% = 빠졌다 다시 들어온 비율(작업집합>버퍼 신호).\n"
-"  판정   ⚠ 용량 한계 = 헤드룸 80%%↑ **그리고** 장치가 실제로 밀릴 때(await 20ms↑ 또는 큐 10↑).\n"
-"         헤드룸만 높고 적체가 없으면 '상한 근접 — 한계 단정 불가'로만 말하고 증설을 권고하지 않는다.\n"
-"         상한은 과거 다른 순간의 관측치라 워크로드가 가벼워지기만 해도 80%%를 넘길 수 있기 때문이다.\n"
-"         · ⚠ 지연 병목(await 20ms↑ & IOPS 낮음)\n"
-"         ⚠ 버퍼 부족(적재 많고 재적재 30%%↑) · ⚠ 스캔(적재 많고 재적재 없음 — 증설 무효)\n"
-"         · 과다 할당(버퍼 60%% 미사용 & 적재 거의 없음 — 축소 가능) · · 여유\n"
-"  비용   취합 예산 0.5초. 넘으면 그 프레임 값을 버리고 '취합 생략'을 화면에 남긴다.\n"
-"         실측 0.2~0.9ms(예산의 0.2%% 미만). 대상 프로세스 쓰기 0, 접속·락 0.\n"
-"\n── ④′ 버퍼풀 상태 — 페이지 슬롯 = 버퍼 제어블록(BCB, Buffer Control Block) (◌) ──\n"
-"  pgbuf_Pool.BCB_table 배열을 방법 B 와 같은 경로로 통째 읽어 어떤 페이지가 버퍼에\n"
-"  올라와 있고(resident) 몇 장이 아직 볼륨에 안 내려갔는지(dirty) 센다. 래치 없는 스냅샷.\n"
-"  게이지: 전경=상주율, 배경(청색)=dirty 비율.  zones: hot/warm/cold = LRU 3구역,\n"
-"  void = 적재/축출 전이 중, free = 빈 BCB.  victim 은 cold 에서 뽑고 dirty 는 건너뛴다.\n"
-"  log: append = 로그 꼬리, flushed(nxio) = 디스크에 내려간 경계 → 차이 = 아직 fsync 안 된 로그.\n"
-"  두 가지 '뒤처짐' 을 구분한다 — 둘 다 로그 꼬리(append) 기준이지만 대상이 다르다:\n"
-"    fsync 지연 = append − flushed(nxio)     로그 자체가 디스크에 안 내려간 거리.\n"
-"                 커밋 응답이 직접 느려지므로 더 급한 신호다.\n"
-"    flush 지연 = append − oldest dirty LSA  데이터 페이지의 볼륨 반영이 뒤처진 거리\n"
-"                 = 장애 시 redo 해야 할 길이. 정상에서도 0 보다 크며 크기보다 추세를 본다.\n"
-"                 dirty 개수와 다르다 — 개수가 적어도 오래된 한 장이 남으면 이 값은 크다.  자기검증: VPID 이상치 1% · 헤더 읽기실패 50% · **재검 후** 잔여 불일치 5%(50% 초과면 비활성, 그 사이는 검증분만 집계).\n"
-"  --bcb-dump F : 스냅샷을 파일로 → cub_volmap --bufmap F 로 볼륨 지도 위에 버퍼 상주/dirty 를 얹는다.\n"
-"\f\n── ⑤ 메모리 추이 박스의 load(OS) 겹침 ──\n"
-"  분홍=서버 전체, 적색=동적 힙, 노랑=load(OS, 1분). load 는 단위가 달라\n"
-"  자체 최대 기준으로 모양만 겹치고, 실제 값·범위는 우측 범례에 있다.\n"
-"  읽는 법: 메모리가 늘 때 load 도 같이 오르면 부하 기인 —\n"
-"           load 는 평탄한데 메모리만 계속 오르면 누수를 의심할 것.\n"
-"\f\n── ⑥ I/O 박스 — iowait · D스레드 · 항목 · 판정문 ──\n"
-"  wa  iowait      ※ 'CPU 가 I/O 를 기다리며 바빴다' 가 아니다.\n"
-"                  CPU 가 놀고 있었고(idle) 동시에 그 CPU 에 디스크 대기 태스크가\n"
-"                  있었던 시간의 비율 — 즉 idle 의 하위 분류다. 함정 둘:\n"
-"                    · 코어 수로 나뉜다. 64코어에서 한 프로세스가 디스크를 완전히\n"
-"                      포화시켜도 wa 는 1~2% 로밖에 안 보인다\n"
-"                    · CPU 가 바쁘면 idle 이 없어 wa 도 0 이 된다 → I/O 병목이 가려진다\n"
-"                  그래서 wa 단독으로 판단하지 말고 아래 조합으로 읽을 것:\n"
-"                    wa 낮음 + dev util 높음  CPU 가 바빠 wa 가 가려진 상태. 병목 가능성 있음\n"
-"                    wa 높음 + dev util 높음  디스크 병목이 확실 — data_buffer 부족을 의심\n"
-"                    wa 높음 + dev util 낮음  디스크가 아닌 대기이거나 측정 구간이 짧다\n"
-"                    majflt 증가             버퍼에 없어 디스크에서 읽은 것 — 증설의 직접 근거\n"
-"                  dev util 과 majflt 는 코어 수에 희석되지 않는 물리량이라 더 믿을 만하다.\n"
-"                  ※ I/O 박스가 이 조합을 대신 판정해 한 줄로 알려준다(아래 참조).\n"
-"  D스레드 n/m     iowait 행 오른쪽. cub_server 스레드 m 개 중 n 개가 D 상태\n"
-"                  (디스크 응답을 기다리는 중단 불가 대기)라는 뜻이다.\n"
-"                  wa 와 달리 코어 수로 희석되지 않아, 대기가 있으면 반드시 잡힌다.\n"
-"                  0 이 아니면 그 순간 실제로 디스크에 막혀 있다는 직접 증거다.\n"
-"  cache absorb    요청 읽기 중 디스크로 안 내려간 비율. 0% 면 캐시가 무효\n"
-"  dev util        장치 포화도 — I/O 가 많은지의 1차 판정. 100%면 포화\n"
-"  blkio wait      이 서버가 디스크를 기다린 시간의 비율(delayacct_blkio_ticks).\n"
-"                  전 스레드 합이라 한 코어(100%%)를 넘을 수 있다 — CPU 사용률과\n"
-"                  같은 규약이다. cub_server 는 워커가 I/O 를 하므로 반드시 스레드를\n"
-"                  모두 더해야 한다(메인 스레드만 보면 늘 0 이다).\n"
-"                  pidstat -d 의 iodelay 와 같은 출처이며, 그쪽은 기본이 메인 스레드\n"
-"                  기준이라(-t 로 스레드별) 값이 다르게 보일 수 있다.\n"
-"                  비동기 대기는 안 잡히므로 0 을 '문제 없음'으로 단정하지 말 것.\n"
-"\f\n── I/O 판정문 (I/O 박스 맨 아래) ──\n"
-"  wa·장치 사용률·인스턴스 신호 세 가지를 조합해 결론을 한 줄로 낸다. 조건이\n"
-"  풀려도 지워지지 않고 시각과 함께 최근 2건까지 남는다(지난 것은 회색) —\n"
-"  I/O 이상은 순간적이라 지워지면 '봤는데 없어졌다' 가 되기 때문이다.\n"
-"\n"
-"  판정에 쓰는 세 조건\n"
-"    (1) wa 높음    iowait >= 100/코어수 x 0.5 (%%). 코어 수에 맞춰 자동 조정된다 —\n"
-"                   64코어면 0.78%%, 32코어면 1.6%%, 4코어면 12.5%% (하한 0.5%%).\n"
-"                   고정 3%% 같은 기준은 코어가 많으면 도달하지 않아 병목을 놓친다.\n"
-"    (2) 장치 바쁨  최다사용 장치의 사용률 >= 80%%. 장치를 식별했을 때만 성립한다.\n"
-"    (3) 내 신호    이 인스턴스가 실제로 I/O 중이라는 증거. 넷 중 하나면 성립:\n"
-"                   majflt >= 1/s · D스레드 > 0 · blkio >= 1%% · 이 서버 io >= 1MB/s\n"
-"                   ※ 컨테이너(overlay)에서는 DB 파일의 백킹 장치를 diskstats 에서\n"
-"                     못 찾아 (2)가 인스턴스 부하와 이어지지 않는다. 그래서 (3)에\n"
-"                     이 서버의 실제 읽기/쓰기량을 반드시 포함한다.\n"
-"\n"
-"  나올 수 있는 경우 — 세 조건의 8조합이 판정 5종으로 모인다\n"
-"   (1)(2)(3)  판정\n"
-"    O  O  O   ⚠ 디스크 병목 — 셋 다 성립. 가장 확실한 신호다.\n"
-"              data_buffer 를 늘려 디스크 읽기를 줄이는 것이 1차 대응이다.\n"
-"    X  O  O   ⚠ wa 가 가려짐 — 장치는 바쁜데 wa 가 낮다. CPU 가 바빠 idle 이\n"
-"              없으면 wa 도 0 이 된다(wa 는 idle 의 하위 분류). 병목일 수 있다.\n"
-"    O  X  O   · 비디스크 대기 — wa 는 있는데 장치는 한가. 네트워크·NFS 대기이거나\n"
-"    O  X  X     측정 구간이 짧아 장치 통계가 아직 안 잡힌 경우다.\n"
-"    X  O  X   · 다른 프로세스의 부하 — 장치는 바쁘지만 이 인스턴스는 조용하다.\n"
-"    O  O  X     CUBRID 문제가 아니므로 같은 호스트의 다른 프로세스를 볼 것.\n"
-"    X  X  O   (표시 없음) — 이 서버가 I/O 를 하지만 wa 도 장치도 한가하다.\n"
-"    X  X  X   (표시 없음) — 유휴. 정상 상태다.\n"
-"\n"
-"  읽는 순서\n"
-"    1) ⚠(적색·주황)이면 그 줄만 읽어도 결론이 난다.\n"
-"    2) ·(회색)이면 이 인스턴스의 문제가 아니거나 판단하기 이른 상태다.\n"
-"    3) 아무것도 없으면 I/O 는 정상이다 — 느리다면 CPU(OS 박스)나 잠금을 볼 것.\n"
-"\ncaps: 줄은 이 커널에서 사용 가능한 인터페이스와 폴백 상태를 보여줍니다.\n"
-"자세한 한계는 docs/limitations.md, 이식성은 docs/portability.md 참조.");
 }
 
 /* ---- Per-mode key help ----
@@ -7042,7 +6829,8 @@ static void help_keys_dash(void){
     hout(
 "── 대시보드(-b) · 이 화면이 무엇을 보여주나 ──\n"
 "\n"
-"  cub_server 프로세스의 메모리를 /proc 만 읽어 분해한다. 접속·쿼리·쓰기 0(무침습).\n"
+"  cub_server 프로세스의 메모리를 /proc 과 프로세스 메모리만 읽어 분해한다. 쓰기·락 0,\n"
+"  서버 질의는 시작 시 paramdump 1회뿐이다(무침습).\n"
 "  핵심 질문은 하나다 — \"이 메모리가 왜 이만큼인가, 늘고 있다면 어디가 늘었나\".\n"
 "\n"
 "  화면은 위에서 아래로 여섯 상자다. 아래 설명도 그 순서다.\n"
@@ -7095,7 +6883,7 @@ static void help_keys_dash(void){
 "                  실제로 돌고 있는 티어만 눈에 들어오게 했다.\n"
 "  ※ 다른 도구와 대조할 때\n"
 "    · server 의 CPU 는 top 과 같은 '1코어=100%' 규약이라 100% 를 넘을 수 있다.\n"
-"      OS 박스의 코어 수와 견주려면 100 으로 나눌 것(terse 는 tier.*_cores 로 이미 환산).\n"
+"      OS 박스의 코어 수와 견주려면 100 으로 나눌 것(-d 출력은 tier.*_cores 로 이미 환산).\n"
 "    · Memory 의 used 는 MemTotal-MemAvailable 로 top 과 같은 정의다.\n"
 "      htop 은 Shmem 을 달리 처리해 수 GB 낮게 나오는데, 오차가 아니라 정의 차이다.\n"
 "\f\n"
@@ -7291,7 +7079,7 @@ static void help_keys_dash(void){
 "  cub_top <db명>     그 DB 를 본다.  생략하면 가동 중인 것 중 알파벳순 첫 번째\n"
 "  라이브에서 < > 로 이동. 상세 추적은 화면에 보이는 DB 하나뿐이고,\n"
 "  나머지는 총량만 집계한다(clear_refs 를 전부에 돌리면 대상 서버가 느려지기 때문).\n"
-"  terse 는 instance.<db>.* 로 모든 인스턴스를 내보내며 tracked=1 이 현재 추적 대상이다.\n"
+"  -d 출력은 instance.<db>.* 로 모든 인스턴스를 내보내며 tracked=1 이 현재 추적 대상이다.\n"
 "\n"
 "  자세한 한계는 docs/limitations.md, 이식성은 docs/portability.md 참조.");
 }
@@ -7484,7 +7272,7 @@ static void help_keys_plot(void){
 "  cub_top <db명>     그 DB 를 본다.  생략하면 가동 중인 것 중 알파벳순 첫 번째\n"
 "  라이브에서 < > 로 이동. 상세 추적은 화면에 보이는 DB 하나뿐이고,\n"
 "  나머지는 총량만 집계한다(clear_refs 를 전부에 돌리면 대상 서버가 느려지기 때문).\n"
-"  terse 는 instance.<db>.* 로 모든 인스턴스를 내보내며 tracked=1 이 현재 추적 대상이다.\n"
+"  -d 출력은 instance.<db>.* 로 모든 인스턴스를 내보내며 tracked=1 이 현재 추적 대상이다.\n"
 "\n"
 "  자세한 한계는 docs/limitations.md, 이식성은 docs/portability.md 참조.");
 }
@@ -7492,9 +7280,8 @@ static void help_keys_plot(void){
    mode 0 = batch/CLI (-h): name, usage, options plus the dashboard description.
    mode 1 = live dashboard, 2 = live time series: that mode's help only. */
 static void usage_modal(int mode){
-    if(mode==1){ help_keys_dash(); return; }
-    if(mode==2){ help_keys_plot(); return; }
-    usage();
+    if(mode==2) help_keys_plot();
+    else        help_keys_dash();
 }
 
 /* A numeric option value: the whole string must be a number within [lo,hi]. */
@@ -7513,7 +7300,8 @@ int main(int argc,char **argv){
        proportional to resident size (about 30ms/GB), after which the target takes minor
        faults re-setting the accessed bits.  Staying non-invasive requires the default
        to be off; --hot turns it on explicitly. */
-    int terse=0,with_a=0,no_hot=1,live=0,view0=0,dump_hist=0,force_ko=0; double interval=0.5;
+    int terse=0,tree=0,with_a=0,no_hot=1,live=0,view0=0,dump_hist=0,force_ko=0; double interval=0.5;
+    int bcb_only=0;                   /* --bcb-dump with no display mode: write the snapshot only */
     const char *want_db=NULL;         /* The positional argument is the db to view; without it, the first alphabetically */
     /* Options that take a value.  The tests below are written "&&i+1<argc", which would
        let an option without its value match nothing (--replay with no path would sample
@@ -7528,9 +7316,10 @@ int main(int argc,char **argv){
             }
     }
     for(int i=1;i<argc;i++){
-        if(!strcmp(argv[i],"-t")) terse=1;
-        else if(!strcmp(argv[i],"--json")){ terse=1; g_json=1; }
-        else if(!strcmp(argv[i],"-b")||!strcmp(argv[i],"--live")) live=1;
+        if(!strcmp(argv[i],"-t")||!strcmp(argv[i],"--tty")) tree=1;
+        else if(!strcmp(argv[i],"-d")||!strcmp(argv[i],"--dump")) terse=1;
+        else if(!strcmp(argv[i],"--dump-json")){ terse=1; g_json=1; }
+        else if(!strcmp(argv[i],"-b")||!strcmp(argv[i],"-i")||!strcmp(argv[i],"--live")) live=1;
         else if(!strcmp(argv[i],"-p")||!strcmp(argv[i],"--plot")){ live=1; view0=1; }
         else if(!strcmp(argv[i],"--record")&&i+1<argc) g_rec_path=argv[++i];
         else if(!strcmp(argv[i],"--replay")&&i+1<argc) g_rep_path=argv[++i];
@@ -7550,13 +7339,9 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"--capacity-state") && i+1<argc) snprintf(g_cap_state,sizeof g_cap_state,"%s",argv[++i]);
         else if(!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")||!strcmp(argv[i],"/h")
                 ||!strcmp(argv[i],"-?")||!strcmp(argv[i],"/?")){
-            /* Dumping 172 lines at once scrolls the first screen - the most important section -
-               out of view, so the same pager as live h is used.
-               A pipe or redirect dumps plainly, keeping grep and friends working. */
-            if(isatty(STDOUT_FILENO)&&isatty(STDIN_FILENO)){
-                g_hn=0; g_hcap=1; usage(); g_hcap=0;    /* -h is the CLI context: no mode keys */
-                tui_enter(); help_pager(g_hln,g_hn); tui_leave();
-            } else usage();
+            /* Like any CLI: the usage and options, printed in place.  The screen
+               explanations stay in the live h help. */
+            usage_opts();
             return 0; }
         else if(argv[i][0]!='-'&&argv[i][0]!='/'){
             /* One database per run */
@@ -7586,10 +7371,24 @@ int main(int argc,char **argv){
         if(!rf){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,strerror(errno)); return 2; }
         RPR.f=rf;
     }
-    /* Plots write ANSI to stdout and would break a terse parser, so the combination is refused. */
-    if(view0 && terse){
-        fprintf(stderr,"cub_top: -p 와 -t 는 함께 쓸 수 없습니다 (플롯은 ANSI 출력).\n");
+    /* One output mode per run: the tree, the dump and the live screens all write to stdout. */
+    if(tree + terse + live > 1){
+        fprintf(stderr,"cub_top: 출력 모드는 하나만 지정합니다 (-t · -d/--dump-json · -b/-p)\n");
         return 2;
+    }
+    if(g_rep_path && tree){
+        fprintf(stderr,"cub_top: --replay 는 트리(-t)를 그리지 않습니다 — -b/-p 또는 -d/--dump-json\n");
+        return 2;
+    }
+    /* No mode: the help, as a CLI does.  --bcb-dump alone is an action of its own (the
+       snapshot cub_volmap --bufmap reads), so it runs without one. */
+    if(!tree && !terse && !live && !g_rep_path){
+        if(g_bcb_dump[0]) bcb_only=1;
+        else {
+            usage_opts();
+            if(argc>1){ fprintf(stderr,"cub_top: 출력 모드를 지정하세요 — -t, -d, --dump-json, -b, -p\n"); return 2; }
+            return 0;
+        }
     }
     auto_lang(force_ko);   /* Detect whether Hangul can be displayed; explicit options win. */
     /* Replay draws only from the recording, so it must run before enum_instances() and
@@ -7743,9 +7542,14 @@ int main(int argc,char **argv){
         jf=tmpfile();
         if(jf) jsave=dup(1);
         if(!jf || jsave<0 || dup2(fileno(jf),1)<0){
-            fprintf(stderr,"cub_top: --json 임시 출력 준비 실패: %s\n",strerror(errno));
+            fprintf(stderr,"cub_top: --dump-json 임시 출력 준비 실패: %s\n",strerror(errno));
             return 1;
         }
+    }
+    if(bcb_only){
+        if(PG.ok) printf("bcb snapshot: %s (%d pages resident)\n",g_bcb_dump,PG.nrec);
+        else { fprintf(stderr,"cub_top: --bcb-dump %s 를 쓰지 못했습니다 — %s\n",g_bcb_dump,PG.why[0]?PG.why:"버퍼풀 상태 읽기 불가"); return 1; }
+        return 0;
     }
     if(terse){ char ou[256]; opts_used_str(argc,argv,ou,sizeof ou);
                printf("opts.used=\"%s\"\n",ou); }
@@ -7756,12 +7560,12 @@ int main(int argc,char **argv){
                      IO.rchar,IO.minflt,IO.majflt,IO.cpu_pct,IO.ncpu,
                      IO.d_thr,IO.n_thr);
         /* This block must stay inside the terse branch: outside it, the else below binds to
-           if(jf) and plain -t prints the tree as well. */
+           if(jf) and plain -d prints the tree as well. */
         if(jf){ fflush(stdout);
-                if(dup2(jsave,1)<0){ fprintf(stderr,"cub_top: --json 출력 복원 실패: %s\n",strerror(errno)); return 1; }
+                if(dup2(jsave,1)<0){ fprintf(stderr,"cub_top: --dump-json 출력 복원 실패: %s\n",strerror(errno)); return 1; }
                 close(jsave);
                 json_from_terse(jf,stdout); fclose(jf);
-                if(fflush(stdout)!=0 || ferror(stdout)){ fprintf(stderr,"cub_top: --json 출력 쓰기 실패: %s\n",strerror(errno)); return 1; } }
+                if(fflush(stdout)!=0 || ferror(stdout)){ fprintf(stderr,"cub_top: --dump-json 출력 쓰기 실패: %s\n",strerror(errno)); return 1; } }
     }
     else {
         /* The tree prints every instance in turn; one per invocation would mean running the
