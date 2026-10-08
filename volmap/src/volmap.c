@@ -10398,7 +10398,9 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 
    Non-invasive: readdir + open/pread only, never writes to the database. */
 
-/* Open every <db>_t<NNN> in one directory that is not held already. */
+/* Open every <db>_t<NNN> in one directory that is not held already.  "Held" is
+   decided by volid, which is unique in a database, not by path: the same file is
+   reached by several spellings (a trailing slash, a symlink, a relative vinf). */
 static int
 volmap_scan_temp_dir (VOLMAP_CTX * ctx, const char *dir, const char *prefix, size_t plen)
 {
@@ -10424,22 +10426,21 @@ volmap_scan_temp_dir (VOLMAP_CTX * ctx, const char *dir, const char *prefix, siz
          <db>_t<volid>, unchanged from 10.1 to 11.5.  Reading it here means an
          unselected volume is never opened at all - it costs no fd, no header read,
          and does not grow the volume array (about 300 bytes a volume). */
-      {
-	char *vend = NULL;
-	long tvolid = strtol (de->d_name + plen, &vend, 10);
+      char *vend = NULL;
+      long tvolid = strtol (de->d_name + plen, &vend, 10);
+      int named = (vend != NULL && *vend == '\0');
 
-	if (vend != NULL && *vend == '\0' && !volmap_vol_selected (ctx, (int) tvolid))
-	  {
-	    continue;
-	  }
-      }
+      if (named && !volmap_vol_selected (ctx, (int) tvolid))
+	{
+	  continue;
+	}
       if ((size_t) snprintf (tpath, sizeof (tpath), "%s/%s", dir, de->d_name) >= sizeof (tpath))
 	{
 	  continue;
 	}
       for (vi = 0; vi < ctx->nvols; vi++)
 	{
-	  if (strcmp (ctx->vols[vi].path, tpath) == 0)
+	  if (named ? ctx->vols[vi].volid == tvolid : strcmp (ctx->vols[vi].path, tpath) == 0)
 	    {
 	      have = 1;
 	      break;
@@ -10508,14 +10509,20 @@ volmap_scan_temp_volumes (VOLMAP_CTX * ctx)
       vi++;
     }
 
-  /* add newly created temp volumes, skipping paths already held.  Two directories
+  /* add newly created temp volumes, skipping volumes already held.  Two directories
      may hold them: the database directory, and temp_volume_path when the server
-     is configured to spill elsewhere.  Scanning the same path twice is harmless
-     (already-held paths are skipped), so no de-duplication is needed. */
+     is configured to spill elsewhere.  Whether they are the same directory is
+     decided by device and inode, since the two paths may be spelled differently. */
   changed |= volmap_scan_temp_dir (ctx, dirp, prefix, plen);
-  if (ctx->temp_path[0] != '\0' && strcmp (ctx->temp_path, dirp) != 0)
+  if (ctx->temp_path[0] != '\0')
     {
-      changed |= volmap_scan_temp_dir (ctx, ctx->temp_path, prefix, plen);
+      struct stat sa, sb;
+
+      if (stat (ctx->temp_path, &sa) != 0 || stat (dirp, &sb) != 0 || sa.st_dev != sb.st_dev
+	  || sa.st_ino != sb.st_ino)
+	{
+	  changed |= volmap_scan_temp_dir (ctx, ctx->temp_path, prefix, plen);
+	}
     }
   return changed;
 }
