@@ -20,7 +20,9 @@
 # Two things can break volmap when a release ships:
 #
 #   1. A header it includes changes shape.  The build catches that, so this
-#      script builds the newest tag of every major.minor line.
+#      script builds the newest tag of every major.minor line from 10.2 on - the
+#      10.1 tree lacks headers volmap includes (cubrid_getopt.h arrived in 10.2),
+#      although 10.1 volumes are read and their structures compared below.
 #   2. An on-disk structure changes in a file volmap cannot include
 #      (disk_manager.c, file_manager.c/h, slotted_page.h are not standalone
 #      headers, so src/storage_ondisk_layout.hpp holds a copy).  A build
@@ -51,6 +53,10 @@
 # Exit status: 0 clean, 1 a release build failed, 2 the copy needs updating (out
 #              of date with the newest release, or a structure went missing),
 #              3 both, 64 usage error.
+#
+# The work directory is removed on exit unless KEEP=1; a WORK given by the caller
+# that already existed is left in place.  Logs of failed builds are kept in a
+# separate directory, which the report names.
 set -u
 
 SELF=$(cd "$(dirname "$0")" && pwd)
@@ -70,8 +76,26 @@ for a in "$@"; do
   esac
 done
 
+# Remove only a work directory this run created: a WORK given by the caller may
+# hold files of theirs.  INT/TERM/HUP exit through the EXIT trap so an interrupted
+# run cleans up too.
+created=0
+[ -e "$WORK" ] || created=1
 mkdir -p "$WORK" || exit 1
-[ "$KEEP" = "1" ] || trap 'rm -rf "$WORK"' EXIT
+cleanup () { [ "$created" = "1" ] && [ "$KEEP" != "1" ] && rm -rf "$WORK"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+LOGS=${TMPDIR:-/tmp}/volmap-build-logs.$$      # created on the first failed build
+
+# Builds need the headers volmap includes, which exist from 10.2 on (10.0 and 10.1
+# lack cubrid_getopt.h).  Non-numeric refs (develop) pass.
+buildable () {
+    v=${1#v}; maj=${v%%.*}; rest=${v#*.}; min=${rest%%.*}
+    case "$maj$min" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$maj" -gt 10 ] || { [ "$maj" -eq 10 ] && [ "$min" -ge 2 ]; }
+}
 
 # ---- the newest tag of each major.minor line ------------------------------
 echo "querying releases"
@@ -106,6 +130,7 @@ rc=0
 if [ "$do_structs" = "1" ]; then
     echo
     echo "== on-disk structures =="
+    rm -f "$WORK/fetch-failed"          # a reused WORK must not carry an old run's failures
     for t in $TAGS; do
         mkdir -p "$WORK/$t"
         for f in storage/disk_manager.c storage/file_manager.c \
@@ -174,7 +199,7 @@ def supported(tag):
     m = re.match(r'v(\d+)\.(\d+)', tag)
     return m is None or (int(m.group(1)), int(m.group(2))) >= (10, 1)
 
-releases = [t for t in tags if per[t] and t != "develop"]
+releases = [t for t in tags if per[t] and t != "develop" and supported(t)]
 develop = "develop" if "develop" in tags and per.get("develop") else None
 
 # 1. History - what changed between consecutive releases.  Informational only:
@@ -275,16 +300,21 @@ if [ "$do_builds" = "1" ]; then
     failed=""
     for t in $TAGS; do
         printf '  %-18s ' "$t"
+        if ! buildable "$t"; then
+            echo "skipped (no volmap build before 10.2)"
+            continue
+        fi
         if REF="$t" WORK="$WORK/build-$t" OUT="$WORK/cub_volmap-$t" \
            sh "$SELF/build_fetch.sh" >"$WORK/$t.log" 2>&1; then
             echo "OK"
         else
-            KEEP=1; trap - EXIT          # keep the logs for a failure
+            # Keep only the log; the downloads and binaries go with the work directory.
+            mkdir -p "$LOGS" && cp "$WORK/$t.log" "$LOGS/$t.log"
             # develop is the next release: its build failing is a warning, not a failure
             if [ "$t" = "develop" ]; then
-                echo "FAILED  (warning only - see $WORK/$t.log)"
+                echo "FAILED  (warning only - see $LOGS/$t.log)"
             else
-                echo "FAILED  (see $WORK/$t.log)"
+                echo "FAILED  (see $LOGS/$t.log)"
                 failed="$failed $t"
             fi
         fi
