@@ -129,6 +129,7 @@ struct volmap_volume
   unsigned char *respg;		/* DB page -> resident OS-subpage count (residency mode) */
   unsigned int *res_prefix;	/* prefix sums of respg[] (npages+1): O(1) per-cell residency */
   long res_total;		/* sum of respg[] (cached by volmap_read_residency) */
+  bool res_untrusted;		/* mincore would report fake data for this file (volmap_mincore_trusted) */
   /* --bufmap: buffer-pool occupancy per DB page from the cub_top snapshot */
   unsigned char *bufpg;		/* 0 not in buffer pool, 1 resident clean, 2 resident dirty */
   unsigned int *buf_prefix;	/* prefix sums of (bufpg != 0)  (npages+1) */
@@ -181,12 +182,27 @@ struct volmap_bufrec
 #define VOLMAP_BUFREC_DIRTY 0x80000000u
 #define VOLMAP_LSA_NULL (~(UINT64) 0)
 
+/* A volume listed in the vinf that could not be shown.  damaged: its header is not
+   a valid volume header (a finding); otherwise it could not be read at all and the
+   report is incomplete. */
+typedef struct volmap_skip
+{
+  char *path;
+  int listed_volid;
+  bool damaged;
+  char reason[200];
+} VOLMAP_SKIP;
+
 typedef struct volmap_ctx VOLMAP_CTX;
 struct volmap_ctx
 {
   VOLMAP_VOLUME *vols;		/* grown on demand; see volmap_open_volume () */
   int nvols_alloc;		/* entries allocated in vols[] */
   int nvols;
+  VOLMAP_SKIP *skipped;		/* vinf volumes that could not be shown (volmap_skip_add) */
+  int nskipped;
+  char open_err[200];		/* why the last volmap_open_volume () failed */
+  bool open_err_damaged;	/* ... and whether the cause is a damaged header */
   /* Temp volumes (<db>_t<NNNNN>) are absent from the vinf and short-lived - they
      exist only while a query spills.  [r] rescans the same directory to add new
      ones and drop those that vanished, which needs the vinf path kept here. */
@@ -1092,6 +1108,26 @@ volmap_bufmap_summary (VOLMAP_CTX * ctx, char *out, size_t n)
 	    ts, ctx->bm_nrec, ctx->bm_nbuf, ctx->bm_dirty, la, ln, lo);
 }
 
+/* Can mincore(2) be believed for this volume?  For a file mapping the kernel reports
+   the real page-cache state only to the file's owner or to a caller with write
+   permission (mm/mincore.c can_do_mincore); anyone else is told every page is
+   resident.  root passes as owner (CAP_FOWNER). */
+static bool
+volmap_mincore_trusted (VOLMAP_VOLUME * vol)
+{
+  struct stat st;
+
+  if (geteuid () == 0)
+    {
+      return true;
+    }
+  if (fstat (volmap_vol_fd (vol), &st) == 0 && st.st_uid == geteuid ())
+    {
+      return true;
+    }
+  return faccessat (AT_FDCWD, vol->path, W_OK, AT_EACCESS) == 0;
+}
+
 /*
  * volmap_read_residency () - OS page-cache residency via mincore(2).
  * mmap+mincore only consults kernel metadata: no page is faulted in, nothing is read,
@@ -1107,6 +1143,11 @@ volmap_read_residency (VOLMAP_VOLUME * vol)
   void *base;
   long p, npages = (long) vol->nsect_total * VOLMAP_SECT_NPAGES;
 
+  if (vol->res_untrusted || !volmap_mincore_trusted (vol))
+    {
+      vol->res_untrusted = true;	/* shown as unknown rather than as fully cached */
+      return ER_FAILED;
+    }
   if (vol->respg == NULL)
     {
       vol->respg = (unsigned char *) calloc (npages, 1);
@@ -1177,6 +1218,8 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
 	  fprintf (stderr, "volmap: more than %d volumes - the rest are not shown, so the totals are partial\n",
 		   VOLMAP_MAX_VOLID + 1);
 	}
+      snprintf (ctx->open_err, sizeof (ctx->open_err), "more than %d volumes", VOLMAP_MAX_VOLID + 1);
+      ctx->open_err_damaged = false;
       return ER_FAILED;
     }
   if (ctx->nvols >= ctx->nvols_alloc)
@@ -1195,6 +1238,8 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
       if (grown == NULL)
 	{
 	  fprintf (stderr, "volmap: out of memory for %d volumes\n", want);
+	  snprintf (ctx->open_err, sizeof (ctx->open_err), "out of memory");
+	  ctx->open_err_damaged = false;
 	  return ER_FAILED;
 	}
       memset (grown + ctx->nvols_alloc, 0, (size_t) (want - ctx->nvols_alloc) * sizeof (*grown));
@@ -1221,31 +1266,54 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
     }
   vol = &ctx->vols[ctx->nvols];
   memset (vol, 0, sizeof (*vol));
+  vol->fd = -1;
+  snprintf (ctx->open_err, sizeof (ctx->open_err), "out of memory");
+  ctx->open_err_damaged = false;
   vol->path = strdup (path);
   if (vol->path == NULL)
     {
-      return ER_FAILED;
+      goto error;
     }
 
-  vol->fd = -1;
   if (volmap_vol_fd (vol) < 0)
     {
       /* diagnostics go to stderr: outfp may be a --format json document or -o file */
       fprintf (stderr, "volmap: cannot open %s: %s\n", path, strerror (errno));
-      return ER_FAILED;
+      snprintf (ctx->open_err, sizeof (ctx->open_err), "cannot open: %s", strerror (errno));
+      goto error;
     }
 
   /* header page: read a maximal io page first to learn the real page size from the header itself */
   iopage = (char *) malloc (64 * 1024);
-  if (iopage == NULL || pread (volmap_vol_fd (vol), iopage, 64 * 1024, 0) < 4096)
+  if (iopage == NULL)
     {
-      free (iopage);
       goto error;
     }
+  {
+    ssize_t got = pread (volmap_vol_fd (vol), iopage, 64 * 1024, 0);
+
+    if (got < 4096)
+      {
+	if (got < 0)
+	  {
+	    snprintf (ctx->open_err, sizeof (ctx->open_err), "cannot read the header: %s", strerror (errno));
+	  }
+	else
+	  {
+	    snprintf (ctx->open_err, sizeof (ctx->open_err), "shorter than one page (%ld bytes)", (long) got);
+	    ctx->open_err_damaged = true;
+	  }
+	fprintf (stderr, "volmap: %s: %s\n", path, ctx->open_err);
+	free (iopage);
+	goto error;
+      }
+  }
   vhdr = (DISK_VOLUME_HEADER *) (iopage + prv);
   if (strncmp (vhdr->magic, CUBRID_MAGIC_DATABASE_VOLUME, strlen (CUBRID_MAGIC_DATABASE_VOLUME)) != 0)
     {
       fprintf (stderr, "volmap: %s is not a CUBRID volume (bad magic)\n", path);
+      snprintf (ctx->open_err, sizeof (ctx->open_err), "not a CUBRID volume (bad magic)");
+      ctx->open_err_damaged = true;
       free (iopage);
       goto error;
     }
@@ -1253,6 +1321,9 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
     {
       fprintf (stderr, "volmap: %s header self-check failed (sect_npgs=%d iopagesize=%d)\n",
 	       path, vhdr->sect_npgs, vhdr->iopagesize);
+      snprintf (ctx->open_err, sizeof (ctx->open_err), "header self-check failed (sect_npgs=%d iopagesize=%d)",
+		vhdr->sect_npgs, vhdr->iopagesize);
+      ctx->open_err_damaged = true;
       free (iopage);
       goto error;
     }
@@ -1290,6 +1361,8 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
 
   if (volmap_read_stab (vol) != NO_ERROR)
     {
+      snprintf (ctx->open_err, sizeof (ctx->open_err), "sector table unreadable");
+      ctx->open_err_damaged = true;
       goto error;
     }
 
@@ -1300,6 +1373,62 @@ error:
   /* the slot will be reused by the next volume: nothing may stay owned by it */
   volmap_vol_release (vol);
   return ER_FAILED;
+}
+
+/* Skipped volumes that -V selects: -V narrows the findings and the exit code too */
+static int
+volmap_skipped_selected (VOLMAP_CTX * ctx)
+{
+  int i, n = 0;
+
+  for (i = 0; i < ctx->nskipped; i++)
+    {
+      n += volmap_vol_selected (ctx, ctx->skipped[i].listed_volid) ? 1 : 0;
+    }
+  return n;
+}
+
+/* The report is incomplete without the volumes that could not be shown: list them
+   after the map whether or not --check was given */
+static void
+volmap_print_skipped (VOLMAP_CTX * ctx, FILE * fp)
+{
+  int i, n = volmap_skipped_selected (ctx);
+
+  if (n == 0)
+    {
+      return;
+    }
+  fprintf (fp, "%sSKIPPED VOLUMES%s  %d listed in the vinf, not shown\n", ctx->plain ? "" : VM_BOLD,
+	   ctx->plain ? "" : VM_RESET, n);
+  for (i = 0; i < ctx->nskipped; i++)
+    {
+      if (!volmap_vol_selected (ctx, ctx->skipped[i].listed_volid))
+	{
+	  continue;
+	}
+      fprintf (fp, "  [vol %d] %s: %s%s\n", ctx->skipped[i].listed_volid, ctx->skipped[i].path, ctx->skipped[i].reason,
+	       ctx->skipped[i].damaged ? " (damaged header)" : "");
+    }
+  fprintf (fp, "\n");
+}
+
+/* Remember a vinf volume that volmap_open_volume () could not show, with its cause */
+static void
+volmap_skip_add (VOLMAP_CTX * ctx, const char *path, int listed_volid)
+{
+  VOLMAP_SKIP *grown = (VOLMAP_SKIP *) realloc (ctx->skipped, (size_t) (ctx->nskipped + 1) * sizeof (*grown));
+
+  if (grown == NULL)
+    {
+      return;
+    }
+  ctx->skipped = grown;
+  grown[ctx->nskipped].path = strdup (path);
+  grown[ctx->nskipped].listed_volid = listed_volid;
+  grown[ctx->nskipped].damaged = ctx->open_err_damaged;
+  snprintf (grown[ctx->nskipped].reason, sizeof (grown[ctx->nskipped].reason), "%s", ctx->open_err);
+  ctx->nskipped++;
 }
 
 /* buffers that follow cross-volume chains must fit the largest page size */
@@ -7119,6 +7248,10 @@ volmap_top_bar_draw (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int vi, int cols, in
 	snprintf (resinfo, sizeof (resinfo), "  resident %.1f%%",
 		  npv > 0 ? 100.0 * vol->res_total / ((double) npv * sub) : 0.0);
       }
+    else if (ctx->residency && vol->res_untrusted)
+      {
+	snprintf (resinfo, sizeof (resinfo), "  resident unknown (needs file owner or write permission)");
+      }
     if (ctx->bufmap && ctx->bufmap_loaded && vol->bufpg != NULL)
       {
 	size_t rl = strlen (resinfo);
@@ -7686,7 +7819,7 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	  || (panel_on && ov_left_now != ov_left_prev);	/* side flip leaves a stale copy behind */
 	ov_left_prev = panel_on ? ov_left_now : -1;
       }
-      if (ctx->residency && vol->respg == NULL)
+      if (ctx->residency && vol->respg == NULL && !vol->res_untrusted)
 	{
 	  (void) volmap_read_residency (vol);	/* lazy: only when this volume comes on screen */
 	}
@@ -9505,6 +9638,10 @@ volmap_render (VOLMAP_CTX * ctx)
 	      snprintf (resinfo, sizeof (resinfo), "  resident %.1f%%",
 			npages_v > 0 ? 100.0 * rp / ((double) npages_v * sub) : 0.0);
 	    }
+	  else if (ctx->residency && vol->res_untrusted)
+	    {
+	      snprintf (resinfo, sizeof (resinfo), "  resident unknown (needs file owner or write permission)");
+	    }
 	  if (ctx->bufmap && ctx->bufmap_loaded && vol->bufpg != NULL)
 	    {
 	      size_t rl = strlen (resinfo);
@@ -9986,6 +10123,19 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
     {
       fprintf (fp, "%sFINDINGS%s\n", ctx->plain ? "" : VM_BOLD, ctx->plain ? "" : VM_RESET);
     }
+  for (vi = 0; vi < ctx->nskipped; vi++)
+    {
+      char ep[2 * PATH_MAX], er[512];
+
+      if (!ctx->skipped[vi].damaged || !volmap_vol_selected (ctx, ctx->skipped[vi].listed_volid))
+	{
+	  continue;
+	}
+      VM_FINDING ("{\"finding\": \"volume_header_damaged\", \"listed_volid\": %d, \"path\": \"%s\", \"reason\": \"%s\"}",
+		  "[vol %d] %s: %s - volume not shown, its header is not a valid volume header",
+		  ctx->skipped[vi].listed_volid, volmap_json_escape (ctx->skipped[vi].path, ep, (int) sizeof (ep)),
+		  volmap_json_escape (ctx->skipped[vi].reason, er, (int) sizeof (er)));
+    }
   for (vi = 0; vi < ctx->nvols; vi++)
     {
       VOLMAP_VOLUME *vol = &ctx->vols[vi];
@@ -10385,6 +10535,22 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
       }
     fprintf (fp, "%s  ],\n", printed ? "\n" : "");
   }
+  fprintf (fp, "  \"skipped_volumes\": [");
+  for (int si = 0, sn = 0; si < ctx->nskipped; si++)
+    {
+      char ep[2 * PATH_MAX], er[512];
+
+      if (!volmap_vol_selected (ctx, ctx->skipped[si].listed_volid))
+	{
+	  continue;
+	}
+      fprintf (fp, "%s\n    {\"listed_volid\": %d, \"path\": \"%s\", \"damaged\": %s, \"reason\": \"%s\"}",
+	       sn++ ? "," : "", ctx->skipped[si].listed_volid,
+	       volmap_json_escape (ctx->skipped[si].path, ep, (int) sizeof (ep)),
+	       ctx->skipped[si].damaged ? "true" : "false",
+	       volmap_json_escape (ctx->skipped[si].reason, er, (int) sizeof (er)));
+    }
+  fprintf (fp, "%s],\n", volmap_skipped_selected (ctx) ? "\n  " : "");
   fprintf (fp, "  \"findings\": [\n");
   int nfind = volmap_findings (ctx, fp, true);
   fprintf (fp, "%s  ]\n}\n", nfind ? "\n" : "");
@@ -10788,16 +10954,18 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
     {
       int id;
       char path[PATH_MAX];
-      if (sscanf (line, " %d %4095s", &id, path) == 2 && id >= 0)
+      if (sscanf (line, " %d %4095s", &id, path) == 2 && id >= 0 && volmap_open_volume (ctx, path) != NO_ERROR)
 	{
-	  (void) volmap_open_volume (ctx, path);
+	  volmap_skip_add (ctx, path, id);
 	}
     }
   fclose (fp);
 
   (void) volmap_scan_temp_volumes (ctx);
 
-  return (ctx->nvols > 0) ? NO_ERROR : ER_FAILED;
+  /* With nothing open there is no map, but a listed volume that failed is still a
+     result to report (a damaged header is a finding), so only an empty vinf fails. */
+  return (ctx->nvols > 0 || ctx->nskipped > 0) ? NO_ERROR : ER_FAILED;
 }
 
 static void
@@ -10998,6 +11166,11 @@ volmap (UTIL_FUNCTION_ARG * arg)
     {
       return EXIT_FAILURE;
     }
+  if (ctx.interactive && ctx.nvols == 0)
+    {
+      fprintf (stderr, "volmap: no volume could be opened - nothing to browse\n");
+      return 3;
+    }
   if (ctx.interactive)
     {
       /* progressive: draw immediately from the sector tables; file ownership
@@ -11033,6 +11206,19 @@ volmap (UTIL_FUNCTION_ARG * arg)
     }
   if (ctx.deep && !ctx.interactive)
     {
+      /* The deep scan gives back only the page cache it pulled in, which it tells
+         apart with mincore.  Where mincore reports fake data that would evict
+         nothing and leave the server's cache displaced, so refuse instead. */
+      for (vi = 0; vi < ctx.nvols; vi++)
+	{
+	  if (volmap_vol_selected (&ctx, ctx.vols[vi].volid) && !volmap_mincore_trusted (&ctx.vols[vi]))
+	    {
+	      fprintf (stderr, "volmap: --deep refused: %s is neither owned nor writable by this user, so mincore(2)"
+		       " cannot tell which pages the server had cached and the scan could not give back the cache it"
+		       " uses - run as the database owner\n", ctx.vols[vi].path);
+	      return EXIT_FAILURE;
+	    }
+	}
       /* interactive mode reads pages on demand (panel footer); the full sweep
        * would stall startup for minutes on a large database */
       volmap_deep_scan (&ctx);
@@ -11051,6 +11237,7 @@ volmap (UTIL_FUNCTION_ARG * arg)
   else
     {
       volmap_render (&ctx);
+      volmap_print_skipped (&ctx, ctx.outfp);
       if (ctx.check)
 	{
 	  if (volmap_findings (&ctx, ctx.outfp, false) > 0)
@@ -11071,6 +11258,11 @@ volmap (UTIL_FUNCTION_ARG * arg)
   free (ctx.scratch);
   free (ctx.scratch_bmap);
   free (ctx.bm_recs);		/* --bufmap snapshot records */
+  for (vi = 0; vi < ctx.nskipped; vi++)
+    {
+      free (ctx.skipped[vi].path);
+    }
+  free (ctx.skipped);
   if (ctx.outfp != stdout)
     {
       fclose (ctx.outfp);
@@ -11079,5 +11271,7 @@ volmap (UTIL_FUNCTION_ARG * arg)
     {
       return EXIT_FAILURE;
     }
-  return check_findings ? 2 : EXIT_SUCCESS;	/* --check: findings present -> exit 2 (CI-friendly) */
+  /* 2: --check findings (a damaged header is one).  3: listed volumes were not shown,
+     so the report is incomplete.  Findings come first: they are what to act on. */
+  return check_findings ? 2 : (volmap_skipped_selected (&ctx) > 0) ? 3 : EXIT_SUCCESS;
 }

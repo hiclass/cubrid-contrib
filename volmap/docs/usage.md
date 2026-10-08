@@ -14,14 +14,17 @@ cub_volmap [옵션] <database-name | vinf-경로>
 > 오류로 막지는 않으며, 화면 크기에 맞춘 자동 배치가 우선한다.
   -V, --volume=N[,N]   지정 볼륨만 출력. 소견(findings)과 --check 종료코드도 지정 볼륨 기준
   -f, --full           1칸=1페이지(16KB), 줄 수 무제한
-  -m, --residency      배경색 = OS 페이지캐시 상주 (mmap+mincore)
+  -m, --residency      배경색 = OS 페이지캐시 상주 (mmap+mincore). 볼륨 파일의 소유자·쓰기 권한자·root 가 아니면
+                       커널이 mincore 에 가짜 값(전부 상주)을 주므로 "resident unknown" 으로 표시한다
   -B, --bufmap=FILE    배경색 = cub_server 버퍼풀 상주(청록)/dirty(자주) — FILE 은 `cub_top --bcb-dump FILE` 스냅샷.
                        인터랙티브는 b 토글, 틱(--tick)·r 마다 파일이 바뀌었으면 자동 재읽기. db 이름 불일치 스냅샷은 거부
                        (DB 이름·`<db>_vinf` 경로 어느 쪽으로 실행해도 `_vinf` 를 뗀 DB 이름으로 대조)
       --deep           전수 스캔: 레코드 밀도·포워딩 비율 (+ TUI 패널 L0 del/dead 집계).
                        스캔이 끌어들인 페이지 캐시는 종료 시 OS에 자동 반납(FADV_DONTNEED) —
                        스캔 전 mincore 스냅샷과 대조해 4KB 단위로 원래 캐시에 없던 구간만 반납하므로
-                       서버가 데워둔 캐시는 건드리지 않는다. deep 요약줄에 returned/kept로 표기
+                       서버가 데워둔 캐시는 건드리지 않는다. deep 요약줄에 returned/kept로 표기.
+                       mincore 를 믿을 수 없는 계정(소유자·쓰기 권한자·root 가 아님)에서는 반납 대상을 가릴 수 없어
+                       거부한다(종료코드 1) — DB 소유 계정으로 실행
       --check          무결성 소견(findings) 리포트 — 소견 존재 시 종료코드 2 (CI 연동)
       --format=json    JSON 출력 (volumes/files/findings)
       --full-sweep     파일 자기발견 2차 전 페이지 스윕 (안전망)
@@ -109,12 +112,17 @@ FINDINGS
 
 | 소견 | 의미 |
 |---|---|
+| volume_header_damaged | vinf 에 있는 볼륨의 헤더가 볼륨 헤더가 아님(bad magic, 자기검증 실패, 한 페이지보다 짧음, 섹터 테이블 읽기 실패) — 그 볼륨은 지도에 없다 |
 | unknown_owner_sectors | 예약·사용 중인데 소유 파일 미발견(볼륨 메타 영역 제외 — 지도·요약·JSON 모두 동일 정의) — 트래커/페이지 불일치 의심 |
 | alloc_exceeds_reserved | 라이브 볼륨 스냅샷 시차 — 재실행/새로고침 권고 |
 | tde_encrypted_pages | TDE 암호 페이지 존재 — 키 없이 내용 해석 불가 |
 | stale_file_entry | 헤더는 있으나 섹터 대응 실패 — 스캔 중 drop/재사용된 파일 |
 | idle_over_threshold | `--warn-idle=PCT` 지정 시: 볼륨 idle 공간이 임계 이상 — 회수 후보 (지정만으로 소견 리포트+종료코드 2 계약 활성) |
 | bufmap_snapshot_mismatch | `--bufmap` 스냅샷의 버퍼 페이지 중 90% 이상이 이 볼륨에 미할당 — 오래됐거나 다른 DB 의 스냅샷. 그 미만의 미할당분은 정상(해제 페이지가 BCB 에 남음)이라 볼륨 헤더 `freed N` 으로만 표기 |
+
+열지 못한 볼륨은 소견과 별도로 지도 아래 `SKIPPED VOLUMES` 에 이유와 함께 나열한다(`--check` 와 무관).
+헤더 손상은 소견(`volume_header_damaged`, 종료코드 2)이고, 파일을 열 수 없는 경우(권한, 파일 없음)는 보고가
+불완전하다는 뜻으로 종료코드 3 을 낸다.
 
 ## 4. --format json
 
@@ -124,7 +132,7 @@ volmap --format json cbench | python3 -m json.tool
 
 최상위에 `db`(이름)·`timestamp`(생성 시각) 메타, `volumes[]`(볼륨별 예약/할당, `purpose`=permanent/temporary, `tde_pages_probed`=프로브된 페이지 중 TDE 암호 페이지 수,
 `--bufmap` 시 `buffered_pages`/`dirty_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
-`findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
+`skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
 
 - **stdout 은 JSON 문서만 담는다.** 볼륨 열기 실패·레이아웃 판별 경고 같은 진단 메시지는 stderr 로만 나간다
   (`-o` 파일도 같다). 라이브 서버에서 spill 볼륨이 스캔 도중 사라져도 문서는 깨지지 않는다.
