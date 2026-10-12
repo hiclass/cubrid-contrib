@@ -3623,6 +3623,9 @@ static int cap_turnover_from_dump(void){
              int32_t nbuf,nrec,dirty,pagesize;
              uint64_t la,ln,le,od; char db[32]; } h;
     if(fread(&h,sizeof h,1,f)!=1||memcmp(h.magic,"CBCBMAP1",8)||h.reclen!=32||h.nrec<=0){ fclose(f); return 0; }
+    /* Another database's snapshot (one-shot over several instances) is no baseline */
+    h.db[sizeof h.db-1]=0;
+    if(strncmp(h.db,g_cur_db,sizeof h.db-1)){ fclose(f); return 0; }
     double dt=(double)PG.when.tv_sec-(double)h.ts_sec;
     if(dt<0.2||dt>60.0){ fclose(f); return 0; }
     uint64_t *prev=NULL,*cur=NULL,*tmp=NULL; int pcap=0,ccap=0,tcap=0,np=0;
@@ -6653,6 +6656,8 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
     if(P->pid>=0){
         classify_regions(P);
         method_b(P);
+        /* Only a --bcb-dump baseline read this frame may carry turnover into cap_collect */
+        CAP2.turnover_pct=-1; CAP2.miss_pps=-1; CAP2.readmit_pct=-1;
         pgbuf_scan(P);
         if(with_a) method_a(P);
         grade_dynamic_heap();          /* Re-grade in light of the decomposition */
