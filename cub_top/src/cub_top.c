@@ -5775,6 +5775,15 @@ static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,int hot_on
                            HN>0?HS[HN-1].hh:"--:--:--");
     else          snprintf(t2,sizeof t2,"%s  %s",g_ascii?"host-wide":"호스트 전체",
                            HN>0?HS[HN-1].hh:"--:--:--");
+    /* A replay must not read as the present: REPLAY i/n leads the title and the badge
+       carries the recorded date and time, as on the dashboard */
+    if(g_replaying){
+        char rt[200]; snprintf(rt,sizeof rt,"%s %d/%d · %s",g_ascii?"REPLAY":"재생",g_rep_i+1,g_rep_n,t1);
+        snprintf(t1,sizeof t1,"%.*s",(int)sizeof t1-1,rt);
+        char when[32]="--"; time_t rts=g_rep_ts;
+        if(rts){ struct tm tmv; localtime_r(&rts,&tmv); strftime(when,sizeof when,"%Y-%m-%d %H:%M:%S",&tmv); }
+        snprintf(t2,sizeof t2,"%s %s",g_ascii?"recorded":"기록",when);
+    }
 
     if(P->pid<0){
         cv_put(2,y,g_ascii?"cub_server is not running — no server timeseries":

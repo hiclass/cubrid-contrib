@@ -126,6 +126,33 @@ print(f"  ok   256-core list replays whole ({len(a['os.core_pct'])}B)")
 PY
 fi
 
+# 2c) the plot view says it is a replay and when it was recorded (driven in a pty)
+if command -v python3 >/dev/null; then
+    python3 - "$BIN" "$REC" <<'PY' || bad=1
+import os,pty,subprocess,select,time,re,sys,fcntl,termios,struct
+binp,rec=sys.argv[1],sys.argv[2]
+m,s=pty.openpty(); fcntl.ioctl(s,termios.TIOCSWINSZ,struct.pack('HHHH',60,160,0,0))
+pr=subprocess.Popen([binp,'--replay',rec,'-p','--replay-speed','0.2'],stdin=s,stdout=s,
+                    stderr=subprocess.DEVNULL,close_fds=True)
+os.close(s); out=b''; t=time.time()
+while time.time()-t<3 and pr.poll() is None:
+    r,_,_=select.select([m],[],[],0.2)
+    if r:
+        try: out+=os.read(m,1<<16)
+        except OSError: break
+try: os.write(m,b'q')
+except OSError: pass
+try: pr.wait(timeout=3)
+except Exception: pr.kill()
+os.close(m)
+txt=re.sub(r'\x1b\[[0-9;?]*[A-Za-z]','',out.decode('utf-8','replace'))
+mark=re.search(r'(재생|REPLAY) \d+/\d+',txt); when=re.search(r'(기록|recorded) \d{4}-\d\d-\d\d \d\d:\d\d:\d\d',txt)
+if not (mark and when):
+    print(f"  FAIL plot view lacks the replay mark or recorded time (mark={bool(mark)} time={bool(when)})"); sys.exit(1)
+print(f"  ok   plot view shows \"{mark.group(0)}\" and \"{when.group(0)}\"")
+PY
+fi
+
 # 3) a replay must read no /proc of any process - it is a file, not a measurement
 if command -v strace >/dev/null; then
     strace -f -e trace=openat -o "$TMP/st" "$BIN" --replay "$REC" -d >/dev/null 2>&1
