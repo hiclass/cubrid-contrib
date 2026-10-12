@@ -3496,6 +3496,7 @@ static int term_cols_raw(void){
  *   being read - well under 1ms per frame.
  */
 static char g_cap_state[256]="";          static int g_replaying=0;             /* Set during --replay so the screen says so */
+static char g_rp_capvd[320]="";           /* Recorded cap.verdict: recomputing it from rounded keys can change a digit */
 static int g_rep_i=0,g_rep_n=0;       /* Replay progress, shown in the status line */
 static time_t g_rep_ts=0;             /* The frame's recorded time, shown instead of now */
 static const char *g_rec_path=NULL;   /* --record FILE  */
@@ -4206,6 +4207,14 @@ static void vd_capacity(char*o,size_t n,const char**col){
                         :"· IOPS %.0f (상한의 %.0f%%), 대기 %.1fms, 히트 %.0f%% (%s)",
              c->dev_iops,c->headroom_pct,c->await_ms>=0?c->await_ms:0,
              c->hit_pct>=0?c->hit_pct:0,c->hit_src);
+}
+/* In a replay the recorded sentence is shown as is, when it is in the language in force */
+static void vd_capacity_shown(char*o,size_t n,const char**col){
+    vd_capacity(o,n,col);
+    if(g_replaying && g_rp_capvd[0]){
+        int ascii=1; for(const unsigned char*q=(const unsigned char*)g_rp_capvd;*q;q++) if(*q>=0x80){ ascii=0; break; }
+        if(ascii==(g_ascii!=0)) snprintf(o,n,"%s",g_rp_capvd);
+    }
 }
 
 /* ---- Four-panel definition, shared by the plots and the dashboard ---- */
@@ -5437,7 +5446,7 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
                        CAP2.pb_fetch_ps,CAP2.pb_ioread_ps,CAP2.pb_iowrite_ps,CAP2.log_iowrite_ps,CAP2.commit_ps);
             else
                 printf(g_ascii?"│  ├─ ◌ engine counters idle — %s\n":"│  ├─ ◌ 엔진 카운터 정지 — %s\n",CAP2.ps_why);
-            { char vb[320]; const char*vc=VD_INFO; vd_capacity(vb,sizeof vb,&vc);
+            { char vb[320]; const char*vc=VD_INFO; vd_capacity_shown(vb,sizeof vb,&vc);
               printf(g_ascii?"│  └─ verdict  %s\n":"│  └─ 판정  %s\n",vb); }
         }
         /* Buffer pool: which pages are resident and how much has not reached disk (dirty).
@@ -5835,7 +5844,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                                          CAP2.pb_fetch_ps,CAP2.pb_ioread_ps,CAP2.pb_iowrite_ps,
                                          CAP2.log_iowrite_ps,CAP2.commit_ps);
     }
-    { char vb[320]; const char*vc=VD_INFO; vd_capacity(vb,sizeof vb,&vc);
+    { char vb[320]; const char*vc=VD_INFO; vd_capacity_shown(vb,sizeof vb,&vc);
       printf("cap.verdict=\"%s\"\n",vb); }
     /* BCB direct read, graded as an estimate (a latch-free snapshot).  The keys share their source (the dump) with volmap --bufmap. */
     printf("pgbuf.enabled=%d pgbuf.reason=\"%s\"\n",PG.ok,PG.why);
@@ -6210,6 +6219,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     CAP2.over_budget=(int)rp_num(t,"cap.over_budget",0);
     rp_str(t,"cap.hit_source",CAP2.hit_src,sizeof CAP2.hit_src);
     rp_str(t,"cap.reason",CAP2.ps_why,sizeof CAP2.ps_why);
+    rp_str(t,"cap.verdict",g_rp_capvd,sizeof g_rp_capvd);
     /* The remembered ceilings are per profile cell, so the whole matrix is restored -
        a verdict compares against the cell in force, not a single number. */
     memset(g_cap_mtx,0,sizeof g_cap_mtx);
