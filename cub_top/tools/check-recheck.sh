@@ -265,5 +265,20 @@ if gcc -O1 -g -std=gnu99 -w -fsanitize=address -I "$(dirname "$SRC")" -o "$TMP/z
 else
     echo "  SKIP switch to larger BCBs (no AddressSanitizer)"
 fi
+# --bcb-dump alone succeeds only when it replaced the file: an unwritable path or a target
+# that cannot be replaced must exit 1 (needs a running server; skipped otherwise).
+BIN="$ROOT/cub_top"
+if [ -x "$BIN" ] && "$BIN" -d 2>/dev/null | grep -q '^pgbuf.enabled=1'; then
+    "$BIN" --bcb-dump "$TMP/ok.bcb" >/dev/null 2>&1; e1=$?
+    "$BIN" --bcb-dump "$TMP/nodir/x.bcb" >/dev/null 2>&1; e2=$?
+    mkdir -p "$TMP/isdir.bcb/sub"; "$BIN" --bcb-dump "$TMP/isdir.bcb" >/dev/null 2>&1; e3=$?
+    if [ $e1 -eq 0 ] && [ -s "$TMP/ok.bcb" ] && [ $e2 -eq 1 ] && [ $e3 -eq 1 ]; then
+        echo "  ok   --bcb-dump exits 0 only when the snapshot was written (0/1/1)"
+    else
+        echo "  FAIL --bcb-dump exit codes ok=$e1 nodir=$e2 isdir=$e3 (want 0/1/1)"; rc=1
+    fi
+else
+    echo "  SKIP --bcb-dump exit codes (no buffer pool to read)"
+fi
 [ $rc -eq 0 ] && { echo "→ PASS"; exit 0; }
 echo "→ FAIL"; exit 1

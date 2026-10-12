@@ -2411,10 +2411,14 @@ static void vm_gather(int pid,const uint64_t*addr,int n,size_t each,unsigned cha
 }
 
 static int cap_turnover_from_dump(void);   /* Must be read as the baseline before the dump is overwritten */
+/* Whether this frame replaced the --bcb-dump file, and why not: --bcb-dump alone must not
+   report a snapshot it did not write */
+static int g_bcb_saved=0; static char g_bcb_why[200]="";
 static void pgbuf_dump(const char*db){
     if(!g_bcb_dump[0]||!PG.ok) return;
     char tmp[300]; snprintf(tmp,sizeof tmp,"%s.tmp",g_bcb_dump);
-    FILE*f=fopen(tmp,"wb"); if(!f) return;
+    FILE*f=fopen(tmp,"wb");
+    if(!f){ snprintf(g_bcb_why,sizeof g_bcb_why,"%s %s",g_ascii?"cannot create the temporary file:":"임시 파일 생성 실패:",strerror(errno)); return; }
     struct { char magic[8]; uint32_t version, reclen; int64_t ts_sec, ts_nsec;
              int32_t nbuf, nrec, dirty, pagesize;
              uint64_t log_append, log_nxio, log_eof, oldest_dirty; char db[32]; } h;
@@ -2425,8 +2429,12 @@ static void pgbuf_dump(const char*db){
     h.log_eof=PG.have_log?PG.raw_eof:~(uint64_t)0; h.oldest_dirty=PG.have_oldest?PG.raw_oldest:~(uint64_t)0;
     snprintf(h.db,sizeof h.db,"%.*s",(int)sizeof h.db-1,db?db:"");   /* fixed 32-byte field: truncation intended */
     int ok = fwrite(&h,sizeof h,1,f)==1 && (PG.nrec==0 || fwrite(PG.rec,sizeof(pgrec_t),(size_t)PG.nrec,f)==(size_t)PG.nrec);
-    ok = (fclose(f)==0) && ok;
-    if(ok) rename(tmp,g_bcb_dump); else unlink(tmp);
+    int we=errno;
+    if(fclose(f)!=0){ if(ok) we=errno; ok=0; }
+    if(!ok){ snprintf(g_bcb_why,sizeof g_bcb_why,"%s %s",g_ascii?"write failed:":"쓰기 실패:",strerror(we)); unlink(tmp); return; }
+    if(rename(tmp,g_bcb_dump)!=0){
+        snprintf(g_bcb_why,sizeof g_bcb_why,"%s %s",g_ascii?"rename failed:":"교체(rename) 실패:",strerror(errno)); unlink(tmp); return; }
+    g_bcb_saved=1;
 }
 
 static inline uint64_t vp_key(int volid,int pageid);
@@ -2453,6 +2461,7 @@ static void pg_recount(void){
 }
 static void pgbuf_scan(proc_t*P){
     PG.frame++;
+    g_bcb_saved=0; g_bcb_why[0]=0;
     if(!B.ok){ PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"method B off — %s":"방법 B 비활성 — %s",B.why); return; }
     if(B.partial||g_bt->pg.sz_bcb<0){ PG.ok=0;
         snprintf(PG.why,sizeof PG.why,g_ascii?"table lacks BCB offsets (probe mode or old offsets/*.tbl — re-run tools/collect-offsets.sh)"
@@ -2699,6 +2708,8 @@ static void pgbuf_scan(proc_t*P){
        and turnover is always 0. */
     (void)cap_turnover_from_dump();
     if(!PG.degraded) pgbuf_dump(P->db);   /* A degraded frame keeps the last verified snapshot on disk */
+    else snprintf(g_bcb_why,sizeof g_bcb_why,g_ascii?"degraded frame (unverified headers) - previous snapshot kept"
+                                                    :"degraded 프레임(미검증 헤더) — 이전 스냅샷 유지");
 }
 /* Formatting helper */
 static const char* lsa_str(lsa_t l){ static char ring[6][32]; static int k=0; char*o=ring[k++%6];
@@ -7863,9 +7874,11 @@ int main(int argc,char **argv){
         }
     }
     if(bcb_only){
-        if(PG.ok) printf("bcb snapshot: %s (%d pages resident)\n",g_bcb_dump,PG.nrec);
-        else { fprintf(stderr,"cub_top: --bcb-dump %s 를 쓰지 못했습니다 — %s\n",g_bcb_dump,PG.why[0]?PG.why:"버퍼풀 상태 읽기 불가"); return 1; }
-        return 0;
+        /* Success only when this run replaced the file; anything else leaves no new snapshot */
+        if(PG.ok && g_bcb_saved){ printf("bcb snapshot: %s (%d pages resident)\n",g_bcb_dump,PG.nrec); return 0; }
+        fprintf(stderr,"cub_top: --bcb-dump %s 를 쓰지 못했습니다 — %s\n",g_bcb_dump,
+                !PG.ok ? (PG.why[0]?PG.why:"버퍼풀 상태 읽기 불가") : (g_bcb_why[0]?g_bcb_why:"저장되지 않음"));
+        return 1;
     }
     if(terse){ char ou[256]; opts_used_str(argc,argv,ou,sizeof ou);
                printf("opts.used=\"%s\"\n",ou); }
