@@ -2438,6 +2438,10 @@ static void pgbuf_dump(const char*db){
 }
 
 static inline uint64_t vp_key(int volid,int pageid);
+/* Set when the analysed instance changes (reset_instance_state); the next scan that uses the
+   header cache empties it first.  A flag rather than PG.frame: a first scan that returns
+   early would otherwise leave the previous database's headers to be carried. */
+static int g_hc_stale=1;
 /* Zone counters, by the zone field kept in a record (flags>>16) */
 static void pg_zone_add(int z,int d){
     if(z==1) PG.z1+=d; else if(z==2) PG.z2+=d; else if(z==3) PG.z3+=d;
@@ -2547,7 +2551,7 @@ static void pgbuf_scan(proc_t*P){
         ridx=malloc(sizeof(int)*(size_t)PG.nrec); raddr=malloc(8*(size_t)PG.nrec);
         rcap2=(ridx&&raddr)?PG.nrec:0; }
     if(!hc_cap || (PG.nrec>0 && !rcap2)){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; }
-    if(PG.frame<=1) memset(hc_ok,0,(size_t)hc_cap);   /* First scan, or reset_instance_state() cleared PG */
+    if(g_hc_stale){ memset(hc_ok,0,(size_t)hc_cap); g_hc_stale=0; }
     hc_round++;
     int nread=0;
     for(int k=0;k<PG.nrec;k++){
@@ -2845,6 +2849,7 @@ static void reset_instance_state(void){
        instance's residency, dirty and log values under the new name. */
     { pgrec_t *rec=PG.rec; int cap=PG.reccap;
       memset(&PG,0,sizeof PG); PG.rec=rec; PG.reccap=cap; }
+    g_hc_stale=1;                      /* Header cache: the previous instance's pages */
     /* cubrid.conf parameters are per database too ([@db] sections differ), so without
        clearing them the previous instance's values make a verdict like "configured
        512M" entirely wrong. */

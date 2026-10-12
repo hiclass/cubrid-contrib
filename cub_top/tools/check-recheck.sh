@@ -265,6 +265,43 @@ if gcc -O1 -g -std=gnu99 -w -fsanitize=address -I "$(dirname "$SRC")" -o "$TMP/z
 else
     echo "  SKIP switch to larger BCBs (no AddressSanitizer)"
 fi
+# Instance switch with a first scan that returns early: the next scan must not carry the
+# previous database's headers.
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$SRC" > "$TMP/x.c"
+cat >> "$TMP/x.c" <<'HX'
+/* DB A fills the header cache; a switch, a first scan that returns early (method B off),
+   then DB B whose BCBs hold the same (volid, pageid), clean, with other LSAs. */
+#define NB 16
+static unsigned char pool_[4096], *bcbs_, *iop_[NB];
+static void fill(uint64_t lsa_base){
+    for(int i=0;i<NB;i++){
+        unsigned char*b=bcbs_+(size_t)i*g_bt->pg.sz_bcb; int pageid=100+i; int16_t v=0; uint32_t fl=0x00020000u; uint64_t ol=~0ull;
+        memcpy(b+g_bt->pg.vpid,&pageid,4); memcpy(b+g_bt->pg.vpid+4,&v,2); memcpy(b+g_bt->pg.flags,&fl,4); memcpy(b+g_bt->pg.olsa,&ol,8);
+        uint64_t ip=(uint64_t)(uintptr_t)iop_[i]; memcpy(b+g_bt->pg.iopg,&ip,8);
+        unsigned char*h=iop_[i]+g_bt->pg.iobuf_iopg; uint64_t lsa=lsa_base+i;
+        memcpy(h,&lsa,8); memcpy(h+8,&pageid,4); memcpy(h+12,&v,2);
+    }
+}
+static void useB(void){ B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_; }
+int main(void){
+    static proc_t P; P.pid=getpid(); CAP.vm_readv=1;
+    useB(); bcbs_=calloc(NB,(size_t)g_bt->pg.sz_bcb);
+    for(int i=0;i<NB;i++) iop_[i]=calloc(1,(size_t)g_bt->pg.iobuf_iopg+64);
+    int32_t nb=NB; memcpy(pool_+g_bt->off_pgbuf_nbuf,&nb,4);
+    uint64_t t=(uint64_t)(uintptr_t)bcbs_; memcpy(pool_+g_bt->pg.bcbtab,&t,8);
+    fill(1000); pgbuf_scan(&P); pgbuf_scan(&P);          /* DB A: cache filled */
+    reset_instance_state();                               /* switch to DB B */
+    B.ok=0; snprintf(B.why,sizeof B.why,"not yet"); pgbuf_scan(&P);   /* first scan returns early */
+    useB(); fill(5000);                                    /* DB B: same VPIDs, other LSAs */
+    pgbuf_scan(&P);
+    int wrong=0; for(int i=0;i<PG.nrec;i++) if(PG.rec[i].hdr_ok && PG.rec[i].page_lsa<5000) wrong++;
+    printf("after switch: %d records, %d carry DB A's LSA, reused %d\n",PG.nrec,wrong,PG.hdr_reused);
+    return wrong?1:0;
+}
+HX
+gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/x" "$TMP/x.c" 2>"$TMP/cc6.err" || { cat "$TMP/cc6.err"; echo "→ FAIL (compile failed)"; exit 1; }
+if "$TMP/x" > "$TMP/out6"; then echo "  ok   instance switch empties the header cache ($(cat "$TMP/out6"))"
+else echo "  FAIL instance switch: $(cat "$TMP/out6")"; rc=1; fi
 # --bcb-dump alone succeeds only when it replaced the file: an unwritable path or a target
 # that cannot be replaced must exit 1 (needs a running server; skipped otherwise).
 BIN="$ROOT/cub_top"
