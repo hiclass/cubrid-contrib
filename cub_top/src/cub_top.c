@@ -2473,6 +2473,9 @@ static void pgbuf_scan(proc_t*P){
             midx=(int*)malloc(sizeof(int)*(size_t)PG.nrec);
             maddr=(uint64_t*)malloc(sizeof(uint64_t)*(size_t)PG.nrec);
             mcap=(midx&&maddr)?PG.nrec:0; }
+        /* Without the index arrays no mismatch could be rechecked or counted, and 0
+           mismatches would pass the gate - the frame is dropped instead */
+        if(!mcap){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; }
         for(int k=0;k<PG.nrec;k++){
             pgrec_t*r=&PG.rec[k];
             if(!okf[k]){ PG.unread++; continue; }
@@ -2480,7 +2483,7 @@ static void pgbuf_scan(proc_t*P){
             memcpy(&lsa,hdr+(size_t)k*16,8); memcpy(&hp,hdr+(size_t)k*16+8,4); memcpy(&hv,hdr+(size_t)k*16+12,2);
             if(hp!=r->pageid || hv!=r->volid){
                 PG.mismatch_raw++;
-                if(mcap && nm<mcap){ midx[nm]=k; maddr[nm]=addr[k]; nm++; }
+                midx[nm]=k; maddr[nm]=addr[k]; nm++;
                 continue;
             }
             r->page_lsa=lsa; r->hdr_ok=1;
@@ -2491,7 +2494,7 @@ static void pgbuf_scan(proc_t*P){
            frames under traffic.  The recheck re-pairs only the mismatches: a
            replacement resolves, a wrong offset stays 100% mismatched.  Cost is
            proportional to the mismatch count alone. */
-        if(nm>0 && mcap){
+        if(nm>0){
             static unsigned char *rvp=NULL, *rhd=NULL, *rok=NULL; static int rcap=0;
             if(nm>rcap){ free(rvp); free(rhd); free(rok);
                 rvp=(unsigned char*)malloc(szb*(size_t)nm);    /* the whole BCB: a replaced page brings its own flags and LSA */

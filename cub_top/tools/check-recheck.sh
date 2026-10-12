@@ -16,7 +16,8 @@
 #
 # BCB header recheck: a page replaced between the BCB read and the header read must
 # become the new page as a whole (flags, zone, oldest LSA), and the totals must follow.
-# In degraded mode only verified records may be counted, dumped or compared.
+# In degraded mode only verified records may be counted, dumped or compared, and an
+# allocation failure must not turn mismatches into a pass.
 # pgbuf_scan() reads a fake buffer pool in the test process; a hook inserted after
 # pass 1 replaces one BCB's page, deterministically.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
@@ -119,5 +120,50 @@ gcc -O2 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/d" "$TMP/d.c" 2>"$TMP/cc2.
 "$TMP/d" "$TMP/dump" > "$TMP/out2" || rc=1
 sed 's/^/  /' "$TMP/out2"
 [ -f "$TMP/dump" ] && { echo "  dump written by a degraded frame"; rc=1; }
+# Allocation failure: with the mismatch index arrays unavailable, a pool whose headers
+# all disagree must not pass as healthy.
+sed 's|midx=(int\*)malloc(sizeof(int)\*(size_t)PG.nrec);|midx=NULL; /* injected failure */|' "$TMP/src.c" > "$TMP/srcm.c"
+if grep -q "injected failure" "$TMP/srcm.c"; then
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/srcm.c" > "$TMP/m.c"
+cat >> "$TMP/m.c" <<'HM'
+/* Fake buffer pool: 200 BCBs, 20 of them (dirty) never match their header - 10%, which is
+   above the 5% degrade threshold and below the 50% cut-off. */
+#define NB 200
+#define NBAD 200
+static unsigned char pool_[4096], *bcbs_, *iop_[NB];
+static void put_bcb(int i,int pageid,uint32_t flags,uint64_t olsa){
+    unsigned char*b=bcbs_+(size_t)i*g_bt->pg.sz_bcb; int16_t v=0;
+    memcpy(b+g_bt->pg.vpid,&pageid,4); memcpy(b+g_bt->pg.vpid+4,&v,2);
+    memcpy(b+g_bt->pg.flags,&flags,4); memcpy(b+g_bt->pg.olsa,&olsa,8);
+    uint64_t ip=(uint64_t)(uintptr_t)iop_[i]; memcpy(b+g_bt->pg.iopg,&ip,8);
+}
+static void put_hdr(int i,int pageid,uint64_t lsa){
+    unsigned char*h=iop_[i]+g_bt->pg.iobuf_iopg; int16_t v=0;
+    memcpy(h,&lsa,8); memcpy(h+8,&pageid,4); memcpy(h+12,&v,2);
+}
+static uint64_t lsa_raw(long long pg,int off){ return ((uint64_t)pg)|((uint64_t)(uint16_t)off<<48); }
+int main(int argc,char**argv){
+    static proc_t P; P.pid=getpid(); CAP.vm_readv=1;
+    if(argc>1) snprintf(g_bcb_dump,sizeof g_bcb_dump,"%s",argv[1]);
+    B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
+    bcbs_=calloc(NB,(size_t)g_bt->pg.sz_bcb);
+    for(int i=0;i<NB;i++) iop_[i]=calloc(1,(size_t)g_bt->pg.iobuf_iopg+64);
+    int32_t nb=NB; memcpy(pool_+g_bt->off_pgbuf_nbuf,&nb,4);
+    uint64_t t=(uint64_t)(uintptr_t)bcbs_; memcpy(pool_+g_bt->pg.bcbtab,&t,8);
+    for(int i=0;i<NB;i++){
+        if(i<NBAD){ put_bcb(i,1000+i,0x80020000u,lsa_raw(50,i)); put_hdr(i,5000+i,lsa_raw(5,8)); }   /* never verifiable */
+        else      { put_bcb(i,1000+i,0x00020000u,lsa_raw(-1,-1)); put_hdr(i,1000+i,lsa_raw(5,8)); }
+    }
+    pgbuf_scan(&P);
+    printf("every header wrong, mismatch-index allocation failed: PG.ok=%d degraded=%d mismatch=%d raw=%d why=\"%s\"\n",
+           PG.ok,PG.degraded,PG.mismatch,PG.mismatch_raw,PG.why);
+    return PG.ok?1:0;
+}
+void test_after_pass1(void){}
+HM
+gcc -O2 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/m" "$TMP/m.c" 2>"$TMP/cc3.err" || { cat "$TMP/cc3.err"; echo "→ FAIL (compile failed)"; exit 1; }
+if "$TMP/m" > "$TMP/out3"; then echo "  ok   allocation failure drops the frame"; else echo "  FAIL allocation failure passed as healthy"; rc=1; fi
+sed 's/^/       /' "$TMP/out3"
+else echo "  FAIL allocation point not found"; rc=1; fi
 [ $rc -eq 0 ] && { echo "→ PASS"; exit 0; }
 echo "→ FAIL"; exit 1
