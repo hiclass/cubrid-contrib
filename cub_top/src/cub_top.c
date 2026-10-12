@@ -6630,7 +6630,11 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                        dead server's measurement would linger - force an immediate remeasure. */
                     g_a_redo=1;
                 }
-                P0->pid=P->pid;                    /* The delta baseline moves to the new process too */
+                /* The delta baseline moves to the new process too, set to what was just read:
+                   a zeroed baseline would count everything since the server started as this
+                   frame's CPU, faults and I/O.  Rates start on the next frame. */
+                if(newpid>=0){ *P0=*P; int dd,nn; count_d_threads(newpid,&dd,&nn,&blk0); }
+                P0->pid=P->pid;
                 /* Configuration is per instance too: cubrid.conf now so this frame has it, then
                    the new server's applied values (harvested next frame) */
                 { const char *cub=getenv("CUBRID");
