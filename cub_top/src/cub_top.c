@@ -6181,8 +6181,10 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     M->load15=rp_num(t,"os.load15",0);
     /* Per-core distribution, recorded already sorted descending. */
     M->ncore_pct=0;
-    if(rp_find(t,"os.core_pct",b,sizeof b)){
-        char *q=b; int i=0;
+    /* Its own buffer: MAXCORE entries of up to "100.0," outgrow the shared 512 bytes at 86 cores */
+    static char cb[MAXCORE*8];
+    if(rp_find(t,"os.core_pct",cb,sizeof cb)){
+        char *q=cb; int i=0;
         while(*q && i<MAXCORE){ M->core_pct[i++]=strtod(q,&q); if(*q==',') q++; else break; }
         M->ncore_pct=i;
     }

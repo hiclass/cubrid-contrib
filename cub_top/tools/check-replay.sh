@@ -107,6 +107,25 @@ PY
     fi
 fi
 
+# 2b) a large host: the per-core list of 256 cores (MAXCORE) at 100.0 must survive replay,
+#     whatever this host's core count is
+if command -v python3 >/dev/null; then
+    python3 - "$REC" "$TMP/big.jsonl" <<'PY'
+import json,sys
+d=json.loads(open(sys.argv[1]).readline()); n=256
+d['os.core_pct_n']=n; d['os.core_pct']=','.join(['100.0']*n)
+open(sys.argv[2],'w').write(json.dumps(d,ensure_ascii=False)+'\n')
+PY
+    "$BIN" --replay "$TMP/big.jsonl" --dump-json >"$TMP/big.out" 2>/dev/null
+    python3 - "$TMP/big.jsonl" "$TMP/big.out" <<'PY' || bad=1
+import json,sys
+a=json.loads(open(sys.argv[1]).readline()); b=json.loads(open(sys.argv[2]).readline())
+if a['os.core_pct']!=b.get('os.core_pct') or a['os.core_pct_n']!=b.get('os.core_pct_n'):
+    print(f"  FAIL 256-core list: replayed n={b.get('os.core_pct_n')} ({len(b.get('os.core_pct',''))}B of {len(a['os.core_pct'])}B)"); sys.exit(1)
+print(f"  ok   256-core list replays whole ({len(a['os.core_pct'])}B)")
+PY
+fi
+
 # 3) a replay must read no /proc of any process - it is a file, not a measurement
 if command -v strace >/dev/null; then
     strace -f -e trace=openat -o "$TMP/st" "$BIN" --replay "$REC" -d >/dev/null 2>&1
