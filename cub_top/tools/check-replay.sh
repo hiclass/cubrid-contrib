@@ -55,6 +55,14 @@ for ln in open(sys.argv[1]):
     except Exception as e:
         print(f"  FAIL line {n} is not valid JSON: {e}"); sys.exit(1)
 print(f"  ok   {n} line(s) valid JSON")
+# Frame times carry the sub-second interval: ts_epoch_ms strictly increasing, and at the
+# default 0.5s interval at least one gap below a second (whole seconds would lose it)
+ms=[json.loads(l)['ts_epoch_ms'] for l in open(sys.argv[1]) if l.strip()]
+if any(b<=a for a,b in zip(ms,ms[1:])):
+    print("  FAIL ts_epoch_ms not strictly increasing"); sys.exit(1)
+if len(ms)>2 and not any(b-a<1000 for a,b in zip(ms,ms[1:])):
+    print("  FAIL no sub-second frame gap recorded"); sys.exit(1)
+print(f"  ok   frame times in ms, gaps {[int(b-a) for a,b in zip(ms,ms[1:])][:6]}")
 PY
 else
     echo "  skip JSON validation (no python3)"

@@ -3556,6 +3556,7 @@ static char g_cap_state[256]="";          static int g_replaying=0;             
 static char g_rp_capvd[320]="";           /* Recorded cap.verdict: recomputing it from rounded keys can change a digit */
 static int g_rep_i=0,g_rep_n=0;       /* Replay progress, shown in the status line */
 static time_t g_rep_ts=0;             /* The frame's recorded time, shown instead of now */
+static double g_ts_frac=-1;           /* The frame's time in fractional seconds for ts_epoch_ms; <0 = ts_epoch */
 static const char *g_rec_path=NULL;   /* --record FILE  */
 static const char *g_rep_path=NULL;   /* --replay FILE  */
 static double g_rep_speed=1.0;        /* --replay-speed (0 = as fast as possible) */
@@ -5839,7 +5840,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                          double minflt_ps,double majflt_ps,
                          double cpu_pct,int ncpu,int IO_dthr,int IO_nthr){
     double mt=M->total*1024.0, av=M->avail*1024.0;
-    printf("ts=\"%s\" ts_epoch=%ld\n",ts,tsec);
+    /* ts_epoch_ms: the sample interval is sub-second, so a recording needs more than ts_epoch */
+    printf("ts=\"%s\" ts_epoch=%ld ts_epoch_ms=%.0f\n",ts,tsec,(g_ts_frac>=0?g_ts_frac:(double)tsec)*1000.0);
     printf("caps.vm_readv=%d caps.rollup=%d caps.proc_io=%d caps.clear_refs=%d\n",
            CAP.vm_readv,CAP.rollup,CAP.proc_io,CAP.clear_refs);
     printf("perm.limited=%d",g_perm_limited);
@@ -6114,6 +6116,11 @@ static double rp_num(const char *txt,const char *key,double dflt){
 }
 static void rp_str(const char *txt,const char *key,char *out,size_t on){
     if(!rp_find(txt,key,out,on)) out[0]=0;
+}
+/* A frame's time in seconds: ts_epoch_ms when recorded, else the whole-second ts_epoch */
+static double rp_time(const char *txt){
+    double ms=rp_num(txt,"ts_epoch_ms",-1);
+    return ms>=0 ? ms/1000.0 : rp_num(txt,"ts_epoch",0);
 }
 
 /* Rebuild one frame's structs from a recorded line.  This is the ONLY place a
@@ -6452,7 +6459,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
             char ts[32]; time_t rt=(time_t)rp_num(fr[j],"ts_epoch",0); struct tm tmv;
             localtime_r(&rt,&tmv); strftime(ts,sizeof ts,"%Y-%m-%d %H:%M:%S",&tmv);
             rp_apply(fr[j],&P,&M,&T,&IO);
-            g_replaying=1;
+            g_replaying=1; g_ts_frac=rp_time(fr[j]);
             if(jsonout){
                 FILE *tf=tmpfile(); if(!tf) continue;
                 fflush(stdout); int sv=dup(1);
@@ -6476,7 +6483,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
     }
     int view=view0, paused=0, lens=1, rebuild=0; size_t i=0;
     size_t pushed=(size_t)-1;      /* the last frame added to the history */
-    double t0=rp_num(fr[0],"ts_epoch",0);
+    double t0=rp_time(fr[0]);
     tui_enter();
     while(!g_stop && i<n){
         if(rebuild){
@@ -6485,7 +6492,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
             HN=0;
             for(size_t j = i>(size_t)HCAP ? i-(size_t)HCAP : 0; j<i; j++){
                 rp_apply(fr[j],&P,&M,&T,&IO);
-                hist_push(rp_num(fr[j],"ts_epoch",0),&P,&M,&T,&IO,!no_hot);
+                hist_push(rp_time(fr[j]),&P,&M,&T,&IO,!no_hot);
             }
             rebuild=0; pushed=(size_t)-1;
         }
@@ -6494,7 +6501,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
            window growing exactly as it did live.  Only a new frame is added: while
            paused the loop redraws the same frame every 80ms, and pushing it each time
            would scroll the plots with copies (live mode guards the same way). */
-        if(pushed!=i){ hist_push(rp_num(fr[i],"ts_epoch",0),&P,&M,&T,&IO,!no_hot); pushed=i; }
+        if(pushed!=i){ hist_push(rp_time(fr[i]),&P,&M,&T,&IO,!no_hot); pushed=i; }
         g_replaying=1; g_rep_i=(int)i; g_rep_n=(int)n;
         g_rep_ts=(time_t)rp_num(fr[i],"ts_epoch",0);
         if(view) render_plot(&P,&M,&T,&IO,paused,!no_hot);
@@ -6516,7 +6523,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
         else {
             double dt=0;
             if(i+1<n && g_rep_speed>0){
-                dt=(rp_num(fr[i+1],"ts_epoch",0)-rp_num(fr[i],"ts_epoch",0))/g_rep_speed;
+                dt=(rp_time(fr[i+1])-rp_time(fr[i]))/g_rep_speed;
                 if(dt<0) dt=0;
                 if(dt>5) dt=5;   /* a long gap in the recording is not replayed in real time */
             }
@@ -7636,11 +7643,12 @@ int main(int argc,char **argv){
                window collected so far.  Not while paused, though: the pause loop
                returns here every 150ms, so without this guard the series would
                keep scrolling - faster than when running. */
-            if(!paused) hist_push(now_ms()/1000.0, &P, &M, &T, &IO, !no_hot);
+            double fr_t=now_ms()/1000.0;    /* One instant for the history and the recording */
+            if(!paused) hist_push(fr_t, &P, &M, &T, &IO, !no_hot);
             if(g_rec_path && !paused){
-                char rts[32]; time_t rt=time(NULL); struct tm tmv;
+                char rts[32]; time_t rt=(time_t)fr_t; struct tm tmv;
                 localtime_r(&rt,&tmv); strftime(rts,sizeof rts,"%Y-%m-%d %H:%M:%S",&tmv);
-                rp_record(&P,&M,&T,&IO,with_a,rts,(long)rt);
+                g_ts_frac=fr_t; rp_record(&P,&M,&T,&IO,with_a,rts,(long)rt); g_ts_frac=-1;
             }
             if(view) render_plot(&P,&M,&T,&IO,paused,!no_hot);
             else     render_dash(&P,&M,&T,&IO,lens,paused,work_ms,

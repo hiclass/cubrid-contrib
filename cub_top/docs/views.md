@@ -354,7 +354,7 @@ I/O 박스 판정문과 같은 규약입니다: 성립한 신호만 근거로 �
 파싱 가능한 `key=value` 한 줄씩. 모니터링 시스템 연동이나 분석 도구 입력용입니다.
 
 ```
-ts="2026-08-21 01:49:33" ts_epoch=1787...
+ts="2026-08-21 01:49:33" ts_epoch=1787... ts_epoch_ms=1787...
 os.ram_total_kb=197179440 os.ram_used_kb=... os.swap_total_kb=0
 server.db=cbench server.pid=656016 server.mapped_kb=... server.rss_kb=...
 param.data_buffer_size.kind=region param.data_buffer_size.cfg_bytes=536870912 \
@@ -380,7 +380,7 @@ log.append_pageid=564300 log.append_offset=2152 log.nxio_pageid=564300 log.nxio_
 
 `pgbuf.*`/`log.*` 는 `--bcb-dump FILE` 스냅샷과 같은 원천이다(정의는 [metrics.md](metrics.md)).
 
-키는 전부 ASCII이며, 측정 시각이 `ts`/`ts_epoch`로 항상 포함됩니다(메모리는 휘발성이라 시점 없는 값은 무의미).
+키는 전부 ASCII이며, 측정 시각이 `ts`/`ts_epoch`(초)·`ts_epoch_ms`(밀리초)로 항상 포함됩니다(메모리는 휘발성이라 시점 없는 값은 무의미). 샘플 간격이 1초보다 짧으므로 녹화 재생의 대기 간격과 시계열 시간축은 `ts_epoch_ms` 를 쓰고, 이 키가 없는 이전 녹화는 `ts_epoch` 로 대신합니다.
 
 ## 5. heapbreak 단독 (`heapbreak.py`)
 
