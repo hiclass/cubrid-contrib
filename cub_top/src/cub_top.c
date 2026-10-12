@@ -776,6 +776,7 @@ static int params_from_conf(const char *cubrid,const char *db){
    CUBRID accepts quotes, ; , $ and backticks in it, so execvp passes arguments
    as an array rather than composing a command string. */
 static pid_t g_pd_pid=-1;          /* The child to reap or time out */
+static int g_pd_applied=0;         /* The last paramdump returned values (a booting server may give none) */
 static char  g_pd_why[128]="";     /* Why the child could not start, kept for the screen and terse */
 
 /* Room for one more process?  In a container the cgroup pids limit binds before
@@ -856,7 +857,7 @@ static void paramdump_reap(void){
     g_pd_pid=-1;
 }
 static int paramdump_finish(FILE *fp){
-    if(!fp){ if(g_pagesize<=0) g_pagesize=16384; return -1; }
+    if(!fp){ g_pd_applied=0; if(g_pagesize<=0) g_pagesize=16384; return -1; }
     /* Keep the pipe non-blocking and read only until the deadline, so a hung paramdump
        cannot stall cub_top on its first frame. */
     int fd=fileno(fp);
@@ -882,6 +883,8 @@ static int paramdump_finish(FILE *fp){
     paramdump_reap();
 
     long long dbp=-1;
+    g_pd_applied = strchr(buf,'=')!=NULL;
+    if(g_pd_applied) g_nprm=0;       /* The applied values replace any read from cubrid.conf */
     for(char *line=buf,*nl; *line; line=nl){
         nl=strchr(line,'\n');
         if(nl) *nl++=0; else nl=line+strlen(line);
@@ -6538,6 +6541,14 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
     P0->pid=P->pid;
     if(P->pid>=0){
         if(*pd && !no_hot){ paramdump_finish(*pd); *pd=NULL; }
+        /* A paramdump sent to a server still booting returns nothing: retry every 5s, up to 12 times */
+        { static unsigned seen=0; static int tries=0; static double next=0;
+          const char *cub=getenv("CUBRID");
+          if(seen!=g_inst_gen){ seen=g_inst_gen; tries=0; next=now_ms()+5000; }
+          if(!*pd && !g_pd_applied && cub && *cub && tries<12 && now_ms()>=next){
+              tries++; next=now_ms()+5000;
+              *pd=paramdump_start(cub,P->db);
+          } }
         if(!no_hot) do_clear_refs(P->pid);
         parse_status_stat(P0); parse_procio(P0);
     }
@@ -6587,26 +6598,40 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
             int newpid=-1;
             for(int i=0;i<g_ninst;i++)
                 if(keep[0] && !strcmp(g_inst[i].db,keep)){ newpid=g_inst[i].pid; break; }
+            /* Started with no server and no db named: take the first, as at startup */
+            if(newpid<0 && (!keep[0] || !strcmp(keep,"-")) && g_ninst>0){
+                newpid=g_inst[0].pid; snprintf(keep,sizeof keep,"%s",g_inst[0].db); }
             /* Move to the new pid on a restart, or to not-running if it has not come up.
                Either way the previous instance's analysis must be discarded, or a dead
-               server's region and heap values appear to belong to the new one. */
-            reset_instance_state();
-            memset(P,0,sizeof *P);
-            memset(P0,0,sizeof *P0);
-            snprintf(P->db,sizeof P->db,"%s",keep);
-            P->pid=newpid;
-            if(newpid>=0){
-                for(int i=0;i<g_ninst;i++)
-                    if(g_inst[i].pid==newpid){ g_cur=i; break; }
-                snprintf(g_cur_db,sizeof g_cur_db,"%s",keep);
-                cap_probe(newpid);             /* The new process: re-probe rather than inherit the old flags */
-                parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P);
-                /* Heap A/B analyse a process address space and must be redone after a restart.
-                   B runs every frame below, but A runs periodically, so without this a
-                   dead server's measurement would linger - force an immediate remeasure. */
-                g_a_redo=1;
+               server's region and heap values appear to belong to the new one.  Still
+               down (no pid before or after): nothing to discard. */
+            if(P->pid>=0 || newpid>=0){
+                reset_instance_state();
+                memset(P,0,sizeof *P);
+                memset(P0,0,sizeof *P0);
+                snprintf(P->db,sizeof P->db,"%s",keep);
+                P->pid=newpid;
+                if(newpid>=0){
+                    for(int i=0;i<g_ninst;i++)
+                        if(g_inst[i].pid==newpid){ g_cur=i; break; }
+                    snprintf(g_cur_db,sizeof g_cur_db,"%s",keep);
+                    cap_probe(newpid);             /* The new process: re-probe rather than inherit the old flags */
+                    parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P);
+                    /* Heap A/B analyse a process address space and must be redone after a restart.
+                       B runs every frame below, but A runs periodically, so without this a
+                       dead server's measurement would linger - force an immediate remeasure. */
+                    g_a_redo=1;
+                }
+                P0->pid=P->pid;                    /* The delta baseline moves to the new process too */
+                /* Configuration is per instance too: cubrid.conf now so this frame has it, then
+                   the new server's applied values (harvested next frame) */
+                { const char *cub=getenv("CUBRID");
+                  g_pagesize=0;
+                  if(cub && *cub) params_from_conf(cub,keep);
+                  if(g_pagesize<=0) g_pagesize=16384;
+                  if(*pd){ paramdump_finish(*pd); *pd=NULL; }
+                  if(newpid>=0 && cub && *cub) *pd=paramdump_start(cub,keep); }
             }
-            P0->pid=P->pid;                    /* The delta baseline moves to the new process too */
         }
     }
     if(P->pid>=0){
@@ -6925,7 +6950,7 @@ static void help_keys_dash(void){
 "── 대시보드(-b) · 이 화면이 무엇을 보여주나 ──\n"
 "\n"
 "  cub_server 프로세스의 메모리를 /proc 과 프로세스 메모리만 읽어 분해한다. 쓰기·락 0,\n"
-"  서버 질의는 시작 시 paramdump 1회뿐이다(무침습).\n"
+"  서버 질의는 서버마다 paramdump 1회뿐이다(재시작 시 다시, 무침습).\n"
 "  핵심 질문은 하나다 — \"이 메모리가 왜 이만큼인가, 늘고 있다면 어디가 늘었나\".\n"
 "\n"
 "  화면은 위에서 아래로 여섯 상자다. 아래 설명도 그 순서다.\n"
@@ -7693,6 +7718,7 @@ int main(int argc,char **argv){
             }
         }
     }
+    if(pd){ paramdump_finish(pd); pd=NULL; }   /* One a restart started during the run */
     if(g_mem_fd>=0) close(g_mem_fd);
     return 0;
 }
