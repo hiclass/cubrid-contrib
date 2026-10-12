@@ -69,18 +69,24 @@ while [ $# -gt 0 ]; do
 done
 [ $# -ge 1 ] || { echo "usage: $0 [-r URL] [-o DIR] [-w DIR] [-j JAVA_HOME] [-k] [-f] <ref> ..." >&2; exit 2; }
 
+# 정리는 이번 실행이 만든 것만: 이미 있던 tools/dwoff 와 -w 로 받은 디렉터리는 지우지 않는다.
+DWOFF_TMP=""; WORK_TMP=""
+cleanup(){ [ -n "$DWOFF_TMP" ] && rm -rf "$DWOFF_TMP"; [ -n "$WORK_TMP" ] && rm -rf "$WORK_TMP"; }
+trap cleanup EXIT
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM   # 시그널로 끝나도 EXIT 정리가 돈다
+
 # dwoff: 추출기. 없으면 여기서 빌드한다(단일 파일, 외부 의존 0).
 DWOFF="$HERE/../tools/dwoff"
 if [ ! -x "$DWOFF" ]; then
-    DWOFF=$(mktemp -u /tmp/dwoff.XXXXXX)
+    DWOFF_TMP=$(mktemp -d /tmp/dwoff.XXXXXX) || exit 1
+    DWOFF="$DWOFF_TMP/dwoff"
     ${CC:-cc} -O2 -std=gnu99 -o "$DWOFF" "$HERE/../tools/dwoff.c" \
         || { echo "dwoff build failed" >&2; exit 1; }
-    trap 'rm -f "$DWOFF"' EXIT
 fi
 
 if [ -z "$WORK" ]; then
-    WORK=$(mktemp -d /tmp/cubofs.XXXXXX)
-    [ $KEEP -eq 0 ] && trap 'rm -f "$DWOFF"; rm -rf "$WORK"' EXIT
+    WORK=$(mktemp -d /tmp/cubofs.XXXXXX) || exit 1
+    [ $KEEP -eq 0 ] && WORK_TMP=$WORK
 fi
 mkdir -p "$WORK" "$OUT" || exit 1
 
