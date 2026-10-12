@@ -2374,6 +2374,27 @@ static void pgbuf_dump(const char*db){
     if(ok) rename(tmp,g_bcb_dump); else unlink(tmp);
 }
 
+/* Zone counters, by the zone field kept in a record (flags>>16) */
+static void pg_zone_add(int z,int d){
+    if(z==1) PG.z1+=d; else if(z==2) PG.z2+=d; else if(z==3) PG.z3+=d;
+    else if(z==4) PG.zinv+=d; else if(z==8) PG.zvoid+=d;
+}
+/* Residency, dirty and oldest-dirty totals from the records, after the recheck replaced some */
+static void pg_recount(void){
+    PG.resident=PG.dirty=PG.flushing=PG.tempvol=0; PG.have_oldest=0;
+    memset(PG.vol_res,0,sizeof PG.vol_res); memset(PG.vol_dirty,0,sizeof PG.vol_dirty);
+    for(int k=0;k<PG.nrec;k++){
+        const pgrec_t*r=&PG.rec[k]; int vol_ok=(r->volid<PG_MAXVOL);
+        if(!vol_ok) PG.tempvol++;
+        PG.resident++; if(vol_ok) PG.vol_res[r->volid]++;
+        if(r->flags&PGBUF_F_DIRTY){
+            PG.dirty++; if(vol_ok) PG.vol_dirty[r->volid]++;
+            lsa_t l=lsa_dec(r->oldest_lsa);
+            if(!lsa_isnull(l) && (!PG.have_oldest || lsa_cmp(l,PG.oldest_dirty)<0)){ PG.oldest_dirty=l; PG.raw_oldest=r->oldest_lsa; PG.have_oldest=1; }
+        }
+        if(r->flags&PGBUF_F_FLUSHING) PG.flushing++;
+    }
+}
 static void pgbuf_scan(proc_t*P){
     PG.frame++;
     if(!B.ok){ PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"method B off — %s":"방법 B 비활성 — %s",B.why); return; }
@@ -2473,7 +2494,7 @@ static void pgbuf_scan(proc_t*P){
         if(nm>0 && mcap){
             static unsigned char *rvp=NULL, *rhd=NULL, *rok=NULL; static int rcap=0;
             if(nm>rcap){ free(rvp); free(rhd); free(rok);
-                rvp=(unsigned char*)malloc(8*(size_t)nm);      /* vpid 8B(pageid4+volid2+pad2) */
+                rvp=(unsigned char*)malloc(szb*(size_t)nm);    /* the whole BCB: a replaced page brings its own flags and LSA */
                 rhd=(unsigned char*)malloc(16*(size_t)nm);
                 rok=(unsigned char*)malloc((size_t)nm*2);
                 rcap=(rvp&&rhd&&rok)?nm:0; }
@@ -2486,24 +2507,33 @@ static void pgbuf_scan(proc_t*P){
                         /* BCB element address = tab + i*szb, where i is the original BCB index, not the rec
                            index: rec skips empty BCBs, so it cannot be derived from the
                            iopage address - the BCB index is kept in rec (bidx). */
-                        va[j]=(uint64_t)tab+(uint64_t)pg_bidx[midx[j]]*(uint64_t)szb+(uint64_t)o_vpid;
+                        va[j]=(uint64_t)tab+(uint64_t)pg_bidx[midx[j]]*(uint64_t)szb;
                     }
-                    vm_gather(P->pid,va,nm,8,rvp,rok);
+                    vm_gather(P->pid,va,nm,szb,rvp,rok);
                     /* Re-read the same BCBs' iopage headers too (addresses unchanged) */
                     vm_gather(P->pid,maddr,nm,16,rhd,rok+nm);
+                    int replaced=0;
                     for(int j=0;j<nm;j++){
                         PG.recheck++;
                         if(!rok[j]||!rok[nm+j]){ PG.mismatch++; continue; }
-                        int32_t npid; int16_t nvid;
-                        memcpy(&npid,rvp+(size_t)j*8,4); memcpy(&nvid,rvp+(size_t)j*8+4,2);
+                        const unsigned char*nb=rvp+(size_t)j*szb;
+                        int32_t npid; int16_t nvid; uint32_t nfl; uint64_t nol;
+                        memcpy(&npid,nb+o_vpid,4); memcpy(&nvid,nb+o_vpid+4,2);
+                        memcpy(&nfl,nb+o_flags,4); memcpy(&nol,nb+o_olsa,8);
                         uint64_t lsa; int32_t hp; int16_t hv;
                         memcpy(&lsa,rhd+(size_t)j*16,8); memcpy(&hp,rhd+(size_t)j*16+8,4); memcpy(&hv,rhd+(size_t)j*16+12,2);
-                        if(hp==npid && hv==nvid && npid>=0){
-                            /* It was a timing gap: update with the new values and keep this record */
+                        if(hp==npid && hv==nvid && npid>=0 && nvid>=0){
+                            /* It was a timing gap: the record becomes the new page as a whole -
+                               identity, flags, zone and LSAs from the same re-read */
                             pgrec_t*r=&PG.rec[midx[j]];
-                            r->pageid=npid; r->volid=nvid; r->page_lsa=lsa; r->hdr_ok=1;
+                            int nz=(int)((nfl&PGBUF_ZONE_MASK)>>16);
+                            pg_zone_add(r->zone,-1); pg_zone_add(nz,+1);
+                            r->pageid=npid; r->volid=nvid; r->flags=nfl; r->zone=(int16_t)nz;
+                            r->oldest_lsa=nol; r->page_lsa=lsa; r->hdr_ok=1;
+                            replaced++;
                         } else PG.mismatch++;      /* Still wrong after the recheck: a genuine mismatch */
                     }
+                    if(replaced) pg_recount();
                 } else for(int j=0;j<nm;j++) PG.mismatch++;
             } else PG.mismatch=PG.mismatch_raw;
         }
