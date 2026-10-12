@@ -7677,13 +7677,6 @@ int main(int argc,char **argv){
         fprintf(stderr,"cub_top: --record 는 라이브 모드(-b 또는 -p)에서만 기록합니다.\n");
         return 2;
     }
-    /* Open the recording before the first frame, so a path that cannot be written
-       fails the run instead of a capture that reports success with nothing written. */
-    if(g_rec_path){
-        FILE *rf=fopen(g_rec_path,"we");
-        if(!rf){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,strerror(errno)); return 2; }
-        RPR.f=rf;
-    }
     /* One output mode per run: the tree, the dump and the live screens all write to stdout. */
     if(tree + terse + live > 1){
         fprintf(stderr,"cub_top: 출력 모드는 하나만 지정합니다 (-t · -d/--dump-json · -b/-p)\n");
@@ -7725,6 +7718,15 @@ int main(int argc,char **argv){
                    snprintf(P.db,sizeof P.db,"%s",g_inst[g_cur].db);
                    snprintf(g_cur_db,sizeof g_cur_db,"%s",g_inst[g_cur].db); }
     else { P.pid=-1; snprintf(P.db,sizeof P.db,"-"); g_cur_db[0]=0; }
+    /* The recording is opened (and truncated) only after every check that can reject the
+       run, so a mistyped command never empties an existing recording; still before the
+       first frame, so a path that cannot be written fails the run instead of a capture
+       that reports success with nothing written. */
+    if(g_rec_path){
+        FILE *rf=fopen(g_rec_path,"we");
+        if(!rf){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,strerror(errno)); return 2; }
+        RPR.f=rf;
+    }
     const char *cub=getenv("CUBRID");
     FILE *pd=NULL;
     if(P.pid<0){

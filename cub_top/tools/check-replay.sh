@@ -153,6 +153,18 @@ print(f"  ok   plot view shows \"{mark.group(0)}\" and \"{when.group(0)}\"")
 PY
 fi
 
+# 2d) a command rejected for its arguments must leave an existing recording untouched
+cp "$REC" "$TMP/keep.jsonl"
+for args in "-t -b" "-d -p" "-b no_such_db_x" "-t"; do
+    # shellcheck disable=SC2086
+    "$BIN" $args --record "$TMP/keep.jsonl" </dev/null >/dev/null 2>&1
+    if ! cmp -s "$REC" "$TMP/keep.jsonl"; then
+        echo "  FAIL rejected command ($args --record) emptied the recording"; bad=1
+        cp "$REC" "$TMP/keep.jsonl"
+    fi
+done
+[ $bad -eq 0 ] && echo "  ok   rejected commands leave an existing recording intact"
+
 # 3) a replay must read no /proc of any process - it is a file, not a measurement
 if command -v strace >/dev/null; then
     strace -f -e trace=openat -o "$TMP/st" "$BIN" --replay "$REC" -d >/dev/null 2>&1
