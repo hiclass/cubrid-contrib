@@ -3130,6 +3130,7 @@ typedef struct {
     double miss_pps;                            /* Buffer misses: pages loaded per second */
     double hit_pct;                             /* Hit ratio percentage; -1 means it cannot be computed */
     char   hit_src[16];                         /* "perfmon" | "turnover" | "-" */
+    char   dev[32];                             /* Device the ceiling applies to (the frame's busiest) */
     double turnover_pct;                        /* Share of resident pages replaced within the window */
     double readmit_pct;                         /* Share evicted and read back: the signal that the working set exceeds the buffer */
     /* Ceiling and latency */
@@ -3517,7 +3518,20 @@ static double g_rep_speed=1.0;        /* --replay-speed (0 = as fast as possible
 static const char *CAP_BS_NAME[CAP_BS_N]={"<8KB","8-64KB",">64KB"};
 static const char *CAP_RW_NAME[CAP_RW_N]={"write-heavy","mixed","read-heavy"};
 typedef struct { double iops,bps,util,qd,await_ms; time_t when; int valid; } cap_cell_t;
-static cap_cell_t g_cap_mtx[CAP_BS_N][CAP_RW_N];
+/* Ceilings are per device: the busiest device can change between frames, and a fast
+   device's ceiling says nothing about a slow one.  g_cap_mtx is the frame's device. */
+#define CAPDEV_N 16
+typedef struct { char name[32]; cap_cell_t m[CAP_BS_N][CAP_RW_N]; } cap_dev_t;
+static cap_dev_t g_capdev[CAPDEV_N]; static int g_capdev_n=0;
+static cap_cell_t g_cap_none[CAP_BS_N][CAP_RW_N];   /* No device (or table full): stays empty */
+static cap_cell_t (*g_cap_mtx)[CAP_RW_N]=g_cap_none;
+static cap_dev_t *cap_dev_get(const char *nm){
+    if(!nm||!nm[0]) return NULL;
+    for(int i=0;i<g_capdev_n;i++) if(!strcmp(g_capdev[i].name,nm)) return &g_capdev[i];
+    if(g_capdev_n>=CAPDEV_N) return NULL;
+    cap_dev_t *d=&g_capdev[g_capdev_n++]; memset(d,0,sizeof *d);
+    snprintf(d->name,sizeof d->name,"%s",nm); return d;
+}
 static int cap_bs_idx(double kb){ return (kb<8.0)?0:(kb<=64.0)?1:2; }
 static int cap_rw_idx(double rr){ return (rr<0.3)?0:(rr<=0.7)?1:2; }
 
@@ -3684,12 +3698,14 @@ static void cap_ceiling(void){
         FILE*f=fopen(g_cap_state,"r");
         if(f){ char ln[256];
                while(fgets(ln,sizeof ln,f)){
-                   int b=0,r=0; double io=0,bp=0,ut=0,qd=0,aw=0; long long w=0;
+                   int b=0,r=0; double io=0,bp=0,ut=0,qd=0,aw=0; long long w=0; char dn[32];
+                   cap_dev_t *d;
                    if(ln[0]=='#') continue;
-                   if(sscanf(ln,"cell %d %d iops=%lf bps=%lf util=%lf qd=%lf await=%lf when=%lld",
-                             &b,&r,&io,&bp,&ut,&qd,&aw,&w)>=6
-                      && b>=0 && b<CAP_BS_N && r>=0 && r<CAP_RW_N){
-                       cap_cell_t*c=&g_cap_mtx[b][r];
+                   /* A line without a device name cannot be attributed and is not read */
+                   if(sscanf(ln,"cell %31s %d %d iops=%lf bps=%lf util=%lf qd=%lf await=%lf when=%lld",
+                             dn,&b,&r,&io,&bp,&ut,&qd,&aw,&w)>=7
+                      && b>=0 && b<CAP_BS_N && r>=0 && r<CAP_RW_N && (d=cap_dev_get(dn))){
+                       cap_cell_t*c=&d->m[b][r];
                        c->iops=io; c->bps=bp; c->util=ut; c->qd=qd; c->await_ms=aw;
                        c->when=(time_t)w; c->valid=1;
                    }
@@ -3697,6 +3713,7 @@ static void cap_ceiling(void){
                fclose(f); }
         loaded=1;
     }
+    { cap_dev_t *d=cap_dev_get(CAP2.dev); g_cap_mtx = d ? d->m : g_cap_none; }
     /* This frame's I/O profile: mean request size and read share */
     { double ios=CAP2.dev_iops, byt=CAP2.dev_rbps+CAP2.dev_wbps;
       CAP2.req_kb = (ios>0) ? byt/ios/1024.0 : 0;
@@ -3712,7 +3729,7 @@ static void cap_ceiling(void){
     double cur_iops=CAP2.dev_iops;
     int sat = (CAP2.dev_util>=90.0) || (CAP2.qdepth>=1.0 && CAP2.await_ms>=1.0);
     { cap_cell_t*c=&g_cap_mtx[CAP2.prof_bs][CAP2.prof_rw];
-      if(sat && cur_iops>c->iops){
+      if(sat && cur_iops>c->iops && g_cap_mtx!=g_cap_none){
           c->iops=cur_iops; c->bps=CAP2.dev_rbps+CAP2.dev_wbps; c->util=CAP2.dev_util;
           c->qd=CAP2.qdepth<0?0:CAP2.qdepth; c->await_ms=CAP2.await_ms<0?0:CAP2.await_ms;
           c->when=time(NULL); c->valid=1;
@@ -3728,12 +3745,12 @@ static void cap_ceiling(void){
         if(g_cap_state[0]){    /* Writes only to our own file; the target process and DB are untouched */
             char tmp[300]; snprintf(tmp,sizeof tmp,"%s.tmp",g_cap_state);
             FILE*f=fopen(tmp,"w");
-            if(f){ fprintf(f,"# cub_top capacity ceilings by profile (block size x read ratio)\n");
-                   for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
-                       cap_cell_t*c=&g_cap_mtx[b][r];
+            if(f){ fprintf(f,"# cub_top capacity ceilings by device and profile (block size x read ratio)\n");
+                   for(int i=0;i<g_capdev_n;i++) for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
+                       cap_cell_t*c=&g_capdev[i].m[b][r];
                        if(!c->valid) continue;
-                       fprintf(f,"cell %d %d iops=%.0f bps=%.0f util=%.1f qd=%.2f await=%.2f when=%lld\n",
-                               b,r,c->iops,c->bps,c->util,c->qd,c->await_ms,(long long)c->when);
+                       fprintf(f,"cell %s %d %d iops=%.0f bps=%.0f util=%.1f qd=%.2f await=%.2f when=%lld\n",
+                               g_capdev[i].name,b,r,c->iops,c->bps,c->util,c->qd,c->await_ms,(long long)c->when);
                    }
                    if(fclose(f)==0) rename(tmp,g_cap_state); else unlink(tmp); }
         }
@@ -3745,6 +3762,7 @@ static void cap_ceiling(void){
 static void cap_collect(proc_t*P,iod_t*IO,const dstat_t*d0,int nd0,const dstat_t*d1,int nd1,double dt){
     CAP2.read_bps=IO->rb; CAP2.write_bps=IO->wb; CAP2.riops=IO->ri; CAP2.wiops=IO->wi;
     CAP2.dev_util=IO->devutil;
+    snprintf(CAP2.dev,sizeof CAP2.dev,"%s",IO->devnm);
     CAP2.await_ms=CAP2.r_await_ms=CAP2.w_await_ms=-1; CAP2.qdepth=-1; CAP2.dev_iops=0;
     /* Latency, queue and device IOPS, from the diskstats delta of the busiest device (IO->devnm) */
     if(IO->devnm[0] && dt>0){
@@ -6284,8 +6302,11 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     rp_str(t,"cap.verdict",g_rp_capvd,sizeof g_rp_capvd);
     /* The remembered ceilings are per profile cell, so the whole matrix is restored -
        a verdict compares against the cell in force, not a single number. */
-    memset(g_cap_mtx,0,sizeof g_cap_mtx);
-    for(int bs=0;bs<CAP_BS_N;bs++) for(int rw=0;rw<CAP_RW_N;rw++){
+    /* The cells are the recorded device's, restored into that device's matrix */
+    snprintf(CAP2.dev,sizeof CAP2.dev,"%s",IO->devnm);
+    { cap_dev_t *d=cap_dev_get(IO->devnm); g_cap_mtx = d ? d->m : g_cap_none; }
+    if(g_cap_mtx!=g_cap_none) memset(g_cap_mtx,0,sizeof(cap_cell_t)*CAP_BS_N*CAP_RW_N);
+    for(int bs=0;bs<CAP_BS_N && g_cap_mtx!=g_cap_none;bs++) for(int rw=0;rw<CAP_RW_N;rw++){
         char k[64]; snprintf(k,sizeof k,"cap.cell%d%d.iops",bs,rw);
         if(!rp_find(t,k,b,sizeof b)) continue;
         cap_cell_t*cc=&g_cap_mtx[bs][rw];

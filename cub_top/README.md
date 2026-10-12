@@ -210,7 +210,7 @@ debug 로 빌드하고 그 DWARF 에서 뽑는다. 구조체 오프셋은 컴파
 ## 검증
 
 ```sh
-for f in tools/check-*.sh; do sh "$f"; done   # 회귀 12종
+for f in tools/check-*.sh; do sh "$f"; done   # 회귀 13종
 sh tools/test-guard.sh                        # 음성 테스트(오프셋 고의 훼손)
 ```
 
@@ -219,6 +219,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-hist.sh` | 플롯·대시보드·덤프(`-d`) 세 경로가 같은 시점에 같은 값 (22항목) |
 | `check-replay.sh` | 기록 → 재생 → 재출력이 원본과 키 단위로 동일 + 재생이 `/proc` 미접근 |
 | `check-turnover.sh` | 회전율·재적재율을 합성 BCB 스냅샷으로 검증: 재사용 없는 스캔은 재적재 0%, 큰 버퍼에서도 교체를 놓치지 않음 |
+| `check-ceiling.sh` | 관측 상한을 장치별로 기억·보존: 빠른 장치의 상한으로 느린 장치를 판정하지 않음 |
 | `check-ascii.sh` | `--ascii` 6개 출력모드에 한글 0, 한글 모드는 보존 |
 | `check-json.sh` | `--dump-json` 이 `-d` 와 키 집합·순서 동일 |
 | `check-offsets.sh` | 소스 오프셋 상수가 골든 표와 일치 |
