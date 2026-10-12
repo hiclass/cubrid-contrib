@@ -63,7 +63,7 @@ for mode in dash plot; do
     [ "$N" -lt $((HM-20)) ] && echo "  ok  line count has margin ($N < HELPMAX $HM - 20)" || { echo "  FAIL $N lines is at or near HELPMAX $HM"; bad=1; }
     printf '%s' "$LIVE" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && echo "  ok  UTF-8 intact" || { echo "  FAIL UTF-8 broken"; bad=1; }
     if [ $mode = dash ]; then
-        req="대시보드 · 키|환경변수 CUBRID|여러 데이터베이스|CPU 와 load|wa  iowait|D스레드 n/m|I/O 판정문|파라미터 귀속률|프로세스 박스가 PSS 인 이유|관측 등급|각 항목이 알려주는 것"
+        req="대시보드 · 키|환경변수 CUBRID|여러 데이터베이스|CPU 와 load|wa  iowait|D스레드 n/m|I/O 판정문|파라미터 귀속률|프로세스 박스 — top 과 같은 RSS|관측 등급|각 항목이 알려주는 것"
     else
         req="시계열 · 키|환경변수 CUBRID|여러 데이터베이스"
     fi

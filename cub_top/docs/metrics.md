@@ -4,17 +4,20 @@
 
 ## 프로세스 단위
 
-### RSS (Resident Set Size)
-프로세스가 물리 메모리에 올려둔 양. 출처 `/proc/<pid>/smaps_rollup:Rss` 또는 `status:VmRSS`.
+### RSS (Resident Set Size) — 프로세스·인스턴스·티어·합계에 쓰는 값
+프로세스가 물리 메모리에 올려둔 양(top 의 RES). 분석 대상 서버는 이번 프레임 `smaps` 의 Rss 합,
+그 밖의 CUBRID 프로세스(다른 서버·PL·master·broker·CAS)는 `status:VmRSS`(인스턴스 목록) 또는
+`stat` 의 24번째 필드(티어)입니다. 페이지 테이블을 걷지 않아 CAS 가 수천 개여도 프로세스당 수 µs 이고,
+매 프레임 그때의 값입니다.
 
-**주의**: 여러 프로세스가 공유하는 페이지를 각자 전부 계상합니다. broker/CAS가 수십 개인 CUBRID에서 RSS를 단순 합산하면 공유 라이브러리가 중복 계상되어 실제보다 크게 나옵니다.
+**주의**: 공유 페이지(libcubrid.so 등)를 프로세스마다 계상합니다. 그래서 RSS 합(티어 All, `total.cubrid_rss_bytes`)은
+top·ps 로 더한 값과 같고, 실제 점유의 **상한**입니다.
 
-### PSS (Proportional Set Size) — 합계에 쓰는 값
-공유 페이지를 **공유 프로세스 수로 나눠 배분한** 상주량. 출처 `smaps_rollup:Pss`.
+> 예: 라이브러리 10MB를 CAS 5개가 공유 → RSS 합산은 50MB(중복), PSS 합산은 10MB.
 
-> 예: 라이브러리 10MB를 CAS 5개가 공유 → RSS 합산은 50MB(중복), PSS 합산은 10MB(정확).
-
-cub_top이 "CUBRID 엔진 총합"을 낼 때는 **항상 PSS**를 씁니다. 프로세스 박스 제목의 `pss (shared mem apportioned)`가 이 뜻입니다.
+### PSS (Proportional Set Size) — 분석 대상 서버에만
+공유 페이지를 **공유 프로세스 수로 나눠 배분한** 상주량. 분석 대상 서버의 상세(`server.pss_kb`, 시계열 `server(PSS)`,
+영역 합계 라벨)에만 씁니다. CAS·PL 같은 주변 프로세스는 드릴다운 대상이 아니라 PSS 를 내지 않습니다.
 
 ### VmSize / mapped
 가상 주소 공간에 매핑된 양. 물리 메모리 사용과 무관합니다. 예약만 하고 안 쓰는 영역(glibc arena 3.3G)이 여기 잡힙니다.

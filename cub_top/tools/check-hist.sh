@@ -48,17 +48,17 @@ chk hist.db      region.data_buffer.rss_bytes   1 0
 chk hist.lg      region.log_buffer.rss_bytes    1 0
 chk hist.dyn     region.dynamic_heap.rss_bytes  1 0
 chk hist.dynmap  region.dynamic_heap.mapped_bytes 1 0
-chk hist.cub     total.cubrid_pss_bytes         1 0
+chk hist.cub     total.cubrid_rss_bytes         1 0
 chk hist.dbhot   region.data_buffer.hot_pct     1 0.05
 chk hist.minflt  server.minflt_per_s            1 0
 chk hist.majflt  server.majflt_per_s            1 0
 chk hist.devutil hostdev.util_pct                  1 0.05
-# Tier PSS (the source of the process box's delta and sparkline columns) == terse tier.*
-chk hist.pss_srv    tier.server_pss_bytes   1 0
-chk hist.pss_master tier.master_pss_bytes   1 0
-chk hist.pss_broker tier.broker_pss_bytes   1 0
-chk hist.pss_cas    tier.cas_pss_bytes      1 0
-chk hist.pss_pl     tier.pl_pss_bytes       1 0
+# Tier RSS (the source of the process box's delta and sparkline columns) == terse tier.*
+chk hist.rss_srv    tier.server_rss_bytes   1 0
+chk hist.rss_master tier.master_rss_bytes   1 0
+chk hist.rss_broker tier.broker_rss_bytes   1 0
+chk hist.rss_cas    tier.cas_rss_bytes      1 0
+chk hist.rss_pl     tier.pl_rss_bytes       1 0
 # BCB direct read: what the B/D panels and the verdict read must share its source with terse pgbuf.*/log.*
 if grep -q '^pgbuf.enabled=1' "$TMP/terse"; then
   chk hist.pg_dirty pgbuf.dirty                      1 0

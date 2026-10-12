@@ -250,38 +250,43 @@ typedef struct {
 
 /* Instance (database) enumeration.  /proc order is arbitrary, so instances are
    sorted by db name to keep the target stable across runs.  cub_pl is attributed
-   by the db name in its cmdline; cub_master belongs to no database. */
-#define MAXINST 8
+   by the db name in its cmdline; cub_master belongs to no database.  The list grows
+   with the servers found: none is left out. */
 typedef struct {
     int pid; char db[64];
-    double pss, rss;      /* Summary, collected for every instance */
-    double filemap;       /* Mapped file pages (Shared_Clean+Private_Clean): the share resident in the page cache */
-    double swap;          /* Swapped out (Swap) */
-    double pl_pss; int pl_n;
+    /* top/ps-level figures, for every instance (the analysed one in detail elsewhere) */
+    double rss;           /* Resident (VmRSS) */
+    double filemap;       /* File-backed resident (RssFile): the share resident in the page cache */
+    double swap;          /* Swapped out (VmSwap) */
+    double pl_rss; int pl_n;
 } inst_t;
-static inst_t g_inst[MAXINST]; static int g_ninst=0, g_cur=0;
+static inst_t *g_inst=NULL; static int g_ninst=0, g_inst_cap=0, g_cur=0;
+static int g_inst_lost=0;          /* Servers left out only because the list could not grow (out of memory) */
+static inst_t *inst_add(void){
+    if(g_ninst==g_inst_cap){
+        int nc=g_inst_cap?g_inst_cap*2:8;
+        inst_t *t=realloc(g_inst,sizeof *t*(size_t)nc);
+        if(!t){ g_inst_lost++; return NULL; }
+        g_inst=t; g_inst_cap=nc;
+    }
+    inst_t *x=&g_inst[g_ninst++]; memset(x,0,sizeof *x); return x;
+}
 static char g_cur_db[64]="";       /* The db scan_tiers attributes PL to */
 
-/* One smaps_rollup read per process (<1ms).
-   fm_out = Shared_Clean + Private_Clean: this process's share of the page cache,
-     which is not the kernel-wide "Cached" figure.
-   sw_out = Swap. */
-static double rollup_pss_rss(int pid,double *rss_out,double *fm_out,double *sw_out){
-    char p[64],buf[4096];
-    snprintf(p,sizeof p,"/proc/%d/smaps_rollup",pid);
-    double pss=0,rss=0,fm=0,sw=0;
+/* top/ps-level memory of a process: VmRSS, RssFile and VmSwap from /proc/PID/status, in
+   bytes.  No page-table walk, so the cost does not grow with the process's size. */
+static void status_mem(int pid,double *rss,double *file,double *swap){
+    char p[64],buf[4096]; snprintf(p,sizeof p,"/proc/%d/status",pid);
+    double r=0,f=0,w=0;
     if(read_file(p,buf,sizeof buf)>0){
         char*q; unsigned long v;
-        if((q=strstr(buf,"Pss:"))&&sscanf(q+4,"%lu",&v)==1) pss=v*1024.0;
-        if((q=strstr(buf,"Rss:"))&&sscanf(q+4,"%lu",&v)==1) rss=v*1024.0;
-        if((q=strstr(buf,"Shared_Clean:"))&&sscanf(q+13,"%lu",&v)==1) fm+=v*1024.0;
-        if((q=strstr(buf,"Private_Clean:"))&&sscanf(q+14,"%lu",&v)==1) fm+=v*1024.0;
-        if((q=strstr(buf,"Swap:"))&&sscanf(q+5,"%lu",&v)==1) sw=v*1024.0;
+        if((q=strstr(buf,"VmRSS:"))&&sscanf(q+6,"%lu",&v)==1) r=v*1024.0;
+        if((q=strstr(buf,"RssFile:"))&&sscanf(q+8,"%lu",&v)==1) f=v*1024.0;
+        if((q=strstr(buf,"VmSwap:"))&&sscanf(q+7,"%lu",&v)==1) w=v*1024.0;
     }
-    if(rss_out) *rss_out=rss;
-    if(fm_out) *fm_out=fm;
-    if(sw_out) *sw_out=sw;
-    return pss;
+    if(rss) *rss=r;
+    if(file) *file=f;
+    if(swap) *swap=w;
 }
 /* Take the second cmdline token (the db name) */
 static void cmd_db(int pid,char*out,size_t n){
@@ -293,91 +298,62 @@ typedef struct { double master,broker,cas,pl,server_rss; int npl,ncas;
     /* CPU per tier in cores, so "who is using CPU" reads on the same row as memory */
     double cpu_master,cpu_broker,cpu_cas,cpu_pl;
 } tier_t;
-static double tcpu_delta(int pid,double dt);
+static double tcpu_delta(int pid,double dt,double *rss);
+static double stat_rss(int pid);
+static void tcpu_sweep(void);
 static tier_t *g_enum_T=NULL; static double g_enum_dt=0;   /* For the pass 2 tier aggregation */
-/* One rollup per CUBRID process, shared by the instance list and the tier totals.  The
-   target server's comes from this frame's smaps (g_tgt_*); the current database's PL and
-   the master are read every frame; other processes - other databases, brokers, CAS - are
-   context rather than the analysed instance and are re-read every RU_EVERY enumerations. */
-#define RU_EVERY 4
-#define RU_MAX 512
-typedef struct { int pid; double pss,rss,fm,sw; int age,seen; } ru_t;
-static ru_t g_ru[RU_MAX]; static int g_run=0;
-static unsigned g_enum_epoch=0;            /* Enumerations so far */
-static int g_tgt_pid=-1; static unsigned g_tgt_epoch=~0u;
-static double g_tgt_pss,g_tgt_rss,g_tgt_fm,g_tgt_sw;
-static double ru_get(int pid,int every_frame,double*rss,double*fm,double*sw){
-    double r_=0,f_=0,w_=0,p_;
-    if(pid==g_tgt_pid && g_tgt_epoch==g_enum_epoch){
-        p_=g_tgt_pss; r_=g_tgt_rss; f_=g_tgt_fm; w_=g_tgt_sw;
-    } else {
-        ru_t *e=NULL;
-        for(int i=0;i<g_run;i++) if(g_ru[i].pid==pid){ e=&g_ru[i]; break; }
-        if(!e && g_run<RU_MAX){ e=&g_ru[g_run++]; memset(e,0,sizeof *e); e->pid=pid; e->age=RU_EVERY; }
-        if(!e) p_=rollup_pss_rss(pid,&r_,&f_,&w_);
-        else {
-            if(every_frame || e->age>=RU_EVERY){ e->pss=rollup_pss_rss(pid,&e->rss,&e->fm,&e->sw); e->age=0; }
-            e->seen=1; p_=e->pss; r_=e->rss; f_=e->fm; w_=e->sw;
-        }
-    }
-    if(rss) *rss=r_;
-    if(fm) *fm=f_;
-    if(sw) *sw=w_;
-    return p_;
-}
-enum { PK_SERVER=1, PK_PL, PK_MASTER, PK_BROKER, PK_CAS };
+/* One /proc walk, each process handled as it is met; nothing is kept but the instance list.
+   Processes other than the analysed server are shown at the level of top and ps - RSS
+   and CPU, read every frame - since they are context, not drilled into.
+   A cub_pl joins its database's record: whichever of the server and the PL the walk meets
+   first creates it (a PL first leaves pid -1 for the server to fill), and a record that
+   ends with no server is dropped. */
 static int enum_instances(void){
-    g_ninst=0;
-    for(int i=0;i<g_run;i++){ g_ru[i].age++; g_ru[i].seen=0; }
-    /* One /proc walk collects every CUBRID process; servers are needed before PL attribution */
-    static struct { int pid,kind; } pk[RU_MAX]; int npk=0;
+    g_ninst=0; g_inst_lost=0;
     DIR *d=opendir("/proc"); if(!d) return 0;
     struct dirent *e; char p[300],b[256];
-    while((e=readdir(d)) && npk<RU_MAX){
+    while((e=readdir(d))){
         if(e->d_name[0]<'0'||e->d_name[0]>'9') continue;
         snprintf(p,sizeof p,"/proc/%.20s/comm",e->d_name);
         if(read_file(p,b,sizeof b)<=0) continue;
         char*nl=strchr(b,'\n'); if(nl)*nl=0;
-        int k = !strcmp(b,"cub_server")?PK_SERVER : !strncmp(b,"cub_pl",6)?PK_PL :
-                !strcmp(b,"cub_master")?PK_MASTER : !strcmp(b,"cub_broker")?PK_BROKER :
-                !strcmp(b,"cub_cas")?PK_CAS : 0;
-        if(k){ pk[npk].pid=atoi(e->d_name); pk[npk].kind=k; npk++; }
-    }
-    closedir(d);
-    for(int i=0;i<npk;i++){
-        if(pk[i].kind!=PK_SERVER || g_ninst>=MAXINST) continue;
-        inst_t*x=&g_inst[g_ninst];
-        memset(x,0,sizeof *x);
-        x->pid=pk[i].pid;
-        cmd_db(x->pid,x->db,sizeof x->db);
-        if(!x->db[0]) snprintf(x->db,sizeof x->db,"-");
-        x->pss=ru_get(x->pid,0,&x->rss,&x->filemap,&x->swap);
-        g_ninst++;
-    }
-    for(int i=0;i<npk;i++){                     /* PL attribution and tier aggregation together */
-        int pid=pk[i].pid;
-        if(pk[i].kind==PK_PL){
+        int pid=atoi(e->d_name);
+        if(!strcmp(b,"cub_server")){
             char db[64]; cmd_db(pid,db,sizeof db);
-            int cur = !g_cur_db[0] || !strcmp(db,g_cur_db);
-            double pl=ru_get(pid,cur,NULL,NULL,NULL);
-            for(int j=0;j<g_ninst;j++)
-                if(!strcmp(g_inst[j].db,db)){ g_inst[j].pl_pss+=pl; g_inst[j].pl_n++; break; }
-            /* Only the current DB's PL is counted in the tiers */
-            if(g_enum_T && cur){
-                g_enum_T->pl+=pl; g_enum_T->npl++;
-                g_enum_T->cpu_pl+=tcpu_delta(pid,g_enum_dt);
-            }
+            if(!db[0]) snprintf(db,sizeof db,"-");
+            inst_t *x=NULL;
+            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid<0 && !strcmp(g_inst[i].db,db)){ x=&g_inst[i]; break; }
+            if(!x){ x=inst_add(); if(!x) continue; snprintf(x->db,sizeof x->db,"%s",db); }
+            x->pid=pid;
+            status_mem(pid,&x->rss,&x->filemap,&x->swap);
             continue;
         }
-        if(!g_enum_T || pk[i].kind==PK_SERVER) continue;
-        double pss=ru_get(pid,pk[i].kind==PK_MASTER,NULL,NULL,NULL);
-        if(pk[i].kind==PK_MASTER){ g_enum_T->master+=pss; g_enum_T->cpu_master+=tcpu_delta(pid,g_enum_dt); }
-        else if(pk[i].kind==PK_BROKER){ g_enum_T->broker+=pss; g_enum_T->cpu_broker+=tcpu_delta(pid,g_enum_dt); }
-        else { g_enum_T->cas+=pss; g_enum_T->ncas++; g_enum_T->cpu_cas+=tcpu_delta(pid,g_enum_dt); }
+        if(!strncmp(b,"cub_pl",6)){
+            char db[64]; cmd_db(pid,db,sizeof db);
+            int cur = g_enum_T && (!g_cur_db[0] || !strcmp(db,g_cur_db));
+            double pl=0, cpu = cur ? tcpu_delta(pid,g_enum_dt,&pl) : 0;
+            if(!cur) pl=stat_rss(pid);
+            inst_t *x=NULL;
+            for(int i=0;i<g_ninst;i++) if(!strcmp(g_inst[i].db,db)){ x=&g_inst[i]; break; }
+            if(!x && (x=inst_add())!=NULL){ x->pid=-1; snprintf(x->db,sizeof x->db,"%s",db); }
+            if(x){ x->pl_rss+=pl; x->pl_n++; }
+            /* Only the current DB's PL is counted in the tiers */
+            if(cur){ g_enum_T->pl+=pl; g_enum_T->npl++; g_enum_T->cpu_pl+=cpu; }
+            continue;
+        }
+        if(!g_enum_T) continue;
+        int is_master=!strcmp(b,"cub_master"), is_broker=!strcmp(b,"cub_broker");
+        int is_cas=!strcmp(b,"cub_cas");
+        if(!is_master&&!is_broker&&!is_cas) continue;
+        /* One /proc/PID/stat read gives both CPU ticks and RSS, as top reads it */
+        double rss=0, cpu=tcpu_delta(pid,g_enum_dt,&rss);
+        if(is_master){ g_enum_T->master+=rss; g_enum_T->cpu_master+=cpu; }
+        else if(is_broker){ g_enum_T->broker+=rss; g_enum_T->cpu_broker+=cpu; }
+        else { g_enum_T->cas+=rss; g_enum_T->ncas++; g_enum_T->cpu_cas+=cpu; }
     }
-    /* Processes gone since the last walk leave the cache */
-    { int m=0; for(int i=0;i<g_run;i++) if(g_ru[i].seen) g_ru[m++]=g_ru[i]; g_run=m; }
-    g_enum_epoch++;
+    closedir(d);
+    if(g_enum_T) tcpu_sweep();
+    { int m=0; for(int i=0;i<g_ninst;i++) if(g_inst[i].pid>=0) g_inst[m++]=g_inst[i]; g_ninst=m; }
     for(int i=0;i<g_ninst;i++) for(int j=i+1;j<g_ninst;j++)    /* Alphabetical by db */
         if(strcmp(g_inst[i].db,g_inst[j].db)>0){
             inst_t t=g_inst[i]; g_inst[i]=g_inst[j]; g_inst[j]=t; }
@@ -432,13 +408,9 @@ static void parse_smaps(proc_t *P){
 /* Use rollup where present, otherwise sum smaps (old-kernel fallback) */
 static void parse_rollup(proc_t *P){
     P->rss_kb=P->pss_kb=P->swap_kb=0;
-    /* This frame's smaps already gives the totals: smaps_rollup is not read again, and the
-       instance list takes the same figures (ru_get) */
+    /* This frame's smaps already gives the totals: smaps_rollup is not read again */
     if(P->smaps_ok && P->s_rss_kb){
         P->rss_kb=P->s_rss_kb; P->pss_kb=P->s_pss_kb; P->swap_kb=P->s_swap_kb;
-        g_tgt_pid=P->pid; g_tgt_epoch=g_enum_epoch;
-        g_tgt_pss=P->s_pss_kb*1024.0; g_tgt_rss=P->s_rss_kb*1024.0;
-        g_tgt_fm=P->s_clean_kb*1024.0; g_tgt_sw=P->s_swap_kb*1024.0;
         return;
     }
     if(CAP.rollup){
@@ -2824,41 +2796,49 @@ static void grade_dynamic_heap(void){
 /* ---------------- Process tier totals ---------------- */
 /* tier_t is defined earlier in the file, for the combined enum_instances pass */
 /* Cumulative process CPU ticks; the delta comes from the previous value found by name and pid. */
-#define TCPUMAX 64
-static struct { int pid; unsigned long ticks; } g_tcpu[TCPUMAX];
-static int g_tcpun=0;
-static unsigned long proc_ticks(int pid){
+/* Grows with the processes seen; an entry whose process was not met in the last walk is
+   dropped (tcpu_sweep), so the table holds the live processes and no process is left out. */
+typedef struct { int pid; unsigned long ticks; int seen; } tcpu_t;
+static tcpu_t *g_tcpu=NULL; static int g_tcpun=0, g_tcpucap=0;
+/* CPU ticks (fields 14+15) and RSS (field 24, pages) from one /proc/PID/stat read */
+static unsigned long proc_ticks(int pid,double *rss){
     char p[64],b[512]; snprintf(p,sizeof p,"/proc/%d/stat",pid);
+    if(rss) *rss=0;
     if(read_file(p,b,sizeof b)<=0) return 0;
     char *q=strrchr(b,')'); if(!q) return 0;
     q+=2; unsigned long f[24]; int n=0;
     char *tok=strtok(q," ");
     while(tok&&n<24){ f[n++]=strtoul(tok,NULL,10); tok=strtok(NULL," "); }
-    return (n>12)? f[11]+f[12] : 0;      /* field14+15 */
+    if(rss && n>21){ static long pg=0; if(!pg){ pg=sysconf(_SC_PAGESIZE); if(pg<=0) pg=4096; }
+                     *rss=(double)f[21]*(double)pg; }
+    return (n>12)? f[11]+f[12] : 0;
 }
-static double tcpu_delta(int pid,double dt){
-    unsigned long cur=proc_ticks(pid), prev=0; int hit=-1;
-    for(int i=0;i<g_tcpun;i++) if(g_tcpu[i].pid==pid){ prev=g_tcpu[i].ticks; hit=i; break; }
-    if(hit<0){
-        if(g_tcpun>=TCPUMAX){
-            /* Full: drop entries whose process is gone.  Without this the table
-               stays full of dead CAS pids and every new process reports 0 cores
-               for the rest of the run - CAS churn reaches TCPUMAX on a busy
-               broker tier well before the concurrent limit does. */
-            int w=0;
-            for(int i=0;i<g_tcpun;i++){
-                char sp[64]; snprintf(sp,sizeof sp,"/proc/%d",g_tcpu[i].pid);
-                if(!access(sp,F_OK)) g_tcpu[w++]=g_tcpu[i];
-            }
-            g_tcpun=w;
-            if(g_tcpun>=TCPUMAX) g_tcpun=0;   /* all still live: start over rather than freeze */
+static double stat_rss(int pid){ double r; (void)proc_ticks(pid,&r); return r; }
+/* The table is kept in pid order and searched by bisection; a new pid is inserted in place */
+static double tcpu_delta(int pid,double dt,double *rss){
+    unsigned long cur=proc_ticks(pid,rss);
+    int lo=0, hi=g_tcpun;
+    while(lo<hi){ int m=(lo+hi)/2; if(g_tcpu[m].pid<pid) lo=m+1; else hi=m; }
+    if(lo>=g_tcpun || g_tcpu[lo].pid!=pid){        /* First sight: the baseline, no delta yet */
+        if(g_tcpun==g_tcpucap){
+            int nc=g_tcpucap?g_tcpucap*2:64;
+            tcpu_t *t=realloc(g_tcpu,sizeof *t*(size_t)nc);
+            if(!t) return 0.0;
+            g_tcpu=t; g_tcpucap=nc;
         }
-        if(g_tcpun<TCPUMAX){ g_tcpu[g_tcpun].pid=pid; g_tcpu[g_tcpun].ticks=cur; g_tcpun++; }
+        memmove(&g_tcpu[lo+1],&g_tcpu[lo],sizeof *g_tcpu*(size_t)(g_tcpun-lo));
+        g_tcpu[lo].pid=pid; g_tcpu[lo].ticks=cur; g_tcpu[lo].seen=1; g_tcpun++;
         return 0.0; }
-    g_tcpu[hit].ticks=cur;
+    unsigned long prev=g_tcpu[lo].ticks;
+    g_tcpu[lo].ticks=cur; g_tcpu[lo].seen=1;
     long hz=sysconf(_SC_CLK_TCK); if(hz<=0) hz=100;
     if(cur<prev||dt<=0) return 0.0;
     return (double)(cur-prev)/hz/dt;      /* Core count */
+}
+/* After a walk: keep the processes met in it */
+static void tcpu_sweep(void){
+    int m=0; for(int i=0;i<g_tcpun;i++) if(g_tcpu[i].seen){ g_tcpu[i].seen=0; g_tcpu[m++]=g_tcpu[i]; }
+    g_tcpun=m;
 }
 static void scan_tiers(tier_t *T,double dt){
     /* The work is done by enum_instances pass 2 (one /proc walk and one rollup per
@@ -2936,7 +2916,7 @@ static const char* L(const char*ko){
          vs full physical) differ in the title itself, so the gap between the total and
          PSS is less likely to be misread. */
       {"RSS · 서버","RSS · server"},
-      {"성장 추이","growth"},{"PSS · 프로세스","PSS · processes"},
+      {"성장 추이","growth"},{"RSS · 프로세스","RSS · processes"},
       {"I/O · cub_server + 최다사용 장치","i/o · cub_server + busiest device"},
       {"동적 메모리 상세 (B) — 자동 갱신","dynamic heap · method B — per frame"},
       {"호스트 CPU · 사용 코어 · 포화 코어 · load","host CPU · busy cores · saturated · load"},
@@ -3303,9 +3283,9 @@ typedef struct {
     double c_master,c_pl,c_broker,c_cas;   /* CPU per tier, in cores */
     /* BCB direct read - the basis for the B (fill) and D (drain) panels and the
        verdict.  A frame with the snapshot inactive has pg_ok=0 and zero values. */
-    /* PSS per tier - the delta and sparkline columns of the process box (what is growing).
+    /* RSS per tier - the delta and sparkline columns of the process box (what is growing).
        These are the only graphed view of the broker/CAS/PL trends. */
-    double pss_srv, pss_master, pss_pl, pss_broker, pss_cas;
+    double rss_srv, rss_master, rss_pl, rss_broker, rss_cas;
     /* Capacity axis, read by plots B and D and by the verdict */
     double cap_iops, cap_await, cap_hit, cap_miss, cap_head;
     int    pg_ok;
@@ -3333,7 +3313,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     hsam_t*s=&HS[HN++];
     memset(s,0,sizeof *s);
     s->t=t;
-    s->srv     = P->pss_kb*1024.0 + T->master;      /* The existing growth trend series (PSS) is kept */
+    s->srv     = P->pss_kb*1024.0;                  /* The analysed server's PSS: the growth trend */
     s->srv_rss = P->rss_kb*1024.0;                  /* Denominator of the composition total */
     s->rss     = P->rss_kb*1024.0;
     s->vsz     = P->vsize_kb*1024.0;
@@ -3357,7 +3337,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->cpu     = IO->cpu_pct;
     s->ram     = (double)M->total*1024.0;
     s->osused  = (double)(M->total-M->avail)*1024.0;
-    s->cub     = P->pss_kb*1024.0 + T->master + T->broker + T->cas + T->pl;
+    s->cub     = P->rss_kb*1024.0 + T->master + T->broker + T->cas + T->pl;   /* RSS, as top */
     /* CPU and I/O extension, holding the dashboard's values in the dashboard's units. */
     s->busy_cores = M->busy_cores;
     s->sat_cores  = (double)M->sat_cores;
@@ -3370,8 +3350,8 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->c_pl       = T->cpu_pl;
     s->c_broker   = T->cpu_broker;
     s->c_cas      = T->cpu_cas;
-    s->pss_srv=P->pss_kb*1024.0; s->pss_master=T->master; s->pss_pl=T->pl;
-    s->pss_broker=T->broker; s->pss_cas=T->cas;
+    s->rss_srv=P->rss_kb*1024.0; s->rss_master=T->master; s->rss_pl=T->pl;
+    s->rss_broker=T->broker; s->rss_cas=T->cas;
     s->cap_iops=CAP2.dev_iops; s->cap_await=CAP2.await_ms<0?0:CAP2.await_ms;
     s->cap_readmit=CAP2.readmit_pct<0?0:CAP2.readmit_pct;
     s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps<0?0:CAP2.miss_pps;
@@ -3399,14 +3379,14 @@ static void hist_dump_last(void){
         "hist.dbhot=%.1f hist.minflt=%.0f hist.majflt=%.0f hist.rbps=%.0f hist.wbps=%.0f\n"
         "hist.devutil=%.1f hist.absorb=%.1f hist.absorb_ok=%d hist.hot_ok=%d\n"
         "hist.pg_ok=%d hist.pg_res_pct=%.2f hist.pg_dirty=%.0f hist.pg_cold_pct=%.2f hist.pg_span=%.0f hist.pg_lag=%.0f\n"
-        "hist.pss_srv=%.0f hist.pss_master=%.0f hist.pss_pl=%.0f hist.pss_broker=%.0f hist.pss_cas=%.0f\n"
+        "hist.rss_srv=%.0f hist.rss_master=%.0f hist.rss_pl=%.0f hist.rss_broker=%.0f hist.rss_cas=%.0f\n"
         "hist.cap_iops=%.0f hist.cap_await=%.2f hist.cap_hit=%.2f hist.cap_miss=%.0f hist.cap_head=%.1f\n",
         s->srv_rss,s->db,s->lg,s->dyn,s->etc,
         s->dynmap,s->vsz,s->rss,s->cub,s->osused,
         s->dbhot,s->minflt,s->majflt,s->rbps,s->wbps,
         s->devutil,s->absorb,s->absorb_ok,s->hot_ok,
         s->pg_ok,s->pg_res_pct,s->pg_dirty,s->pg_cold_pct,s->pg_span,s->pg_lag,
-        s->pss_srv,s->pss_master,s->pss_pl,s->pss_broker,s->pss_cas,
+        s->rss_srv,s->rss_master,s->rss_pl,s->rss_broker,s->rss_cas,
         s->cap_iops,s->cap_await,s->cap_hit,s->cap_miss,s->cap_head);
 }
 static double hist_peak(int which,double floor_v){
@@ -4702,8 +4682,15 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
        the process and trend boxes are set side by side, saving 6 rows.
        Below 100 columns halves do not work (sparklines, legends), so no compaction. */
     int compact=0;
+    /* Instance rows in the OS box: every instance when the screen has room, otherwise as many
+       as fit with the last row summarising the rest.  A limit of the screen, not of the
+       collection - the dump lists every instance. */
+    int irows = g_ninst>0 ? g_ninst : 0;
     { int trows=term_h();
-      int need = 1 + (4+(g_ninst>0?g_ninst:0)) + 7 + (NSR>0?NSR+3:4) + 11 + 6 + 8 + 9 + 2;
+      int base = 1 + 4 + 7 + (NSR>0?NSR+3:4) + 11 + 6 + 8 + 9 + 2;
+      if(trows>=8){ int room = trows - base + (W>=100?6:0); if(room<2) room=2;
+                    if(irows>room) irows=room; }
+      int need = base + irows;
       if(trows>=8 && trows<need && W>=100) compact=1; }
     /* ---- Top time line, outside the boxes ----
        Left: this frame's collection work time.  Right: the current time.
@@ -4722,7 +4709,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     /* ---- OS context; no lens marker, since the lens is a regions-only axis ---- */
     /* The instance list lives in the OS box: what is running on this host and how much
        each uses is an OS-level fact.  The boxes below analyse the selected one. */
-    int oh = 4 + (g_ninst>0 ? g_ninst : 0);   /* +1 for the CPU row */
+    int oh = 4 + irows;   /* +1 for the CPU row */
     /* load is host-wide and includes I/O waiting, so it goes in the title rather than a
        column.  The right of the title is taken by column headings, so it follows the
        left title. */
@@ -4811,15 +4798,19 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     /* ---- Per-instance usage, on the same scale and columns as total memory ---- */
     if(g_ninst>0){
         int VX=W-1-(os_wide?45:29);
-        for(int i=0;i<g_ninst;i++){
-            int yy=y+3+i, cur=(i==g_cur);   /* One more row ahead, for CPU */
-            double iv=g_inst[i].pss+g_inst[i].pl_pss;       /* Instance total, PL included */
+        /* With more instances than rows, the last row summarises the rest; the instance in
+           view always keeps its row */
+        int shown = irows<g_ninst ? irows-1 : g_ninst;
+        for(int slot=0;slot<shown;slot++){
+            int i = (slot==shown-1 && g_cur>=shown && shown<g_ninst) ? g_cur : slot;
+            int yy=y+3+slot, cur=(i==g_cur);   /* One more row ahead, for CPU */
+            double iv=g_inst[i].rss+g_inst[i].pl_rss;       /* Instance total (RSS, as top), PL included */
             char nm[80],v[80];
             snprintf(nm,sizeof nm," %s ",g_inst[i].db);     /* Background colour padding on both sides */
             cv_put(2,yy,padf(cutf(nm,10),10,0), cur?"1;38;5;231;48;5;24":"38;5;250");
             /* PL is a breakdown of that instance's total, set beside the name to make the membership clear */
             if(g_inst[i].pl_n>0){
-                char pl[24]; snprintf(pl,sizeof pl,"(PL %s)",HC(g_inst[i].pl_pss));
+                char pl[24]; snprintf(pl,sizeof pl,"(PL %s)",HC(g_inst[i].pl_rss));
                 cv_put(13,yy,padf(pl,11,0),"38;5;244");
             }
             cv_meter(25,yy,VX-26,mt>0?iv/mt:0,0);
@@ -4838,6 +4829,12 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                          g_inst[i].swap>0?H(g_inst[i].swap):"0");
             cv_put(VX,yy,v,"38;5;250");
         }
+        if(shown<g_ninst){
+            char more[96];
+            snprintf(more,sizeof more,g_ascii?" ... %d more instances (< > to switch, -d lists all)"
+                                             :" … 외 인스턴스 %d개 (< > 로 전환, 전체는 -d)",g_ninst-shown);
+            cv_put(2,y+3+shown,cutf(more,W-4),"38;5;244");
+        }
     }
     /* Parameter attribution describes the selected instance's region composition, not the
        whole OS (85% on one DB against 92% on another), so it moved to the region box
@@ -4849,10 +4846,9 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     {
         const int bx=cbx, bw=cbw;
         const int nmw = (bw>=100) ? 22 : 14;        /* Name column width, narrowed in a half-width layout */
-        /* The title says PSS, so the server row is PSS too and the row total matches the
-           CUBRID total exactly.  The instance list moved to the OS box; this box shows
-           only the selected instance's composition. */
-        double srv=P->pss_kb*1024.0;
+        /* RSS per process tier, as top shows it (shared pages count in each process).  The
+           server row is RSS too, so the row total matches the CUBRID total exactly. */
+        double srv=P->rss_kb*1024.0;
         char n_srv[96];
         snprintf(n_srv,sizeof n_srv,"%sserver",T->master>0?"  ├ ":"▾ ");
         int nr=2+(T->npl>0?1:0)+(T->master>0?1:0)+(T->ncas>0?1:0), ph=nr+2;
@@ -4872,7 +4868,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
              from being added by eye. */
           if(HN>=4) snprintf(rt,sizeof rt,"%s%s │ All %8s",g_ascii?"d":"Δ",wt2,HM(ptot));
           else      snprintf(rt,sizeof rt,"All %8s",HM(ptot));
-          cv_box2(bx,y,bw,ph,L("PSS · 프로세스"),rt); }
+          cv_box2(bx,y,bw,ph,L("RSS · 프로세스"),rt); }
         double mx=srv;
         if(T->broker>mx)mx=T->broker;
         if(T->cas>mx)mx=T->cas;
@@ -4898,7 +4894,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         nm[k]=T->master>0?"  └ broker":"▾ broker"; cc[k]=T->cpu_broker; hk[k]=3; vv[k++]=T->broker;
         if(T->ncas>0){ nm[k]=nar?n_cas2:n_cas; cc[k]=T->cpu_cas; hk[k]=4; vv[k++]=T->cas; }
         /* Tier history accessor: hk index to hsam_t field */
-        #define TIER_HS(smp,idx) ((idx)==0?(smp)->pss_srv:(idx)==1?(smp)->pss_master:(idx)==2?(smp)->pss_pl:(idx)==3?(smp)->pss_broker:(smp)->pss_cas)
+        #define TIER_HS(smp,idx) ((idx)==0?(smp)->rss_srv:(idx)==1?(smp)->rss_master:(idx)==2?(smp)->rss_pl:(idx)==3?(smp)->rss_broker:(smp)->rss_cas)
         /* Same rule as panel A's verdict: growth above 5% across the window while load stays flat */
         int load_flat = !(HN>=4 && HS[HN-1].load1 > HS[0].load1*1.3 && HS[HN-1].load1>=1.0);
         /* The total goes at the right of the box title rather than in a row; see cv_box2 below */
@@ -5463,11 +5459,11 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
                         double devr,const char *ts,double rchar_bps,double work_ms,
                         double cpu_pct,int ncpu){
     double mt=M->total*1024.0, av=M->avail*1024.0, used=mt-av;
-    /* PSS on the same basis as the dashboard's process box, so one label never carries two
-       values.  RSS double-counts shared pages and the tier totals would not match. */
-    double srv=P->pss_kb*1024.0+T->master;
+    /* Process totals are RSS, as top shows them, on the same basis as the dashboard's process
+       box; only the analysed server's own breakdown below goes into smaps detail. */
+    double srv=P->rss_kb*1024.0+T->master;
     double brk=T->broker+T->cas;
-    double cub=P->pss_kb*1024.0+T->master+T->broker+T->cas+T->pl;
+    double cub=P->rss_kb*1024.0+T->master+T->broker+T->cas+T->pl;
 
     printf(g_ascii?"CUBRID memory drilldown (C)  db=%s  pid=%d  ⏱ %s\n"
                   :"CUBRID 메모리 드릴다운 (C)  db=%s  pid=%d  ⏱ %s\n",P->db,P->pid,ts);
@@ -5476,7 +5472,7 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
         printf(g_ascii?"  %d instances:":"  인스턴스 %d개:",g_ninst);
         for(int i=0;i<g_ninst;i++)
             printf(" %s%s %s%s", i==g_cur?"▶":"", g_inst[i].db,
-                   H(g_inst[i].pss+g_inst[i].pl_pss), i<g_ninst-1?" ·":"");
+                   H(g_inst[i].rss+g_inst[i].pl_rss), i<g_ninst-1?" ·":"");
         printf(g_ascii?"   (detail = %s — other DBs: 'cub_top <db>')\n"
                       :"   (상세는 %s — 다른 DB 는 'cub_top <db명>')\n",P->db);
     }
@@ -5976,23 +5972,23 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     for(int i=0;i<g_ninst;i++){
         char k[64];
         inst_key(i,k,sizeof k);
-        printf("instance.%s.pid=%d instance.%s.pss_bytes=%.0f instance.%s.rss_bytes=%.0f"
-               " instance.%s.pl_pss_bytes=%.0f instance.%s.pl_count=%d instance.%s.tracked=%d\n",
-               k,g_inst[i].pid,k,g_inst[i].pss,k,g_inst[i].rss,
-               k,g_inst[i].pl_pss,k,g_inst[i].pl_n,k,i==g_cur?1:0);
+        printf("instance.%s.pid=%d instance.%s.rss_bytes=%.0f instance.%s.file_bytes=%.0f instance.%s.swap_bytes=%.0f"
+               " instance.%s.pl_rss_bytes=%.0f instance.%s.pl_count=%d instance.%s.tracked=%d\n",
+               k,g_inst[i].pid,k,g_inst[i].rss,k,g_inst[i].filemap,k,g_inst[i].swap,
+               k,g_inst[i].pl_rss,k,g_inst[i].pl_n,k,i==g_cur?1:0);
     }
     if(P->pid<0){
         for(int i=0;i<g_nprm;i++)
             printf("conf.%s=%lld\n",g_prm[i].name,g_prm[i].val);
         if(devnm[0]) printf("hostdev.name=%s hostdev.util_pct=%.1f\n",devnm,devutil);
-        printf("tier.server_pss_bytes=0 tier.master_pss_bytes=%.0f tier.broker_pss_bytes=%.0f"
-               " tier.cas_pss_bytes=%.0f tier.cas_count=%d tier.pl_pss_bytes=%.0f tier.pl_count=%d\n",
+        printf("tier.server_rss_bytes=0 tier.master_rss_bytes=%.0f tier.broker_rss_bytes=%.0f"
+               " tier.cas_rss_bytes=%.0f tier.cas_count=%d tier.pl_rss_bytes=%.0f tier.pl_count=%d\n",
                T->master,T->broker,T->cas,T->ncas,T->pl,T->npl);
         /* CPU per tier, in cores (the same unit as os.cpu_busy_cores). */
         printf("tier.master_cores=%.2f tier.broker_cores=%.2f"
                " tier.cas_cores=%.2f tier.pl_cores=%.2f tier.server_cores=0.00\n",
                T->cpu_master,T->cpu_broker,T->cpu_cas,T->cpu_pl);
-        printf("total.cubrid_pss_bytes=%.0f\n",T->master+T->broker+T->cas+T->pl);
+        printf("total.cubrid_rss_bytes=%.0f\n",T->master+T->broker+T->cas+T->pl);
         return;
     }
     { char ds[64]; terse_slug(P->db,ds,sizeof ds);
@@ -6117,18 +6113,18 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         if(v>=0) printf("param.%s=%lld param.%s.observed=%d\n",
                         PRMROWS[i].name,v,PRMROWS[i].name,PRMROWS[i].obs);
     }
-    /* A total alone cannot say which tier grew, so PSS is emitted per tier */
-    printf("tier.server_pss_bytes=%.0f tier.master_pss_bytes=%.0f tier.broker_pss_bytes=%.0f"
-           " tier.cas_pss_bytes=%.0f tier.cas_count=%d tier.pl_pss_bytes=%.0f tier.pl_count=%d\n",
-           P->pss_kb*1024.0,T->master,T->broker,T->cas,T->ncas,T->pl,T->npl);
+    /* A total alone cannot say which tier grew, so RSS (as top) is emitted per tier */
+    printf("tier.server_rss_bytes=%.0f tier.master_rss_bytes=%.0f tier.broker_rss_bytes=%.0f"
+           " tier.cas_rss_bytes=%.0f tier.cas_count=%d tier.pl_rss_bytes=%.0f tier.pl_count=%d\n",
+           P->rss_kb*1024.0,T->master,T->broker,T->cas,T->ncas,T->pl,T->npl);
     /* CPU per tier, in cores (the same unit as os.cpu_busy_cores).
        server is server.cpu_pct (one core = 100) divided by 100 to match. */
     printf("tier.server_cores=%.2f tier.master_cores=%.2f tier.broker_cores=%.2f"
            " tier.cas_cores=%.2f tier.pl_cores=%.2f\n",
            rnd_as_printed(cpu_pct,1)/100.0,T->cpu_master,T->cpu_broker,T->cpu_cas,T->cpu_pl);
-    printf("total.cubrid_pss_bytes=%.0f total.cubrid_pct_ram=%.2f\n",
-           P->pss_kb*1024.0+T->master+T->broker+T->cas+T->pl,
-           (P->pss_kb*1024.0+T->master+T->broker+T->cas+T->pl)/(mt>0?mt:1)*100);
+    printf("total.cubrid_rss_bytes=%.0f total.cubrid_pct_ram=%.2f\n",
+           P->rss_kb*1024.0+T->master+T->broker+T->cas+T->pl,
+           (P->rss_kb*1024.0+T->master+T->broker+T->cas+T->pl)/(mt>0?mt:1)*100);
     (void)av;
 }
 
@@ -6188,6 +6184,12 @@ static int rp_find(const char *txt,const char *key,char *out,size_t on){
     }
     if(vl>=on) vl=on-1;
     memcpy(out,v,vl); out[vl]=0; return 1;
+}
+static double rp_num(const char *txt,const char *key,double dflt);
+/* A key renamed since older recordings: the current name, else the old one */
+static double rp_num2(const char *txt,const char *key,const char *old,double dflt){
+    double v=rp_num(txt,key,-1e300);
+    return v>-1e299 ? v : rp_num(txt,old,dflt);
 }
 static double rp_num(const char *txt,const char *key,double dflt){
     char b[128]; if(!rp_find(txt,key,b,sizeof b)) return dflt;
@@ -6290,11 +6292,12 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     IO->d_thr =(int)rp_num(t,"server.d_threads",0);
     IO->n_thr =(int)rp_num(t,"server.threads_total",0);
 
-    T->server_rss=rp_num(t,"tier.server_pss_bytes",0);
-    T->master=rp_num(t,"tier.master_pss_bytes",0);
-    T->broker=rp_num(t,"tier.broker_pss_bytes",0);
-    T->cas   =rp_num(t,"tier.cas_pss_bytes",0);
-    T->pl    =rp_num(t,"tier.pl_pss_bytes",0);
+    /* Tier figures are RSS; recordings made before that carried PSS under *_pss_bytes */
+    T->server_rss=rp_num2(t,"tier.server_rss_bytes","tier.server_pss_bytes",0);
+    T->master=rp_num2(t,"tier.master_rss_bytes","tier.master_pss_bytes",0);
+    T->broker=rp_num2(t,"tier.broker_rss_bytes","tier.broker_pss_bytes",0);
+    T->cas   =rp_num2(t,"tier.cas_rss_bytes","tier.cas_pss_bytes",0);
+    T->pl    =rp_num2(t,"tier.pl_rss_bytes","tier.pl_pss_bytes",0);
     T->ncas  =(int)rp_num(t,"tier.cas_count",0);
     T->npl   =(int)rp_num(t,"tier.pl_count",0);
     T->cpu_master=rp_num(t,"tier.master_cores",0);
@@ -6470,10 +6473,11 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* Version and instance identity belong to the recording, not to this host. */
     rp_str(t,"cubrid.version",g_cver,sizeof g_cver);
     if(!strcmp(g_cver,"unknown")) g_cver[0]=0;
-    g_ninst=1;
-    snprintf(g_inst[0].db,sizeof g_inst[0].db,"%s",P->db);
-    g_inst[0].pid=P->pid;
-    g_inst[0].pss=rp_num(t,"tier.server_pss_bytes",0)+rp_num(t,"tier.pl_pss_bytes",0);
+    g_ninst=0;
+    { inst_t *x0=inst_add();
+      if(x0){ snprintf(x0->db,sizeof x0->db,"%s",P->db); x0->pid=P->pid;
+              x0->rss=rp_num2(t,"tier.server_rss_bytes","tier.server_pss_bytes",0);
+              x0->pl_rss=rp_num2(t,"tier.pl_rss_bytes","tier.pl_pss_bytes",0); } }
     g_cur=0;
     /* Method A: present when the recording was taken with it (live always is).  Its
        absence leaves A empty, which the A box shows as "not measured". */
@@ -6512,20 +6516,21 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* Instances: rebuilt from every "instance.<key>.pid".  The key becomes the name, so
        re-emitting the frame produces the same keys. */
     g_ninst=0; g_cur=0;
-    for(const char *q=t; (q=strstr(q,"\"instance."))!=NULL && g_ninst<MAXINST; q++){
+    for(const char *q=t; (q=strstr(q,"\"instance."))!=NULL; q++){
         const char *ks=q+10, *ke=strstr(ks,".pid\":");
         const char *qe=strchr(ks,'"');
         if(!ke || !qe || ke>qe) continue;            /* not a .pid key */
-        inst_t *x=&g_inst[g_ninst]; memset(x,0,sizeof *x);
+        inst_t *x=inst_add(); if(!x) break;
         snprintf(x->db,sizeof x->db,"%.*s",(int)(ke-ks),ks);
         char k[128];
         snprintf(k,sizeof k,"instance.%s.pid",x->db);          x->pid=(int)rp_num(t,k,0);
-        snprintf(k,sizeof k,"instance.%s.pss_bytes",x->db);    x->pss=rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.rss_bytes",x->db);    x->rss=rp_num(t,k,0);
-        snprintf(k,sizeof k,"instance.%s.pl_pss_bytes",x->db); x->pl_pss=rp_num(t,k,0);
+        snprintf(k,sizeof k,"instance.%s.file_bytes",x->db);   x->filemap=rp_num(t,k,0);
+        snprintf(k,sizeof k,"instance.%s.swap_bytes",x->db);   x->swap=rp_num(t,k,0);
+        { char k2[128]; snprintf(k,sizeof k,"instance.%s.pl_rss_bytes",x->db); snprintf(k2,sizeof k2,"instance.%s.pl_pss_bytes",x->db);
+          x->pl_rss=rp_num2(t,k,k2,0); }
         snprintf(k,sizeof k,"instance.%s.pl_count",x->db);     x->pl_n=(int)rp_num(t,k,0);
-        snprintf(k,sizeof k,"instance.%s.tracked",x->db);      if(rp_num(t,k,0)>0) g_cur=g_ninst;
-        g_ninst++;
+        snprintf(k,sizeof k,"instance.%s.tracked",x->db);      if(rp_num(t,k,0)>0) g_cur=g_ninst-1;
     }
 }
 
@@ -6798,7 +6803,6 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
     if(P->pid>=0){
         for(int i=0;i<g_ninst;i++)
             if(g_inst[i].pid==P->pid){
-                g_inst[i].pss=P->pss_kb*1024.0;
                 g_inst[i].rss=P->rss_kb*1024.0;
                 g_cur=i;                       /* Keep the selection when the list changes */
                 break;
@@ -7120,7 +7124,7 @@ static void help_keys_dash(void){
 "\n"
 "    맨 윗줄        수집 시간(이 프레임에 든 실작업 ms) · 현재 시각\n"
 "    ① OS 컨텍스트  호스트 CPU·메모리 · 가동 인스턴스 목록(▶ = 지금 보는 DB)\n"
-"    ② PSS·프로세스 master / server / pl / broker / CAS 티어별 실점유와 코어\n"
+"    ② RSS·프로세스 master / server / pl / broker / CAS 티어별 상주(top 기준)와 코어\n"
 "    ③ RSS·서버     영역별 alloc·rss·hot·grow — 1/2/3 키로 보기 전환\n"
 "    ④ 동적 메모리  [B] 정확 · [A] 청크 추정 · ④' 버퍼풀 상태 · ⓐ 용량\n"
 "    ⑤ 메모리 추이  서버 전체·동적 힙 증감 + load(OS) 겹침\n"
@@ -7155,10 +7159,11 @@ static void help_keys_dash(void){
 "                  I/O 가 막히면 올라간다. 논리코어 수(64)를 넘으면 대기가 쌓이는 중.\n"
 "                  전체 호스트 값이라 인스턴스별로 나눌 수 없어 박스 제목에 둔다.\n"
 "\f\n"
-"── ② 프로세스 박스가 PSS 인 이유 · 티어별 CPU ──\n"
-"  PSS = 공유 페이지를 쓰는 프로세스 수로 나눠 배분한 상주량.\n"
-"  libcubrid.so 10M 을 5개가 공유하면 각자 2M 로 잡힌다 → 행을 다 더해도 이중 계상이\n"
-"  없어 All 합계가 성립한다. RSS 로 재면 같은 페이지가 여러 번 세어져 합이 부풀려진다.\n"
+"── ② 프로세스 박스 — top 과 같은 RSS · 티어별 CPU ──\n"
+"  RSS = 프로세스가 지금 물고 있는 물리 메모리(top 의 RES). master·server·pl·broker·CAS 는\n"
+"  운영 관점의 점유 현황이라 top·ps 와 같은 값으로 보이고, 매 프레임 그때의 값이다.\n"
+"  공유 페이지(libcubrid.so 등)는 프로세스마다 세므로 All 합계는 실제 점유의 상한이다.\n"
+"  상세 분해(영역·힙·버퍼풀)는 분석 대상 서버 하나만 한다 — 아래 ③ 이하.\n"
 "  프로세스 박스   각 티어(master/server/pl/broker/CAS) 앞의 숫자가 그 티어의 코어 수.\n"
 "                  전부 더하면 OS 의 used 이하여야 정상이다(나머지는 CUBRID 밖 프로세스).\n"
 "                  색으로 크기를 구분한다 — 회색 · =유휴, 청록 <1코어, 노랑 1코어 이상,\n"
@@ -7178,8 +7183,8 @@ static void help_keys_dash(void){
 "  glibc arena     할당자 예약. 상주 0이면 물리 메모리 미사용\n"
 "  (설정 X, 할당 Y%)  설정 대비 매핑 비율. >105% 면 초과\n"
 "  핫 N%           상주 중 실제 접근 비율. 낮으면 올려두고 안 만지는 메모리\n"
-"  Σ 합계          4열의 합. rss 합 = 프로세스 RSS(항등). 프로세스 박스의 PSS 와는\n"
-"                  공유 .so 배분만큼 다르며(오류 아님), 그 값이 라벨에 함께 적힌다.\n"
+"  Σ 합계          4열의 합. rss 합 = 프로세스 RSS(항등)로 프로세스 박스의 server 와 같다.\n"
+"                  라벨의 PSS 는 공유 .so 를 나눠 배분한 값이다(오류 아님).\n"
 "\n"
 "  1/2/3 키로 바꾸는 것은 게이지·퍼센트와 3·4번째 열뿐이다(영역 행은 그대로).\n"
 "\n"
@@ -7404,7 +7409,7 @@ static void help_keys_plot(void){
 "    사용 코어 (하늘)      코어         호스트에서 실제 돌고 있는 코어 수(전체 프로세스)\n"
 "    포화 코어 (적색)      개           사용률 95%% 이상 코어 수. 물리코어에 근접하면 CPU 가 제약\n"
 "    호스트 RAM 사용 (자주)바이트       MemTotal-MemAvailable. 92%% 넘으면 여유가 적다\n"
-"    CUBRID 총합 (분홍)    바이트       CUBRID 프로세스 전체 PSS 합 — RAM 중 우리 몫\n"
+"    CUBRID 총합 (분홍)    바이트       CUBRID 프로세스 전체 RSS 합(top 기준) — RAM 중 우리 몫의 상한\n"
 "    장치 사용률 (주황)    %%            최다사용 장치 포화도(호스트 전역). 80%%↑ 면 스토리지가 제약\n"
 "    장치 IOPS (노랑)      회/s         호스트 장치 전체 IOPS. 포화 시점의 값이 그 환경의 실효 상한\n"
 "    load (노랑 겹침)      태스크       실행 대기 포함. 코어 수를 넘으면 큐가 쌓인다\n"

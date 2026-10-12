@@ -64,7 +64,7 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 
 ![live dashboard](docs/dashboard.png)
 
-라이브 대시보드(`-b`) — 위에서부터 OS 컨텍스트, 프로세스별 PSS, 서버 메모리의 파라미터 귀속
+라이브 대시보드(`-b`) — 위에서부터 OS 컨텍스트, 프로세스별 RSS(top 기준), 서버 메모리의 파라미터 귀속
 (`alloc`·`rss`·`hot`), 동적 힙 분해(왼쪽 방법 B 엔진 직독, 오른쪽 방법 A 청크 추정), 버퍼풀 슬롯(BCB)
 직독, 메모리 추이, I/O 와 판정문 순이다. 이 화면(`cbench`)에서는:
 
@@ -184,8 +184,8 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 | **L2** `paramdump` | 파라미터 설정 할당량 | 서버 값 | 시작 시·서버 재시작 시 1회 |
 | **L3** `process_vm_readv` | 엔진 전역 변수 → 서브시스템 실사용 | 직독 | µs (BCB 배열은 수~수십 ms) |
 
-매 프레임이 세 가지를 모두 수행한다. 프레임당 수집 작업은 64코어·버퍼 512MB 환경 실측 중앙값 16ms(`--hot` 24ms, 읽기 스캔 중 23ms),
-기본 0.5초 간격의 약 3~5% 이며 대시보드 좌상단 `수집 N ms` 로 보인다. 측정 조건과 비용 요인은 [docs/architecture.md](docs/architecture.md#프레임-비용).
+매 프레임이 세 가지를 모두 수행하고, 보이는 값은 모두 그 프레임에 읽은 현재 값이다. 프레임당 수집 작업은 64코어·버퍼 512MB·
+인스턴스 2개 환경 실측 중앙값 29ms(`--hot` 41ms), 기본 0.5초 간격의 약 6~8% 이며 대시보드 좌상단 `수집 N ms` 로 보인다. 측정 조건과 비용 요인은 [docs/architecture.md](docs/architecture.md#프레임-비용).
 
 L3 는 **3중 게이트**를 통과해야 채택된다 — ① 심볼 존재 ② 오프셋 정렬 ③ `paramdump` 교차검증
 (`pgbuf num_buffers == data_buffer_pages`). 하나라도 어긋나면 그 기능만 끄고 사유를 남긴다.
@@ -225,7 +225,8 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-replay.sh` | 기록 → 재생 → 재출력이 원본과 키 단위로 동일 + 재생이 `/proc` 미접근 |
 | `check-turnover.sh` | 회전율·재적재율을 합성 BCB 스냅샷으로 검증: 재사용 없는 스캔은 재적재 0%, 큰 버퍼에서도 교체를 놓치지 않음, DB 전환 시 이전 스냅샷을 버림 |
 | `check-ceiling.sh` | 관측 상한을 장치별로 기억·보존: 빠른 장치의 상한으로 느린 장치를 판정하지 않음 |
-| `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴. degraded 모드에서는 검증된 레코드만 집계하고 덤프를 덮어쓰지 않음. BCB 크기 변화에 안전, `--bcb-dump` 종료 코드 |
+| `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴. degraded 모드에서는 검증된 레코드만 집계하고 덤프를 덮어쓰지 않음. 인스턴스 전환·BCB 크기 변화에 안전, `--bcb-dump` 종료 코드 |
+| `check-enum.sh` | 인스턴스 탐색에 개수 한도가 없음: CAS 600개·서버 10개의 가짜 `/proc` 에서 모든 서버·PL·CPU 를 빠짐없이 집계 |
 | `check-ascii.sh` | `--ascii` 6개 출력모드에 한글 0, 한글 모드는 보존 |
 | `check-json.sh` | `--dump-json` 이 `-d` 와 키 집합·순서 동일 |
 | `check-offsets.sh` | 소스 오프셋 상수가 골든 표와 일치 |

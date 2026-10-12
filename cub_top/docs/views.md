@@ -85,7 +85,7 @@ OS RAM  188.0G
 ```
  수집 23ms                        2026-09-02 02:26 AM        상단 상태줄(프레임 수집시간 · 시각)
 ╭─┤ OS 컨텍스트 · load .. ├──┤ total|used|pct|avail|cache|swap ├╮  L0 호스트 — CPU 코어분포·포화 N·메모리·인스턴스별
-╭─┤ PSS · 프로세스 ├──────────────────┤ Δ3m00s │ All ..M ├╮  L1 티어(master/server/PL/broker/CAS) + 코어 수 + Δ(관측창)·스파크라인
+╭─┤ RSS · 프로세스 ├──────────────────┤ Δ3m00s │ All ..M ├╮  L1 티어(master/server/PL/broker/CAS) RSS(top 기준) + 코어 수 + Δ(관측창)·스파크라인
 ╭─┤ RSS · 서버 ├┤ 설정으로 설명 N% ├──┤보기1 · 할당/상주 ┤─┤ alloc|rss|hot|grow ├╮  L2 영역별 게이지 · 값 4열
 ╭─┤ 동적 메모리 상세 · 엔진이 직접 보고(B) ├╮╭─┤ 동적 메모리 상세 · 크기 추정(A) — HH:MM:SS chked ├╮  L3 힙 분해(좌우 우열 없음)
 ╭─┤ 버퍼풀 · 페이지 슬롯 — 버퍼 제어블록 ├────────────────╮  슬롯 상주·dirty·존·로그 LSA·볼륨별 상주 (아래 절)
@@ -281,7 +281,7 @@ CJK/라인드로잉 문자셋에 남겨둔 경우를 걷어내고, 종료 후 �
 | **3 volume → buffer** | 버퍼가 일하고 있나 (읽기 경로) | (계열별 정규화) 디스크 읽기 · 버퍼 상주% · cold 존% · 적재 pg/s · 핫% · 캐시 흡수% | 장치 사용률 | – |
 | **4 buffer → volume** | 반영·flush 가 밀리나 (쓰기 경로) | (계열별 정규화) dirty 페이지 · flush 지연(로그pg) · 디스크 쓰기 · D스레드 | await ms | – |
 
-2 의 server 는 대시보드 프로세스 박스·추이 박스와 같은 **PSS** 기준입니다(항등식 `db+lg+dyn+etc == RSS` 는 check-hist 가 RSS 축으로 계속 검사).
+2 의 server 는 분석 대상 서버 하나의 **PSS** 입니다. 대시보드 프로세스 박스와 CUBRID 총합은 top 과 같은 RSS 기준입니다(항등식 `db+lg+dyn+etc == RSS` 는 check-hist 가 RSS 축으로 검사).
 정규화 패널(3·4)은 공통 세로 눈금을 찍지 않고 `norm` 이라고 표기합니다 — 모양(추세·동시성)만 겹치고 값은 범례에서 읽습니다.
 
 ### 판정문 규칙
@@ -366,7 +366,7 @@ io.read_bps=567649972 io.write_bps=15677 io.rchar_bps=525931751 \
   io.read_iops=32232 io.cache_absorb_pct=0.0 io.blkio_wait_pct=0.00 \
   io.total_read_bytes=... io.total_write_bytes=...
 io.dev_name=sda io.dev_util_pct=99.9 io.dev_read_bps=... io.dev_write_bps=...
-total.cubrid_pss_bytes=... total.cubrid_pct_ram=0.90
+total.cubrid_rss_bytes=... total.cubrid_pct_ram=0.90
 cache.tid=... cache.l1_miss_per_s=... cache.l2_miss_per_s=... cache.l3_miss_per_s=...
 pgbuf.enabled=1 pgbuf.reason="BCB 배열 상태 읽기(32768개)"
 pgbuf.num_buffers=32768 pgbuf.resident=14562 pgbuf.dirty=55 pgbuf.flushing=0 \
