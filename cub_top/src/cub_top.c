@@ -3123,8 +3123,6 @@ typedef struct {
 } iod_t;
 
 #define CAP_BUDGET_MS 500.0              /* Collection budget; over it the frame is dropped and the screen says so */
-#define CAP_HASH_BITS 17                 /* 131072 slots, covering 32k-128k BCBs */
-#define CAP_HASH_SZ   (1<<CAP_HASH_BITS)
 typedef struct {
     /* Demand */
     double read_bps, write_bps, riops, wiops;   /* Attributed to the process, from /proc/pid/io */
@@ -3552,16 +3550,46 @@ static int cap_pstat_read(proc_t*P,uint64_t out[CPS_N]){
     return 1;
 }
 
-/* ---- Turnover by direct read: the VPID set difference between BCB snapshots ----
-   PG.rec was already read this frame (no extra I/O).  The previous frame's set is
-   held as a hash bitmap to count replacements and refills. */
-static unsigned char *cap_prev=NULL, *cap_ever=NULL;   /* Resident last time / resident at any point */
-static int cap_prev_n=0;
-static double cap_prev_t=0;
-static inline unsigned cap_hash(int volid,int pageid){
-    unsigned k=(unsigned)volid*2654435761u ^ (unsigned)pageid*2246822519u;
-    k^=k>>15; return k&(CAP_HASH_SZ-1);
+/* ---- Turnover by direct read: the exact VPID set difference between BCB snapshots ----
+   PG.rec was already read this frame (no extra I/O).  Sets are sorted 48-bit keys
+   (volid<<32 | pageid), so two pages never share an entry.  A refill is a page read
+   back within the last nbuf evictions; a scan, never reread, ages out of that window. */
+static inline uint64_t vp_key(int volid,int pageid){ return ((uint64_t)(uint16_t)volid<<32)|(uint32_t)pageid; }
+static int vp_grow(void **a,int *cap,int need,size_t esz){
+    if(need<=*cap) return 1;
+    void *p=realloc(*a,esz*(size_t)need); if(!p) return 0;
+    *a=p; *cap=need; return 1;
 }
+/* LSD radix sort on the 48 key bits, then drop duplicates (a latch-free read can see one page twice) */
+static int vp_sort_unique(uint64_t *a,uint64_t *tmp,int n){
+    static unsigned cnt[1<<16];
+    uint64_t *src=a,*dst=tmp;
+    for(int sh=0;sh<48;sh+=16){
+        memset(cnt,0,sizeof cnt);
+        for(int i=0;i<n;i++) cnt[(src[i]>>sh)&0xffff]++;
+        unsigned sum=0; for(int d=0;d<(1<<16);d++){ unsigned c=cnt[d]; cnt[d]=sum; sum+=c; }
+        for(int i=0;i<n;i++) dst[cnt[(src[i]>>sh)&0xffff]++]=src[i];
+        uint64_t *t=src; src=dst; dst=t;
+    }
+    if(src!=a) memcpy(a,src,sizeof *a*(size_t)n);
+    int m=0; for(int i=0;i<n;i++) if(m==0||a[m-1]!=a[i]) a[m++]=a[i];
+    return m;
+}
+/* Keys of PG.rec, sorted and unique, into *out */
+static int vp_from_pg(uint64_t **out,int *cap,uint64_t **tmp,int *tcap){
+    int n=PG.nrec;
+    if(!vp_grow((void**)out,cap,n,sizeof **out)||!vp_grow((void**)tmp,tcap,n,sizeof **tmp)) return -1;
+    for(int i=0;i<n;i++) (*out)[i]=vp_key(PG.rec[i].volid,PG.rec[i].pageid);
+    return vp_sort_unique(*out,*tmp,n);
+}
+typedef struct { uint64_t key, seq; } vp_ev_t;   /* An eviction: the page and its eviction number */
+static uint64_t *vp_prev=NULL,*vp_cur=NULL,*vp_tmp=NULL,*vp_evk=NULL;
+static int vp_prev_cap=0,vp_cur_cap=0,vp_tmp_cap=0,vp_evk_cap=0;
+static vp_ev_t *vp_hist=NULL,*vp_hist2=NULL;      /* Evictions in the window, sorted by key */
+static int vp_hist_n=0,vp_hist_cap=0,vp_hist2_cap=0;
+static uint64_t vp_evseq=0;                       /* Evictions counted so far */
+static int cap_prev_n=0;                          /* Size of the previous frame's set; 0 = no baseline */
+static double cap_prev_t=0;
 /* One-shot (-t, tree) has a single frame and so no memory baseline.  If a previous
    snapshot file from --bcb-dump exists it serves as the baseline (one file read, no
    extra contact with the server), used only when the two are 0.2-60s apart: shorter
@@ -3575,50 +3603,76 @@ static int cap_turnover_from_dump(void){
     if(fread(&h,sizeof h,1,f)!=1||memcmp(h.magic,"CBCBMAP1",8)||h.reclen!=32||h.nrec<=0){ fclose(f); return 0; }
     double dt=(double)PG.when.tv_sec-(double)h.ts_sec;
     if(dt<0.2||dt>60.0){ fclose(f); return 0; }
-    unsigned char*prev=(unsigned char*)calloc(CAP_HASH_SZ,1);
-    if(!prev){ fclose(f); return 0; }
+    uint64_t *prev=NULL,*cur=NULL,*tmp=NULL; int pcap=0,ccap=0,tcap=0,np=0;
+    if(!vp_grow((void**)&prev,&pcap,h.nrec,sizeof *prev)){ fclose(f); return 0; }
     for(int i=0;i<h.nrec;i++){
         struct { int16_t volid,zone; int32_t pageid; uint32_t flags; int32_t hdr_ok; uint64_t a,b; } r;
         if(fread(&r,sizeof r,1,f)!=1) break;
         if(r.volid<0||r.pageid<0) continue;
-        prev[cap_hash(r.volid,r.pageid)]=1;
+        prev[np++]=vp_key(r.volid,r.pageid);
     }
     fclose(f);
+    int nc=-1;
+    if(vp_grow((void**)&tmp,&tcap,np>PG.nrec?np:PG.nrec,sizeof *tmp)){
+        np=vp_sort_unique(prev,tmp,np);
+        nc=vp_from_pg(&cur,&ccap,&tmp,&tcap);
+    }
     long admitted=0;
-    for(int i=0;i<PG.nrec;i++) if(!prev[cap_hash(PG.rec[i].volid,PG.rec[i].pageid)]) admitted++;
-    free(prev);
-    CAP2.turnover_pct = 100.0*(double)admitted/(double)PG.nrec;
+    for(int i=0,j=0;i<nc;i++){
+        while(j<np && prev[j]<cur[i]) j++;
+        if(j>=np || prev[j]!=cur[i]) admitted++;
+    }
+    free(prev); free(cur); free(tmp);
+    if(nc<=0) return 0;
+    CAP2.turnover_pct = 100.0*(double)admitted/(double)nc;
     CAP2.miss_pps     = (double)admitted/dt;
-    CAP2.readmit_pct  = -1;    /* A file baseline has no ever-resident history, so refill cannot be computed */
+    CAP2.readmit_pct  = -1;    /* A file baseline has no eviction history, so refill cannot be computed */
     return 1;
 }
 static void cap_turnover(double now_s){
     CAP2.turnover_pct=-1; CAP2.readmit_pct=-1; CAP2.miss_pps=-1;
     { static unsigned seen=0;
-      if(seen!=g_inst_gen){ seen=g_inst_gen; cap_prev_n=0;
-                            if(cap_ever) memset(cap_ever,0,CAP_HASH_SZ); } }
+      if(seen!=g_inst_gen){ seen=g_inst_gen; cap_prev_n=0; vp_hist_n=0; vp_evseq=0; } }
     if(!PG.ok||PG.nrec<=0) return;
-    if(!cap_prev){ cap_prev=(unsigned char*)calloc(CAP_HASH_SZ,1);
-                   cap_ever=(unsigned char*)calloc(CAP_HASH_SZ,1);
-                   if(!cap_prev||!cap_ever){ free(cap_prev); free(cap_ever); cap_prev=cap_ever=NULL; return; } }
-    static unsigned char *cur=NULL;
-    if(!cur){ cur=(unsigned char*)calloc(CAP_HASH_SZ,1); if(!cur) return; }
-    else memset(cur,0,CAP_HASH_SZ);
-    long admitted=0, readmit=0;
-    for(int i=0;i<PG.nrec;i++){
-        unsigned h=cap_hash(PG.rec[i].volid,PG.rec[i].pageid);
-        cur[h]=1;
-        if(cap_prev_n>0 && !cap_prev[h]){ admitted++; if(cap_ever[h]) readmit++; }
-        cap_ever[h]=1;
+    int n=vp_from_pg(&vp_cur,&vp_cur_cap,&vp_tmp,&vp_tmp_cap);
+    if(n<=0) return;
+    if(cap_prev_n>0){
+        uint64_t win=(uint64_t)(PG.nbuf>n?PG.nbuf:n);
+        if(!vp_grow((void**)&vp_evk,&vp_evk_cap,cap_prev_n,sizeof *vp_evk)) return;
+        /* One merge walk: admitted = cur - prev (looked up in the window), evicted = prev - cur */
+        long admitted=0, readmit=0; int ne=0;
+        for(int i=0,j=0,h=0;i<n||j<cap_prev_n;){
+            if(j>=cap_prev_n || (i<n && vp_cur[i]<vp_prev[j])){
+                uint64_t k=vp_cur[i++]; admitted++;
+                while(h<vp_hist_n && vp_hist[h].key<k) h++;
+                if(h<vp_hist_n && vp_hist[h].key==k && vp_hist[h].seq+win>vp_evseq) readmit++;
+            } else if(i>=n || vp_prev[j]<vp_cur[i]) vp_evk[ne++]=vp_prev[j++];
+            else { i++; j++; }
+        }
+        /* Window update: merge this frame's evictions, drop those older than the last win */
+        uint64_t top=vp_evseq+(uint64_t)ne;
+        if(!vp_grow((void**)&vp_hist2,&vp_hist2_cap,vp_hist_n+ne,sizeof *vp_hist2)) return;
+        int m=0;
+        for(int a=0,b=0;a<vp_hist_n||b<ne;){
+            vp_ev_t e;
+            if(b>=ne || (a<vp_hist_n && vp_hist[a].key<vp_evk[b])) e=vp_hist[a++];
+            else { if(a<vp_hist_n && vp_hist[a].key==vp_evk[b]) a++;   /* evicted again: keep the newer */
+                   e.key=vp_evk[b]; e.seq=vp_evseq+(uint64_t)(++b); }
+            if(e.seq+win>top) vp_hist2[m++]=e;
+        }
+        { vp_ev_t *t=vp_hist; vp_hist=vp_hist2; vp_hist2=t;
+          int c=vp_hist_cap; vp_hist_cap=vp_hist2_cap; vp_hist2_cap=c; }
+        vp_hist_n=m; vp_evseq=top;
+        double dt=now_s-cap_prev_t;
+        if(dt>0.05){
+            CAP2.turnover_pct = 100.0*(double)admitted/(double)n;
+            CAP2.readmit_pct  = admitted>0 ? 100.0*(double)readmit/(double)admitted : 0;
+            CAP2.miss_pps     = (double)admitted/dt;
+        }
     }
-    double dt=now_s-cap_prev_t;
-    if(cap_prev_n>0 && dt>0.05){
-        CAP2.turnover_pct = PG.nrec>0 ? 100.0*(double)admitted/(double)PG.nrec : 0;
-        CAP2.readmit_pct  = admitted>0 ? 100.0*(double)readmit/(double)admitted : 0;
-        CAP2.miss_pps     = (double)admitted/dt;
-    }
-    memcpy(cap_prev,cur,CAP_HASH_SZ);
-    cap_prev_n=PG.nrec; cap_prev_t=now_s;
+    { uint64_t *t=vp_prev; vp_prev=vp_cur; vp_cur=t;
+      int c=vp_prev_cap; vp_prev_cap=vp_cur_cap; vp_cur_cap=c; }
+    cap_prev_n=n; cap_prev_t=now_s;
 }
 
 /* ---- Remembered ceilings: the peak IOPS and bandwidth of saturated frames (util >= 90%) are kept in a state file ---- */
