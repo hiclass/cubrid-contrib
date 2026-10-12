@@ -31,7 +31,13 @@ say(){ printf "  %-34s %s\n" "$1" "$2"; }
 #      heapB.table=offsets-embedded  gate fired, an embedded table rescued it (PASS)
 #      heapB.enabled=0               gate fired, no fallback available (PASS)
 #      heapB.table=table-11.5        the corrupted table was adopted (FAIL)
-sed 's/#define OFF_LF_ALLOCCNT     12/#define OFF_LF_ALLOCCNT     11/' "$SRC" > "$TMP/bad1.c"
+# The test binary keeps its DWARF cache in $TMP, so corrupting it below never touches the
+# real /var/tmp cache, whether the run finishes or is interrupted.  The real caches are
+# only copied in (read), to spare the 8-second extraction.
+sed -e 's/#define OFF_LF_ALLOCCNT     12/#define OFF_LF_ALLOCCNT     11/' \
+    -e "s|/var/tmp/cub_top.dw-|$TMP/cub_top.dw-|" "$SRC" > "$TMP/bad1.c"
+grep -q "$TMP/cub_top.dw-" "$TMP/bad1.c" || { say "C misalignment build" "FAIL(cache path not redirected)"; fail=1; }
+for c in /var/tmp/cub_top.dw-"$(id -u)"-*.tbl; do [ -f "$c" ] && cp -p "$c" "$TMP/" 2>/dev/null; done
 if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev/null; then
   raw=$("$TMP/bad1" -d 2>/dev/null)
   tbl=$(printf '%s' "$raw" | grep -o 'heapB.table="[^"]*"')
@@ -55,8 +61,7 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
   [ -n "$SO" ] && [ "$SO" != "-" ] || SO=$(grep -m1 -oE '/[^ ]*libcubrid\.so\.[0-9.]+' /proc/$(pgrep -f 'cub_server ' | head -1)/maps 2>/dev/null)
   if [ -n "$SO" ] && stat -L "$SO" >/dev/null 2>&1; then
     SZ=$(stat -L -c%s "$SO"); MT=$(stat -L -c%Y "$SO")
-    CACHE="/var/tmp/cub_top.dw-$(id -u)-$SZ-$MT.tbl"   # the name cub_top reads (uid-scoped)
-    cp -f "$CACHE" "$TMP/cache.bak" 2>/dev/null
+    CACHE="$TMP/cub_top.dw-$(id -u)-$SZ-$MT.tbl"   # the test binary's cache (uid-scoped name)
     printf 'OFF_PGBUF_NBUF 4\n' > "$CACHE"
     raw=$("$TMP/bad1" -d 2>/dev/null)
     en=$(printf '%s' "$raw" | grep -o 'heapB.enabled=[01]')
@@ -85,7 +90,6 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
     else
         say "corrupted cache -> probe downgrade" "FAIL($tbl2 $tot)"; fail=1
     fi
-    if [ -f "$TMP/cache.bak" ]; then mv -f "$TMP/cache.bak" "$CACHE"; else rm -f "$CACHE"; fi
   else
     say "corrupted cache -> fallback also fails" "SKIP(libcubrid path unavailable)"
   fi
