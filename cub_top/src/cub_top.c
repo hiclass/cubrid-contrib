@@ -2370,7 +2370,6 @@ static struct {
     int nbuf, resident, dirty, flushing, z1,z2,z3, zvoid, zinv, mismatch, unread, badvpid;
     int mismatch_raw;   /* Mismatches before the recheck, including replacements between the two reads */
     int recheck;        /* Number rechecked */
-    int hdr_read, hdr_reused;   /* Headers read this frame / carried from the last verified read */
     int nrec_all;               /* Records before a degraded frame dropped the unverified */
     int degraded;       /* Frames where remaining mismatches crossed the threshold and dropped to valid-only mode */
     int tempvol;      /* Resident pages of temporary volumes (volid at or above PG_MAXVOL); this is normal */
@@ -2437,11 +2436,6 @@ static void pgbuf_dump(const char*db){
     g_bcb_saved=1;
 }
 
-static inline uint64_t vp_key(int volid,int pageid);
-/* Set when the analysed instance changes (reset_instance_state); the next scan that uses the
-   header cache empties it first.  A flag rather than PG.frame: a first scan that returns
-   early would otherwise leave the previous database's headers to be carried. */
-static int g_hc_stale=1;
 /* Zone counters, by the zone field kept in a record (flags>>16) */
 static void pg_zone_add(int z,int d){
     if(z==1) PG.z1+=d; else if(z==2) PG.z2+=d; else if(z==3) PG.z3+=d;
@@ -2532,39 +2526,8 @@ static void pgbuf_scan(proc_t*P){
         snprintf(PG.why,sizeof PG.why,g_ascii?"abnormal VPIDs: %d — offset mismatch suspected":"비정상 VPID %d개 — 오프셋 불일치 의심",PG.badvpid); return; }
     /* pass 2: gather the page headers (prv 16B: lsa 8, pageid 4, volid 2, ptype/pflag 2) and compare */
     PG.mismatch=PG.unread=0; PG.mismatch_raw=0; PG.recheck=0; PG.degraded=0;
-    PG.hdr_read=PG.hdr_reused=0;
-    /* Header cache by BCB index.  Reading every resident page's header pins each remote page
-       and was the largest cost of a frame.  A BCB that still holds the page last verified
-       there, clean then and clean now, keeps that header: a page changes only by being
-       modified, which dirties it.  A page modified and flushed between two frames looks
-       clean both times, so a rotating 1/HC_SLICE of the carried headers is re-read each
-       frame - a carried LSA is at most HC_SLICE frames old, and the gate keeps seeing
-       every slot. */
-    #define HC_SLICE 8
-    static uint64_t *hc_key=NULL,*hc_lsa=NULL; static unsigned char *hc_ok=NULL; static int hc_cap=0;
-    static unsigned hc_round=0;
-    static int *ridx=NULL; static uint64_t *raddr=NULL; static int rcap2=0;
-    if(nbuf>hc_cap){ free(hc_key); free(hc_lsa); free(hc_ok);
-        hc_key=malloc(8*(size_t)nbuf); hc_lsa=malloc(8*(size_t)nbuf); hc_ok=calloc((size_t)nbuf,1);
-        hc_cap=(hc_key&&hc_lsa&&hc_ok)?nbuf:0; }
-    if(PG.nrec>rcap2){ free(ridx); free(raddr);
-        ridx=malloc(sizeof(int)*(size_t)PG.nrec); raddr=malloc(8*(size_t)PG.nrec);
-        rcap2=(ridx&&raddr)?PG.nrec:0; }
-    if(!hc_cap || (PG.nrec>0 && !rcap2)){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; }
-    if(g_hc_stale){ memset(hc_ok,0,(size_t)hc_cap); g_hc_stale=0; }
-    hc_round++;
-    int nread=0;
-    for(int k=0;k<PG.nrec;k++){
-        pgrec_t*r=&PG.rec[k]; int bi=pg_bidx[k];
-        uint64_t key=vp_key(r->volid,r->pageid);
-        if(hc_ok[bi] && hc_key[bi]==key && !(r->flags&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING))
-           && (unsigned)bi%HC_SLICE!=hc_round%HC_SLICE){
-            r->page_lsa=hc_lsa[bi]; r->hdr_ok=1; PG.hdr_reused++; continue; }
-        hc_ok[bi]=0; ridx[nread]=k; raddr[nread]=addr[k]; nread++;
-    }
-    PG.hdr_read=nread;
-    if(nread>0){
-        vm_gather(P->pid,raddr,nread,16,hdr,okf);
+    if(PG.nrec>0){
+        vm_gather(P->pid,addr,PG.nrec,16,hdr,okf);
         /* Collect the mismatched indices for the recheck.  addr[] is overwritten there, so
            the original iopage addresses are kept alongside. */
         static int *midx=NULL; static uint64_t *maddr=NULL; static int mcap=0;
@@ -2576,20 +2539,17 @@ static void pgbuf_scan(proc_t*P){
         /* Without the index arrays no mismatch could be rechecked or counted, and 0
            mismatches would pass the gate - the frame is dropped instead */
         if(!mcap){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; }
-        for(int j=0;j<nread;j++){
-            int k=ridx[j]; pgrec_t*r=&PG.rec[k];
-            if(!okf[j]){ PG.unread++; continue; }
+        for(int k=0;k<PG.nrec;k++){
+            pgrec_t*r=&PG.rec[k];
+            if(!okf[k]){ PG.unread++; continue; }
             uint64_t lsa; int32_t hp; int16_t hv;
-            memcpy(&lsa,hdr+(size_t)j*16,8); memcpy(&hp,hdr+(size_t)j*16+8,4); memcpy(&hv,hdr+(size_t)j*16+12,2);
+            memcpy(&lsa,hdr+(size_t)k*16,8); memcpy(&hp,hdr+(size_t)k*16+8,4); memcpy(&hv,hdr+(size_t)k*16+12,2);
             if(hp!=r->pageid || hv!=r->volid){
                 PG.mismatch_raw++;
                 midx[nm]=k; maddr[nm]=addr[k]; nm++;
                 continue;
             }
             r->page_lsa=lsa; r->hdr_ok=1;
-            /* Cached only when clean at this read; a dirty page's header may still change */
-            if(!(r->flags&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING))){
-                int bi=pg_bidx[k]; hc_key[bi]=vp_key(r->volid,r->pageid); hc_lsa[bi]=lsa; hc_ok[bi]=1; }
         }
         /* Recheck.  Pass 1 (BCB array) and pass 2 (page headers) are taken at different
            times, so pages replaced in between necessarily disagree; a flat 5%
@@ -2638,8 +2598,6 @@ static void pgbuf_scan(proc_t*P){
                             pg_zone_add(r->zone,-1); pg_zone_add(nz,+1);
                             r->pageid=npid; r->volid=nvid; r->flags=nfl; r->zone=(int16_t)nz;
                             r->oldest_lsa=nol; r->page_lsa=lsa; r->hdr_ok=1;
-                            if(!(nfl&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING))){
-                                int bi=pg_bidx[midx[j]]; hc_key[bi]=vp_key(nvid,npid); hc_lsa[bi]=lsa; hc_ok[bi]=1; }
                             replaced++;
                         } else PG.mismatch++;      /* Still wrong after the recheck: a genuine mismatch */
                     }
@@ -2655,8 +2613,6 @@ static void pgbuf_scan(proc_t*P){
            offset failing all 32,768 reads still passed as healthy (a deliberate
            corruption test returned enabled=1).  Reading no header at all empties
            the LSA axis, so it is treated as an offset error. */
-        /* Shares of all records: a carried header was verified when it was read, and with a
-           wrong offset nothing is ever carried, so every header is read again */
         if(PG.nrec>100 && PG.unread>PG.nrec/2){ PG.ok=0;
             snprintf(PG.why,sizeof PG.why,
                      g_ascii?"page headers unreadable %d/%d — iopage offset mismatch suspected"
@@ -2849,7 +2805,6 @@ static void reset_instance_state(void){
        instance's residency, dirty and log values under the new name. */
     { pgrec_t *rec=PG.rec; int cap=PG.reccap;
       memset(&PG,0,sizeof PG); PG.rec=rec; PG.reccap=cap; }
-    g_hc_stale=1;                      /* Header cache: the previous instance's pages */
     /* cubrid.conf parameters are per database too ([@db] sections differ), so without
        clearing them the previous instance's values make a verdict like "configured
        512M" entirely wrong. */
@@ -6115,8 +6070,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                " pgbuf.zone1_hot=%d pgbuf.zone2_warm=%d pgbuf.zone3_cold=%d pgbuf.zone_void=%d pgbuf.zone_free=%d"
                " pgbuf.hdr_mismatch=%d pgbuf.hdr_unread=%d pgbuf.scan_ms=%.1f\n",
                PG.nbuf,PG.resident,PG.dirty,PG.flushing,PG.z1,PG.z2,PG.z3,PG.zvoid,PG.zinv,PG.mismatch,PG.unread,PG.ms);
-        printf("pgbuf.hdr_mismatch_raw=%d pgbuf.rechecked=%d pgbuf.degraded=%d pgbuf.hdr_read=%d pgbuf.hdr_reused=%d\n",
-               PG.mismatch_raw,PG.recheck,PG.degraded,PG.hdr_read,PG.hdr_reused);
+        printf("pgbuf.hdr_mismatch_raw=%d pgbuf.rechecked=%d pgbuf.degraded=%d\n",
+               PG.mismatch_raw,PG.recheck,PG.degraded);
         for(int v=0;v<PG_MAXVOL;v++) if(PG.vol_res[v]>0)
             printf("pgbuf.vol%d.resident=%d pgbuf.vol%d.dirty=%d\n",v,PG.vol_res[v],v,PG.vol_dirty[v]);
         if(PG.have_oldest) printf("pgbuf.oldest_dirty_pageid=%lld pgbuf.oldest_dirty_offset=%d\n",
@@ -6400,7 +6355,6 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     PG.mismatch_raw=(int)rp_num(t,"pgbuf.hdr_mismatch_raw",0);
     PG.recheck=(int)rp_num(t,"pgbuf.rechecked",0);
     PG.degraded=(int)rp_num(t,"pgbuf.degraded",0);
-    PG.hdr_read=(int)rp_num(t,"pgbuf.hdr_read",0); PG.hdr_reused=(int)rp_num(t,"pgbuf.hdr_reused",0);
     /* The LSA axis.  Both are emitted only when present, so presence is the flag; a
        frame without them must not inherit the previous frame's values. */
     PG.have_oldest=rp_find(t,"pgbuf.oldest_dirty_pageid",b,sizeof b);
