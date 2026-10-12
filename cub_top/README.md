@@ -220,7 +220,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-replay.sh` | 기록 → 재생 → 재출력이 원본과 키 단위로 동일 + 재생이 `/proc` 미접근 |
 | `check-turnover.sh` | 회전율·재적재율을 합성 BCB 스냅샷으로 검증: 재사용 없는 스캔은 재적재 0%, 큰 버퍼에서도 교체를 놓치지 않음, DB 전환 시 이전 스냅샷을 버림 |
 | `check-ceiling.sh` | 관측 상한을 장치별로 기억·보존: 빠른 장치의 상한으로 느린 장치를 판정하지 않음 |
-| `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴 |
+| `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴. degraded 모드에서는 검증된 레코드만 집계하고 덤프를 덮어쓰지 않음 |
 | `check-ascii.sh` | `--ascii` 6개 출력모드에 한글 0, 한글 모드는 보존 |
 | `check-json.sh` | `--dump-json` 이 `-d` 와 키 집합·순서 동일 |
 | `check-offsets.sh` | 소스 오프셋 상수가 골든 표와 일치 |

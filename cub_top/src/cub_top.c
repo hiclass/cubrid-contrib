@@ -2557,6 +2557,15 @@ static void pgbuf_scan(proc_t*P){
                                 :"재검 후에도 페이지 헤더·BCB 불일치 %d/%d — 오프셋 불일치 의심",PG.mismatch,PG.nrec);
                 return; }
             PG.degraded=1;
+            /* Verified records only, as the mode says: the unverified are dropped and the
+               record totals recounted.  Zone counts stay - they cover every BCB, empty ones
+               included, and come from the BCB itself. */
+            int m=0;
+            for(int k=0;k<PG.nrec;k++) if(PG.rec[k].hdr_ok){
+                if(m!=k){ PG.rec[m]=PG.rec[k]; if(pg_bidx && k<pg_bidx_cap) pg_bidx[m]=pg_bidx[k]; }
+                m++; }
+            PG.nrec=m;
+            pg_recount();
         }
     }
     /* Log tail, the upper bound of WAL continuity: append >= nxio (the disk boundary) >= page LSA */
@@ -2590,7 +2599,7 @@ static void pgbuf_scan(proc_t*P){
        read the turnover baseline BEFORE that, or the baseline becomes this very frame
        and turnover is always 0. */
     (void)cap_turnover_from_dump();
-    pgbuf_dump(P->db);
+    if(!PG.degraded) pgbuf_dump(P->db);   /* A degraded frame keeps the last verified snapshot on disk */
 }
 /* Formatting helper */
 static const char* lsa_str(lsa_t l){ static char ring[6][32]; static int k=0; char*o=ring[k++%6];
@@ -3647,7 +3656,7 @@ static double cap_prev_t=0;
    extra contact with the server), used only when the two are 0.2-60s apart: shorter
    is noise, longer is meaningless. */
 static int cap_turnover_from_dump(void){
-    if(!g_bcb_dump[0]||!PG.ok||PG.nrec<=0) return 0;
+    if(!g_bcb_dump[0]||!PG.ok||PG.degraded||PG.nrec<=0) return 0;
     FILE*f=fopen(g_bcb_dump,"rb"); if(!f) return 0;
     struct { char magic[8]; uint32_t version,reclen; int64_t ts_sec,ts_nsec;
              int32_t nbuf,nrec,dirty,pagesize;
@@ -3689,6 +3698,9 @@ static void cap_turnover(double now_s){
     { static unsigned seen=0;
       if(seen!=g_inst_gen){ seen=g_inst_gen; cap_prev_n=0; vp_hist_n=0; vp_evseq=0; } }
     if(!PG.ok||PG.nrec<=0) return;
+    /* A degraded frame holds only verified records; comparing it would count the dropped
+       ones as evicted.  It is skipped and the baseline kept for the next full frame. */
+    if(PG.degraded) return;
     int n=vp_from_pg(&vp_cur,&vp_cur_cap,&vp_tmp,&vp_tmp_cap);
     if(n<=0) return;
     if(cap_prev_n>0){
