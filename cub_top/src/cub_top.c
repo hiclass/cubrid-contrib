@@ -3557,6 +3557,10 @@ static char g_rp_capvd[320]="";           /* Recorded cap.verdict: recomputing i
 static int g_rep_i=0,g_rep_n=0;       /* Replay progress, shown in the status line */
 static time_t g_rep_ts=0;             /* The frame's recorded time, shown instead of now */
 static double g_ts_frac=-1;           /* The frame's time in fractional seconds for ts_epoch_ms; <0 = ts_epoch */
+static char g_rp_tbl[32]="";          /* Replay: the recording's heapB.table, which this host never adopted */
+static int  g_rp_have_a=0;            /* Replay: the frame carries method A (measured, possibly 0 chunks) */
+/* v as printf("%.*f") prints it: a key derived from printed keys then replays exactly */
+static double rnd_as_printed(double v,int dec){ char b[64]; snprintf(b,sizeof b,"%.*f",dec,v); return strtod(b,NULL); }
 static const char *g_rec_path=NULL;   /* --record FILE  */
 static const char *g_rep_path=NULL;   /* --replay FILE  */
 static double g_rep_speed=1.0;        /* --replay-speed (0 = as fast as possible) */
@@ -5886,7 +5890,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
        check support status on a foreign deployment. */
     printf("cubrid.version=\"%s\" heapB.table=\"%s\" heapB.lib=\"%s\"\n",
            g_cver[0]?g_cver:"unknown",
-           !B.ok?"-":(B.partial?"probe-runtime":g_bt->tag),
+           !B.ok?"-":(g_replaying&&g_rp_tbl[0])?g_rp_tbl:(B.partial?"probe-runtime":g_bt->tag),
            g_so_path[0]?g_so_path:"-");   /* A map_files path means the running inode was read */
     printf("server.up=%d\n",P->pid<0?0:1);
     /* All instances.  The detailed keys (server, region) cover only the current one, so the
@@ -5960,7 +5964,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         if(CAP2.await_ms>=0)      printf("cap.await_ms=%.2f cap.read_await_ms=%.2f cap.write_await_ms=%.2f\n",
                                          CAP2.await_ms,CAP2.r_await_ms<0?0:CAP2.r_await_ms,CAP2.w_await_ms<0?0:CAP2.w_await_ms);
         if(CAP2.qdepth>=0)        printf("cap.queue_depth=%.2f\n",CAP2.qdepth);
-        printf("cap.dev_iops=%.0f cap.proc_iops=%.0f\n",CAP2.dev_iops,CAP2.riops+CAP2.wiops);
+        printf("cap.dev_iops=%.0f cap.proc_iops=%.0f\n",CAP2.dev_iops,rnd_as_printed(CAP2.riops,0)+rnd_as_printed(CAP2.wiops,0));
         /* I/O profile: ceilings are compared only within this cell (block size x read share) */
         printf("cap.req_kb=%.1f cap.read_ratio=%.2f cap.profile=\"%s/%s\"\n",
                CAP2.req_kb,CAP2.read_ratio,CAP_BS_NAME[CAP2.prof_bs],CAP_RW_NAME[CAP2.prof_rw]);
@@ -6046,7 +6050,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
        server is server.cpu_pct (one core = 100) divided by 100 to match. */
     printf("tier.server_cores=%.2f tier.master_cores=%.2f tier.broker_cores=%.2f"
            " tier.cas_cores=%.2f tier.pl_cores=%.2f\n",
-           cpu_pct/100.0,T->cpu_master,T->cpu_broker,T->cpu_cas,T->cpu_pl);
+           rnd_as_printed(cpu_pct,1)/100.0,T->cpu_master,T->cpu_broker,T->cpu_cas,T->cpu_pl);
     printf("total.cubrid_pss_bytes=%.0f total.cubrid_pct_ram=%.2f\n",
            P->pss_kb*1024.0+T->master+T->broker+T->cas+T->pl,
            (P->pss_kb*1024.0+T->master+T->broker+T->cas+T->pl)/(mt>0?mt:1)*100);
@@ -6301,6 +6305,9 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     }
     B.ok=(int)rp_num(t,"heapB.enabled",0);
     rp_str(t,"heapB.reason",B.why,sizeof B.why);
+    rp_str(t,"heapB.table",g_rp_tbl,sizeof g_rp_tbl);
+    B.partial=!strcmp(g_rp_tbl,"probe-runtime");
+    rp_str(t,"heapB.lib",g_so_path,sizeof g_so_path); if(!strcmp(g_so_path,"-")) g_so_path[0]=0;
     B.total=rp_num(t,"heapB.total_bytes",0);
     B.n_bad=(int)rp_num(t,"heapB.excluded",0);
     /* Heap detail B items.  The keys are slugified screen labels, so the map back is
@@ -6337,14 +6344,15 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     CAP2.read_bps =rp_num(t,"io.read_bps",0);   CAP2.write_bps=rp_num(t,"io.write_bps",0);
     CAP2.riops    =rp_num(t,"io.read_iops",0);  CAP2.wiops    =rp_num(t,"io.write_iops",0);
     CAP2.dev_iops =rp_num(t,"cap.dev_iops",0);  CAP2.dev_util =rp_num(t,"hostdev.util_pct",0);
-    CAP2.await_ms =rp_num(t,"cap.await_ms",0);
-    CAP2.r_await_ms=rp_num(t,"cap.read_await_ms",0);
-    CAP2.w_await_ms=rp_num(t,"cap.write_await_ms",0);
-    CAP2.qdepth   =rp_num(t,"cap.queue_depth",0);
-    CAP2.miss_pps =rp_num(t,"cap.miss_pages_per_s",0);
+    /* A key missing from the frame was not measured: -1 as in live, never 0 */
+    CAP2.await_ms =rp_num(t,"cap.await_ms",-1);
+    CAP2.r_await_ms=rp_num(t,"cap.read_await_ms",-1);
+    CAP2.w_await_ms=rp_num(t,"cap.write_await_ms",-1);
+    CAP2.qdepth   =rp_num(t,"cap.queue_depth",-1);
+    CAP2.miss_pps =rp_num(t,"cap.miss_pages_per_s",-1);
     CAP2.hit_pct  =rp_num(t,"cap.buffer_hit_pct",-1);
-    CAP2.turnover_pct=rp_num(t,"cap.turnover_pct",0);
-    CAP2.readmit_pct =rp_num(t,"cap.readmit_pct",0);
+    CAP2.turnover_pct=rp_num(t,"cap.turnover_pct",-1);
+    CAP2.readmit_pct =rp_num(t,"cap.readmit_pct",-1);
     CAP2.ceil_iops=rp_num(t,"cap.ceiling_iops",0);
     CAP2.ceil_bps =rp_num(t,"cap.ceiling_bps",0);
     CAP2.ceil_util=rp_num(t,"cap.ceiling_util_pct",0);
@@ -6358,6 +6366,9 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
        verdict names the wrong cell (">64KB" recorded, "<8KB" replayed). */
     CAP2.prof_bs=cap_bs_idx(CAP2.req_kb); CAP2.prof_rw=cap_rw_idx(CAP2.read_ratio);
     CAP2.ps_ok    =(int)rp_num(t,"cap.perfmon_counters_running",0);
+    CAP2.pb_fetch_ps  =rp_num(t,"cap.pb_fetch_per_s",0);   CAP2.pb_ioread_ps=rp_num(t,"cap.pb_ioread_per_s",0);
+    CAP2.pb_iowrite_ps=rp_num(t,"cap.pb_iowrite_per_s",0); CAP2.log_iowrite_ps=rp_num(t,"cap.log_iowrite_per_s",0);
+    CAP2.commit_ps    =rp_num(t,"cap.commit_per_s",0);
     CAP2.ms       =rp_num(t,"cap.aggregate_ms",0);
     CAP2.over_budget=(int)rp_num(t,"cap.over_budget",0);
     rp_str(t,"cap.hit_source",CAP2.hit_src,sizeof CAP2.hit_src);
@@ -6390,7 +6401,8 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* Method A: present when the recording was taken with it (live always is).  Its
        absence leaves A empty, which the A box shows as "not measured". */
     memset(&A,0,sizeof A);
-    if(rp_find(t,"heapA.chunks",b,sizeof b)){
+    g_rp_have_a=rp_find(t,"heapA.chunks",b,sizeof b);
+    if(g_rp_have_a){
         A.chunks=(long)strtod(b,NULL);
         A.total=rp_num(t,"heapA.total_bytes",0);
         for(int c=0;c<7;c++){ char k[96]; snprintf(k,sizeof k,"heapA.%s_bytes",slugify(ACAT[c])); A.cat[c]=rp_num(t,k,0); }
@@ -6402,6 +6414,14 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     CAP.proc_io=(int)rp_num(t,"caps.proc_io",0);    CAP.clear_refs=(int)rp_num(t,"caps.clear_refs",0);
     cap_note();
     P->reg_dropped=(int)rp_num(t,"limits.regions_dropped",0);
+    /* Run state of the recording host: permissions and the hot measurement */
+    g_perm_limited=(int)rp_num(t,"perm.limited",0);
+    rp_str(t,"perm.reason",g_perm_why,sizeof g_perm_why);
+    g_hot_measured=(int)rp_num(t,"hot.enabled",0);
+    g_hot_limit_gb=rp_num(t,"hot.limit_gb",g_hot_limit_gb);
+    g_hot_every   =rp_num(t,"hot.every_s",g_hot_every);
+    g_hot_cost_ms =rp_num(t,"hot.last_cost_ms",-1);
+    rp_str(t,"hot.reason",g_hot_off_why,sizeof g_hot_off_why);
     g_disk_dropped=(int)rp_num(t,"limits.disks_dropped",0);
     /* Parameters: the verdicts compare usage against these, so a replay without them
        would judge against nothing.  Only the rows terse emits are looked for. */
@@ -6464,14 +6484,14 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
                 FILE *tf=tmpfile(); if(!tf) continue;
                 fflush(stdout); int sv=dup(1);
                 if(sv<0||dup2(fileno(tf),1)<0){ if(sv>=0) close(sv); fclose(tf); continue; }
-                render_terse(&P,&M,&T,with_a||A.chunks>0,IO.rb,IO.wb,IO.ri,IO.wi,
+                render_terse(&P,&M,&T,with_a||g_rp_have_a,IO.rb,IO.wb,IO.ri,IO.wi,
                              IO.absorb_ok?IO.absorb:-1.0,IO.blkpct,IO.devnm,IO.devutil,IO.devr,
                              ts,(long)rt,IO.rchar,IO.minflt,IO.majflt,IO.cpu_pct,IO.ncpu,
                              IO.d_thr,IO.n_thr);
                 fflush(stdout); dup2(sv,1); close(sv);
                 json_line_from_terse(tf,stdout); fclose(tf);
             } else {
-                render_terse(&P,&M,&T,with_a||A.chunks>0,IO.rb,IO.wb,IO.ri,IO.wi,
+                render_terse(&P,&M,&T,with_a||g_rp_have_a,IO.rb,IO.wb,IO.ri,IO.wi,
                              IO.absorb_ok?IO.absorb:-1.0,IO.blkpct,IO.devnm,IO.devutil,IO.devr,
                              ts,(long)rt,IO.rchar,IO.minflt,IO.majflt,IO.cpu_pct,IO.ncpu,
                              IO.d_thr,IO.n_thr);
@@ -6505,7 +6525,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
         g_replaying=1; g_rep_i=(int)i; g_rep_n=(int)n;
         g_rep_ts=(time_t)rp_num(fr[i],"ts_epoch",0);
         if(view) render_plot(&P,&M,&T,&IO,paused,!no_hot);
-        else     render_dash(&P,&M,&T,&IO,lens,paused,0,-1,A.chunks>0);
+        else     render_dash(&P,&M,&T,&IO,lens,paused,0,-1,g_rp_have_a);
         int k, step=0;
         while((k=tui_key())>=0){
             if(k=='q'){ g_stop=1; break; }

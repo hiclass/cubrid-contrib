@@ -81,25 +81,26 @@ rec=[json.loads(l) for l in open(sys.argv[1]) if l.strip().startswith('{')]
 rep=[json.loads(l) for l in open(sys.argv[2]) if l.strip().startswith('{')]
 if len(rep)!=len(rec):
     print(f"  FAIL replay emitted {len(rep)} frame(s) for {len(rec)} recorded"); sys.exit(1)
-last,out=rec[-1],rep[-1]
-# Properties of the run, not of the frame: how it was invoked, when, and which file
-# the recording host's process mapped.
-SKIP={'opts.used','ts','ts_epoch','heapB.lib'}
+# Every frame, both ways: a key the replay drops, a key it invents (a 0 where the
+# recording had no measurement) and a changed value all fail.  Only how the run was
+# invoked is a property of the run rather than of the frame.
+SKIP={'opts.used'}
 diff=[]; n=0
-for k,v in last.items():
-    if k in SKIP:
-        continue
-    n+=1
-    if k not in out: diff.append((k,v,'<missing>')); continue
-    w=out[k]
-    if isinstance(v,(int,float)) and isinstance(w,(int,float)):
-        if abs(float(v)-float(w))>max(1e-6,abs(float(v))*1e-9): diff.append((k,v,w))
-    elif v!=w: diff.append((k,v,w))
+for fi,(a,b) in enumerate(zip(rec,rep)):
+    for k in sorted(set(a)|set(b)):
+        if k in SKIP: continue
+        n+=1
+        if k not in b: diff.append((fi,k,a[k],'<missing>')); continue
+        if k not in a: diff.append((fi,k,'<absent>',b[k])); continue
+        v,w=a[k],b[k]
+        if isinstance(v,(int,float)) and isinstance(w,(int,float)):
+            if abs(float(v)-float(w))>max(1e-6,abs(float(v))*1e-9): diff.append((fi,k,v,w))
+        elif v!=w: diff.append((fi,k,v,w))
 if diff:
     print(f"  FAIL {len(diff)} key(s) differ after replay:")
-    for k,a,b in diff[:8]: print(f"        {k}: recorded={a} replayed={b}")
+    for fi,k,a,b in diff[:8]: print(f"        frame {fi} {k}: recorded={a} replayed={b}")
     sys.exit(1)
-print(f"  ok   replay reproduces the recorded frame ({n} keys compared, {len(SKIP)} run properties skipped)")
+print(f"  ok   replay reproduces every frame ({len(rec)} frames, {n} keys compared both ways, {len(SKIP)} run property skipped)")
 PY
     else
         echo "  skip round-trip comparison (no python3)"
