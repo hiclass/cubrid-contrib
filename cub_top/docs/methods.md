@@ -56,6 +56,8 @@ CUBRID 11.5 빌드의 DWARF(`readelf --debug-dump=info`)에서 추출한 값입�
 
 `xcache_Global.memory_usage_cache` / `memory_usage_clone`은 **엔진이 스스로 카운팅하는 바이트 값**입니다. 추정이 아니라 그 값을 그대로 읽으므로 오차가 없습니다.
 
+이 두 필드는 11.5 표에만 있습니다. 10.2~11.4 표에는 `entry_count`만 있으므로 플랜 캐시는 **엔트리 수만** 표시하고(크기 `-`, `heapB.plan_cache_xcache_count`) 합계에서 뺍니다. 표에 없는 오프셋은 읽지 않고 그 항목을 생략합니다.
+
 ### 락프리 해시맵 주의
 
 `sessions`, `catalog_Hashmap`, `fpcache_Hashmap`, `lk_Gl.m_obj_hash_table`은 `cubthread::lockfree_hashmap<K,V>`이고, 런타임에 **구현 두 개 중 하나**를 씁니다(`enable_new_lfhash`).

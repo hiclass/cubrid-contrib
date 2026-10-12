@@ -1867,6 +1867,8 @@ static void method_b(proc_t *P){
             snprintf(lastwhy,sizeof lastwhy,"[%s] 심볼 조회 실패",tb_->tag); break; } \
         if(!B.sym[S_PGBUF]){ \
             snprintf(lastwhy,sizeof lastwhy,"[%s] pgbuf_Pool 심볼 없음",tb_->tag); break; } \
+        if(tb_->off_pgbuf_nbuf<0){ \
+            snprintf(lastwhy,sizeof lastwhy,"[%s] num_buffers 오프셋 없음",tb_->tag); break; } \
         { const int offs[]={tb_->off_pgbuf_nbuf,tb_->off_xc_entries,tb_->off_xc_usage, \
                             tb_->off_xc_clone,tb_->off_qlist_npages,tb_->off_qpool_nent, \
                             tb_->off_lf_alloccnt,tb_->off_lk_ntran}; \
@@ -2122,31 +2124,37 @@ adopted:;
     long mxcli=prm_get("max_clients"); if(mxcli<=0) mxcli=1000;
     #define CNT_OK(c) ((c)>=0)
     #define CNT_IN_RANGE(c) ((c)>=0 && (double)(c) <= (double)mxcli*8.0)
-    if(B.sym[S_XCACHE]){
+    /* An offset missing from the table is -1: that field is not read */
+    if(B.sym[S_XCACHE] && g_bt->off_xc_entries>=0){
         unsigned long a=B.base+B.sym[S_XCACHE];
         g_rd_ok=1;
         int32_t ent=rd_i32(P->pid,a+g_bt->off_xc_entries);
-        int32_t uc =rd_i32(P->pid,a+g_bt->off_xc_usage);
-        int32_t ucl=rd_i32(P->pid,a+g_bt->off_xc_clone);
-        ADD("plan cache (xcache)",(double)uc+ucl,GRD,"entries=%d, engine-tracked",ent);
+        if(g_bt->off_xc_usage>=0 && g_bt->off_xc_clone>=0){
+            int32_t uc =rd_i32(P->pid,a+g_bt->off_xc_usage);
+            int32_t ucl=rd_i32(P->pid,a+g_bt->off_xc_clone);
+            ADD("plan cache (xcache)",(double)uc+ucl,GRD,"entries=%d, engine-tracked",ent);
+        } else if(CNT_OK(ent))   /* 11.5 and later track usage; older tables give the count only */
+            ADD_COUNT("plan cache (xcache)",ent,g_ascii?"entries=%d - size not tracked":"entries=%d — 크기 미상",ent);
     }
     /* terse keys are separate from screen labels: a Hangul label makes slugify produce
        an empty string and keys like `heapB._bytes`.  The screen changes with L() but
        keys must stay fixed ASCII or monitoring integrations break. */
     if(B.sym[S_QLIST]||B.sym[S_QPOOL]){
-        g_rd_ok=1;
-        int32_t np=B.sym[S_QLIST]?rd_i32(P->pid,B.base+B.sym[S_QLIST]+g_bt->off_qlist_npages):0;
-        int32_t pe=B.sym[S_QPOOL]?rd_i32(P->pid,B.base+B.sym[S_QPOOL]+g_bt->off_qpool_nent):0;
-        v=(double)np*g_pagesize + (double)pe*4096;
         /* The manual's term is "query result cache" (list cache is the internal name).
            The feature is off entirely when max_query_cache_entries=0 (the 11.5
            default), so the screen distinguishes "off, hence 0" from "on but empty". */
-        { long qce=prm_get("max_query_cache_entries");
-          if(qce==0)
-              ADD("result cache (query)",0.0,GRD,g_ascii?"disabled (max_query_cache_entries=0)"
-                                                   :"비활성 (max_query_cache_entries=0)");
-          else
-              ADD("result cache (query)",(CNT_OK(np)&&CNT_OK(pe))?v:-1.0,GRD,"pages=%d pool=%d",np,pe); }
+        long qce=prm_get("max_query_cache_entries");
+        int qok=(!B.sym[S_QLIST]||g_bt->off_qlist_npages>=0) && (!B.sym[S_QPOOL]||g_bt->off_qpool_nent>=0);
+        g_rd_ok=1;
+        if(qce==0)
+            ADD("result cache (query)",0.0,GRD,g_ascii?"disabled (max_query_cache_entries=0)"
+                                                 :"비활성 (max_query_cache_entries=0)");
+        else if(qok){
+            int32_t np=B.sym[S_QLIST]?rd_i32(P->pid,B.base+B.sym[S_QLIST]+g_bt->off_qlist_npages):0;
+            int32_t pe=B.sym[S_QPOOL]?rd_i32(P->pid,B.base+B.sym[S_QPOOL]+g_bt->off_qpool_nent):0;
+            v=(double)np*g_pagesize + (double)pe*4096;
+            ADD("result cache (query)",(CNT_OK(np)&&CNT_OK(pe))?v:-1.0,GRD,"pages=%d pool=%d",np,pe);
+        }
     }
     if(B.sym[S_FPCNT]){
         g_rd_ok=1;
@@ -2162,12 +2170,12 @@ adopted:;
         ADD("lock table (tran)",CNT_IN_RANGE(nt)?(double)nt*g_bt->sz_lk_tran:-1.0,GRD,
             g_ascii?"num_trans=%d x%dB (not object locks)":"num_trans=%d x%dB (객체락 아님)",nt,g_bt->sz_lk_tran);
     }
-    if(B.sym[S_SESS]){
+    if(B.sym[S_SESS] && g_bt->off_lf_alloccnt>=0){
         g_rd_ok=1;
         int32_t c=rd_i32(P->pid,B.base+B.sym[S_SESS]+g_bt->off_lf_alloccnt);
         ADD("session table",CNT_IN_RANGE(c)?(double)c*g_bt->sz_session:-1.0,GRD,g_ascii?"alloc_cnt=%d x%dB, cap %ld":"alloc_cnt=%d x%dB, 한도 %ld",c,g_bt->sz_session,mxcli*8);
     }
-    if(B.sym[S_CAT]){
+    if(B.sym[S_CAT] && g_bt->off_lf_alloccnt>=0){
         g_rd_ok=1;
         int32_t c=rd_i32(P->pid,B.base+B.sym[S_CAT]+g_bt->off_lf_alloccnt);
         ADD("catalog cache",CNT_OK(c)?(double)c*g_bt->sz_catalog:-1.0,GRD,"alloc_cnt=%d x%d",c,g_bt->sz_catalog);

@@ -222,7 +222,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-json.sh` | `--dump-json` 이 `-d` 와 키 집합·순서 동일 |
 | `check-offsets.sh` | 소스 오프셋 상수가 골든 표와 일치 |
 | `check-librt.sh` | 바이너리가 librt 전용 함수(`clock_*` 등)를 쓰지 않음 → `legacy` 빌드가 glibc < 2.17 에서 링크됨 |
-| `test-guard.sh` | 오프셋을 훼손하면 게이트가 **실제로 막는지** |
+| `test-guard.sh` | 오프셋을 훼손하면 게이트가 **실제로 막는지**, 표에 없는 오프셋은 읽지 않는지 |
 
 검사가 실패할 수 있음을 보장하지 않으면 통과는 의미가 없다. 그래서 `test-guard.sh` 는 오프셋을
 일부러 훼손해 게이트 작동을 확인하고, `check-replay.sh` 는 "재생이 맞아 보인다"가 아니라 diff 로

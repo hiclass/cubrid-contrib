@@ -101,4 +101,33 @@ then say "L3 detects a wrong table" "FAIL(let it through)"; fail=1
 else say "L3 detects a wrong table" "PASS"; fi
 
 
+# ---- Negative 3: a table missing a field (older tables lack the xcache usage fields) ----
+#    The builtin table is made non-matching so the table file is used.  A missing offset
+#    must not be read: xcache shows the count only, session/catalog are omitted.
+TBL="$ROOT/offsets/cubrid-11.5.0.2374.tbl"
+sed 's/{"table-11.5","11.5",SYMN,0,/{"table-11.5","99.9",SYMN,0,/' "$SRC" > "$TMP/miss.c"
+grep -vE '^OFF_(XCACHE_USAGE|XCACHE_CLONE|LF_ALLOCCNT) ' "$TBL" > "$TMP/miss.tbl"
+if [ ! -f "$TBL" ]; then
+    say "missing offset -> field not read" "SKIP(no 11.5 table)"
+elif gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/miss" "$TMP/miss.c" 2>/dev/null; then
+    raw=$("$TMP/miss" -d --offsets "$TMP/miss.tbl" 2>/dev/null)
+    if printf '%s' "$raw" | grep -q '^server.up=0'; then
+        say "missing offset -> field not read" "SKIP(cub_server not running)"
+    elif ! printf '%s' "$raw" | grep -q 'heapB.table="offsets-file"'; then
+        say "missing offset -> field not read" "SKIP(table file not adopted: $(printf '%s' "$raw" | grep -o 'heapB.table="[^"]*"'))"
+    else
+        bad=$(printf '%s' "$raw" | grep -oE 'heapB\.(plan_cache_xcache|session_table|catalog_cache)_bytes=[0-9]+' | tr '\n' ' ')
+        if [ -n "$bad" ]; then
+            say "missing offset -> field not read" "FAIL(read anyway: $bad)"; fail=1
+        elif printf '%s' "$raw" | grep -q 'heapB.plan_cache_xcache_count='; then
+            say "missing offset -> field not read" "PASS(xcache count only)"
+        else
+            say "missing offset -> field not read" "FAIL(xcache count missing)"; fail=1
+        fi
+    fi
+else
+    say "missing offset build" "FAIL(compile failed)"; fail=1
+fi
+
+
 [ $fail -eq 0 ] && echo "→ PASS" || { echo "→ FAIL"; exit 1; }
