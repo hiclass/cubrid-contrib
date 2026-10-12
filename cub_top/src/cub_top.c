@@ -2585,12 +2585,14 @@ static void pgbuf_scan(proc_t*P){
            replacement resolves, a wrong offset stays 100% mismatched.  Cost is
            proportional to the mismatch count alone. */
         if(nm>0){
-            static unsigned char *rvp=NULL, *rhd=NULL, *rok=NULL; static int rcap=0;
-            if(nm>rcap){ free(rvp); free(rhd); free(rok);
+            /* rvp holds whole BCBs, whose size differs by version: its capacity is kept in bytes,
+               or a switch to an instance with larger BCBs would overrun it */
+            static unsigned char *rvp=NULL, *rhd=NULL, *rok=NULL; static int rcap=0; static size_t rvp_bytes=0;
+            if(nm>rcap || szb*(size_t)nm>rvp_bytes){ free(rvp); free(rhd); free(rok);
                 rvp=(unsigned char*)malloc(szb*(size_t)nm);    /* the whole BCB: a replaced page brings its own flags and LSA */
                 rhd=(unsigned char*)malloc(16*(size_t)nm);
                 rok=(unsigned char*)malloc((size_t)nm*2);
-                rcap=(rvp&&rhd&&rok)?nm:0; }
+                rcap=(rvp&&rhd&&rok)?nm:0; rvp_bytes=rcap?szb*(size_t)nm:0; }
             if(rcap>=nm){
                 /* Re-read those BCBs' vpids now */
                 static uint64_t *va=NULL; static int vcap=0;

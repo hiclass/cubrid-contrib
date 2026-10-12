@@ -17,7 +17,8 @@
 # BCB header recheck: a page replaced between the BCB read and the header read must
 # become the new page as a whole (flags, zone, oldest LSA), and the totals must follow.
 # In degraded mode only verified records may be counted, dumped or compared, and an
-# allocation failure must not turn mismatches into a pass; carried headers must stay current.
+# allocation failure must not turn mismatches into a pass; carried headers must stay current,
+# and the recheck buffer must follow the BCB size of the instance.
 # pgbuf_scan() reads a fake buffer pool in the test process; a hook inserted after
 # pass 1 replaces one BCB's page, deterministically.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
@@ -222,5 +223,47 @@ HR
 gcc -O2 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/r" "$TMP/r.c" 2>"$TMP/cc4.err" || { cat "$TMP/cc4.err"; echo "→ FAIL (compile failed)"; exit 1; }
 "$TMP/r" > "$TMP/out4" || rc=1
 sed 's/^/  /' "$TMP/out4"
+# Instance switch to larger BCBs: the recheck buffer holds whole BCBs, so it must grow by
+# bytes, not by count.  Built with AddressSanitizer where available.
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$SRC" > "$TMP/z.c"
+cat >> "$TMP/z.c" <<'HZ'
+/* Two instances in turn: the 11.5 BCB (144B), then a larger one (176B), each with 10 of its
+   200 headers disagreeing, so the recheck re-reads 10 whole BCBs each time. */
+#define NB 200
+static unsigned char pool_[4096], *iop_[NB];
+static void setup(btab_t *bt,unsigned char **bcbs){
+    g_bt=bt; *bcbs=calloc(NB,(size_t)bt->pg.sz_bcb);
+    int32_t nb=NB; memcpy(pool_+bt->off_pgbuf_nbuf,&nb,4);
+    uint64_t t=(uint64_t)(uintptr_t)*bcbs; memcpy(pool_+bt->pg.bcbtab,&t,8);
+    for(int i=0;i<NB;i++){
+        unsigned char*b=*bcbs+(size_t)i*bt->pg.sz_bcb; int pageid=100+i; int16_t v=0; uint32_t fl=0x00020000u; uint64_t ol=~0ull;
+        memcpy(b+bt->pg.vpid,&pageid,4); memcpy(b+bt->pg.vpid+4,&v,2); memcpy(b+bt->pg.flags,&fl,4); memcpy(b+bt->pg.olsa,&ol,8);
+        uint64_t ip=(uint64_t)(uintptr_t)iop_[i]; memcpy(b+bt->pg.iopg,&ip,8);
+        unsigned char*h=iop_[i]+bt->pg.iobuf_iopg; int hp = i<10 ? 9000+i : 100+i; uint64_t lsa=5;
+        memcpy(h,&lsa,8); memcpy(h+8,&hp,4); memcpy(h+12,&v,2);
+    }
+}
+int main(void){
+    static proc_t P; P.pid=getpid(); CAP.vm_readv=1;
+    B.ok=1; B.partial=0; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
+    for(int i=0;i<NB;i++) iop_[i]=calloc(1,(size_t)BTABS[0].pg.iobuf_iopg+64);
+    static btab_t big; big=BTABS[0]; big.pg.sz_bcb=BTABS[0].pg.sz_bcb+32;
+    unsigned char *b1,*b2;
+    setup((btab_t*)&BTABS[0],&b1); pgbuf_scan(&P); printf("%dB BCB: recheck %d mismatch %d\n",BTABS[0].pg.sz_bcb,PG.recheck,PG.mismatch);
+    reset_instance_state();
+    B.ok=1; B.partial=0; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
+    setup(&big,&b2); pgbuf_scan(&P); printf("%dB BCB: recheck %d mismatch %d\n",big.pg.sz_bcb,PG.recheck,PG.mismatch);
+    printf("done\n"); return 0;
+}
+HZ
+if gcc -O1 -g -std=gnu99 -w -fsanitize=address -I "$(dirname "$SRC")" -o "$TMP/z" "$TMP/z.c" 2>/dev/null; then
+    if ASAN_OPTIONS=detect_leaks=0 "$TMP/z" > "$TMP/out5" 2>&1 && grep -q '^done' "$TMP/out5"; then
+        echo "  ok   switch to larger BCBs: recheck buffer grows (ASan clean)"
+    else
+        echo "  FAIL switch to larger BCBs:"; grep -m3 -E 'ERROR|overflow|BCB' "$TMP/out5" | sed 's/^/       /'; rc=1
+    fi
+else
+    echo "  SKIP switch to larger BCBs (no AddressSanitizer)"
+fi
 [ $rc -eq 0 ] && { echo "→ PASS"; exit 0; }
 echo "→ FAIL"; exit 1
