@@ -178,9 +178,12 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 
 | | 무엇을 | 정확도 | 비용 |
 |---|---|---|---|
-| **L1** `/proc` | 영역별 매핑·상주·PSS·폴트·스레드·디스크 I/O | 커널 값 | µs~ms |
+| **L1** `/proc` | 영역별 매핑·상주·PSS·폴트·스레드·디스크 I/O | 커널 값 | µs~수십 ms (smaps) |
 | **L2** `paramdump` | 파라미터 설정 할당량 | 서버 값 | 시작 시·서버 재시작 시 1회 |
-| **L3** `process_vm_readv` | 엔진 전역 변수 → 서브시스템 실사용 | 직독 | µs |
+| **L3** `process_vm_readv` | 엔진 전역 변수 → 서브시스템 실사용 | 직독 | µs (BCB 배열은 수~수십 ms) |
+
+매 프레임이 세 가지를 모두 수행한다. 프레임당 수집 작업은 64코어·버퍼 512MB 환경 실측 중앙값 45ms(`--hot` 57ms),
+기본 0.5초 간격의 약 9% 이며 대시보드 좌상단 `수집 N ms` 로 보인다. 측정 조건과 비용 요인은 [docs/architecture.md](docs/architecture.md#프레임-비용).
 
 L3 는 **3중 게이트**를 통과해야 채택된다 — ① 심볼 존재 ② 오프셋 정렬 ③ `paramdump` 교차검증
 (`pgbuf num_buffers == data_buffer_pages`). 하나라도 어긋나면 그 기능만 끄고 사유를 남긴다.
