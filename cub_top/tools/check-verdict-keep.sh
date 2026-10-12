@@ -17,19 +17,15 @@
 # Regression: retention of I/O verdicts.
 # A verdict survives its condition clearing, staying up to two rows with its timestamp,
 # because an I/O anomaly is brief and would otherwise vanish as soon as it was seen.
-# A real bottleneck is hard to reproduce, so the retention logic is duplicated and table-tested.
-# When cub_top.c's retention logic changes, update step() in this file too.
+# vd_keep_step() is driven step by step.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$ROOT/tools/verdict-keep-test.c"
-BIN="$(mktemp -u /tmp/verdict-keep.XXXXXX)"
-trap 'rm -f "$BIN"' EXIT
-gcc -O2 -Wall -Wextra -o "$BIN" "$SRC" 2>/dev/null || { echo "-> FAIL (compile failed)"; exit 1; }
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/verdict-keep-test.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
+# The test is compiled together with cub_top.c, so it calls the dashboard's own functions.
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n#include "%s"\n' \
+    "$ROOT/src/cub_top.c" "$ROOT/tools/verdict-keep-test.c" > "$TMP/t.c"
+gcc -O2 -std=gnu99 -w -I "$ROOT/src" -o "$TMP/t" "$TMP/t.c" 2>"$TMP/cc.err" \
+  || { cat "$TMP/cc.err"; echo "-> FAIL (compile failed)"; exit 1; }
 echo "verdict retention (occur, hold, recur, push down, limit)"
-"$BIN" || { echo "→ FAIL"; exit 1; }
-CS="$ROOT/src/cub_top.c"
-# Keep the table in step with the source: confirm the key invariants still exist there
-for pat in '#define VDKEEP 2' 'if(g_vdn>0) g_vd[0].live=0;' 'g_vd[0].kind==verdict'; do
-    grep -qF "$pat" "$CS" || { echo "-> FAIL ('$pat' has disappeared from the source)"; exit 1; }
-done
+"$TMP/t" || { echo "→ FAIL"; exit 1; }
 echo "→ PASS"

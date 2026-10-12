@@ -16,21 +16,15 @@
 #
 # Regression: I/O verdict branches.
 # Showing a verdict on screen needs a real disk bottleneck, which is hard to reproduce,
-# so a table-based test duplicating the logic covers every branch.
-# When cub_top.c's verdict expressions change, update decide() in this file too.
+# so io_verdict() is driven with a table that covers every branch.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$ROOT/tools/verdict-test.c"
-BIN="$(mktemp -u /tmp/verdict-test.XXXXXX)"
-trap 'rm -f "$BIN"' EXIT
-if ! gcc -O2 -Wall -Wextra -o "$BIN" "$SRC" 2>/dev/null; then
-    echo "-> FAIL (compile failed)"; exit 1
-fi
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/verdict-test.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
+# The test is compiled together with cub_top.c, so it calls the dashboard's own functions.
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n#include "%s"\n' \
+    "$ROOT/src/cub_top.c" "$ROOT/tools/verdict-test.c" > "$TMP/t.c"
+gcc -O2 -std=gnu99 -w -I "$ROOT/src" -o "$TMP/t" "$TMP/t.c" 2>"$TMP/cc.err" \
+  || { cat "$TMP/cc.err"; echo "-> FAIL (compile failed)"; exit 1; }
 echo "verdict branches (wa, device and instance signal combinations)"
-"$BIN" || { echo "→ FAIL"; exit 1; }
-# Keep the table in step with the source: confirm the threshold expression is unchanged
-CS="$ROOT/src/cub_top.c"
-if ! grep -q 'wa_hi *= *(IO->ncpu>0 *? *100.0/IO->ncpu *: *100.0)\*0.5' "$CS"; then
-    echo "-> FAIL (the source wa threshold changed - update decide() in verdict-test.c)"; exit 1
-fi
+"$TMP/t" || { echo "→ FAIL"; exit 1; }
 echo "→ PASS"

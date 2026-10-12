@@ -14,19 +14,7 @@
  *  limitations under the License.
  *
  */
-#include <stdio.h>
-/* cub_top.c's verdict logic copied verbatim, checked branch by branch */
-static int decide(double wa,double devutil,int has_dev,double majflt,int d_thr,double blkpct,int ncpu,double iobps){
-    double wa_hi=(ncpu>0?100.0/ncpu:100.0)*0.5; if(wa_hi<0.5) wa_hi=0.5;
-    int vd_hi_wa=(wa>=wa_hi), vd_hi_dev=(has_dev&&devutil>=80);
-    int vd_mine=(majflt>=1.0)||(d_thr>0)||(blkpct>=1.0)||(iobps>=1.0*1024*1024);
-    int v=0;
-    if(vd_hi_wa&&vd_hi_dev&&vd_mine) v=1;
-    else if(!vd_hi_wa&&vd_hi_dev&&vd_mine) v=2;
-    else if(vd_hi_dev&&!vd_mine) v=4;
-    else if(vd_hi_wa&&!vd_hi_dev) v=3;
-    return v;
-}
+/* Compiled together with cub_top.c (check-verdict.sh): io_verdict() is the dashboard's own code */
 struct T { const char*nm; double wa,dev; int hd; double mf; int d; double bp; int nc; double io; int want; };
 int main(void){
     struct T t[]={
@@ -57,7 +45,7 @@ int main(void){
     };
     int n=sizeof t/sizeof*t, bad=0;
     for(int i=0;i<n;i++){
-        int g=decide(t[i].wa,t[i].dev,t[i].hd,t[i].mf,t[i].d,t[i].bp,t[i].nc,t[i].io);
+        int g=io_verdict(t[i].wa,t[i].nc,t[i].hd,t[i].dev,t[i].mf,t[i].d,t[i].bp,t[i].io);
         printf("  %-26s want=%d got=%d %s\n",t[i].nm,t[i].want,g,g==t[i].want?"OK":"<<< FAIL");
         if(g!=t[i].want) bad++;
     }

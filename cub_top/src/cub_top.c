@@ -4570,6 +4570,53 @@ static void vd_format(int kind,const vdval_t *v,char *vb,size_t n){
     }
 }
 
+/* ---- Decisions the dashboard draws, as functions so the regressions test this code ---- */
+/* I/O verdict: 0 none, 1 certain bottleneck, 2 masked, 3 non-disk wait, 4 someone else's load.
+   wa is diluted by the core count (1-2% on 64 cores with the disk saturated), so it is
+   crossed with device utilization and this instance's own signals.  The wa threshold is
+   half of one core waiting outright (100/ncpu), floored at 0.5. */
+static int io_verdict(double wa,int ncpu,int has_dev,double devutil,
+                      double majflt,int d_thr,double blkpct,double iobps){
+    double wa_hi=(ncpu>0?100.0/ncpu:100.0)*0.5;
+    if(wa_hi<0.5) wa_hi=0.5;
+    int hi_wa=(wa>=wa_hi), hi_dev=(has_dev&&devutil>=80);
+    /* Evidence this instance is the one using the disk.  rb+wb counts too: under an
+       overlay filesystem the DB files' device is not found in diskstats. */
+    int mine=(majflt>=1.0)||(d_thr>0)||(blkpct>=1.0)||(iobps>=1.0*1024*1024);
+    if(hi_wa&&hi_dev&&mine)  return 1;
+    if(!hi_wa&&hi_dev&&mine) return 2;
+    if(hi_dev&&!mine)        return 4;
+    if(hi_wa&&!hi_dev)       return 3;
+    return 0;
+}
+/* Verdict retention: the two most recent kinds stay with their time.  A repeat of the
+   same kind updates the latest entry; a new kind pushes the others down and the pushed
+   entry is no longer live; no verdict clears live but keeps the record. */
+#define VDKEEP 2
+typedef struct { int kind; vdval_t v; char hm[8]; int live; } vdkeep_t;
+static void vd_keep_step(vdkeep_t *k,int *n,int verdict,const vdval_t *v,const char *hm){
+    if(!verdict){ if(*n>0) k[0].live=0; return; }
+    if(*n>0 && k[0].kind==verdict){
+        k[0].v=*v; snprintf(k[0].hm,sizeof k[0].hm,"%s",hm); k[0].live=1; return; }
+    if(*n>0) k[0].live=0;
+    for(int i=VDKEEP-1;i>0;i--) k[i]=k[i-1];
+    k[0].kind=verdict; k[0].v=*v; snprintf(k[0].hm,sizeof k[0].hm,"%s",hm); k[0].live=1;
+    if(*n<VDKEEP) (*n)++;
+}
+/* CPU-row cells: labels drop as values grow, rather than overflow the cell - a truncated
+   number cannot be read, a label can be inferred from the column order. */
+static void cpu_cell(char *dst,size_t n,const char *lab,double val,int cap){
+    snprintf(dst,n,"%s %.0f%%",lab,val);
+    if(disp_w(dst)>cap) snprintf(dst,n,"%.0f%%",val);
+    if(disp_w(dst)>cap) snprintf(dst,n,"%.0f",val);
+}
+/* Saturated-core cell, decided on display width (a 6-cell label may be 8 bytes) */
+static void sat_cell(char *dst,size_t n,int sat,int cap){
+    snprintf(dst,n,g_ascii?"sat %d":"포화 %d",sat);
+    if(disp_w(dst)>cap) snprintf(dst,n,"sat %d",sat);
+    if(disp_w(dst)>cap) snprintf(dst,n,"%d",sat);
+}
+
 static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                         double work_ms,double a_age,int with_a){
     int W=term_w();
@@ -4662,23 +4709,14 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
           /* Drop the us/sy labels as values grow, rather than overflow the cell: a truncated
              number cannot be read, while a label can be inferred from the column order.
              The last cell is 6 wide, so "sy 100%" (7 characters) would push the width. */
-          #define CPUCELL(dst,lab,val,cap) do{ \
-              snprintf(dst,sizeof dst,"%s %.0f%%",lab,val); \
-              if((int)strlen(dst)>(cap)) snprintf(dst,sizeof dst,"%.0f%%",val); \
-              if((int)strlen(dst)>(cap)) snprintf(dst,sizeof dst,"%.0f",val); \
-          }while(0)
-          CPUCELL(c4,"us",M->cpu_us,7);
-          CPUCELL(c5,"sy",M->cpu_sy,6);
+          cpu_cell(c4,sizeof c4,"us",M->cpu_us,7);
+          cpu_cell(c5,sizeof c5,"sy",M->cpu_sy,6);
           /* These cells pad by display width rather than %7s, so CJK does not push the
              columns; the CPU row is therefore laid out cell by cell.  The last
              three carry their own labels, unrelated to the column headings above,
              so they are dimmed to keep the pairing from being misread. */
           { char c3k[16]; int cap = os_wide?7:6;
-            snprintf(c3k,sizeof c3k,g_ascii?"sat %d":"포화 %d",M->sat_cores);
-            /* Decide the fallback on display width: measured in bytes, a label 6 cells wide but 8
-               bytes long is truncated although it fits.  padf is display width too. */
-            if(disp_w(c3k)>cap) snprintf(c3k,sizeof c3k,"sat %d",M->sat_cores);
-            if(disp_w(c3k)>cap) snprintf(c3k,sizeof c3k,"%d",M->sat_cores);
+            sat_cell(c3k,sizeof c3k,M->sat_cores,cap);
             char pctb[8]; snprintf(pctb,sizeof pctb,"%3.0f%%",nc>0?M->busy_cores/nc*100:0);
             int cx=VX;
             cv_put(cx,y+1,padf(c1,7,1),"250");   cx+=7; cv_put(cx,y+1,"|","250"); cx+=1;
@@ -5197,35 +5235,13 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
            are host-wide; the row labels say which (only the D-thread count beside
            iowait is this server's).  Row count varies, so count before drawing. */
         int has_dev = IO->devnm[0]?1:0;
-        /* Verdict from wa combined with device utilization.  wa is diluted by the core count
-           (1-2% on 64 cores with the disk saturated), so read alone it misses the
-           bottleneck; it is crossed with utilization, majflt and D threads. */
-        /* The wa threshold must scale with the core count.  Three dd streams taking a device
-           to 69% still left wa at 1.5% on 64 cores, so a fixed 3% is unreachable there.
-           The threshold is half of one core waiting outright (100/ncpu). */
-        double wa_hi = (IO->ncpu>0 ? 100.0/IO->ncpu : 100.0)*0.5;
-        if(wa_hi<0.5) wa_hi=0.5;           /* A floor applies even with very many cores */
-        int vd_hi_wa = (M->cpu_wa>=wa_hi), vd_hi_dev = (has_dev&&IO->devutil>=80);
-        /* Evidence that this instance is the one using the disk: a busy device driven by
-           some other process is not a CUBRID bottleneck.  rb/wb (/proc/<pid>/io)
-           must be included, because under an overlay filesystem the backing device
-           of the DB files cannot be identified in diskstats - the server can read
-           hundreds of MB/s with the matched device showing zero.  Waiting signals
-           alone (D threads, blkio) would misattribute that load. */
-        int vd_mine = (IO->majflt>=1.0) || (IO->d_thr>0) || (IO->blkpct>=1.0)
-                      || (IO->rb+IO->wb >= 1.0*1024*1024);   /* Above 1MB/s this instance is doing I/O too */
-        int verdict = 0;   /* 0 none, 1 certain bottleneck, 2 masked, 3 non-disk wait, 4 someone else's load */
-        /* Verdicts persist.  I/O anomalies are brief, so a warning cleared by the next
-           frame reads as "I saw it and it vanished".  The two most recent are kept
-           with their timestamps and pushed up by newer ones; a repeat of the same
-           verdict updates the time rather than adding a line. */
-        #define VDKEEP 2
-        static struct { int kind; vdval_t v; char hm[8]; int live; } g_vd[VDKEEP];
+        /* The verdict (io_verdict) crosses wa, device utilization and this instance's own I/O
+           signals.  Verdicts persist (vd_keep_step): I/O anomalies are brief, so the two most
+           recent are kept with their time. */
+        int verdict = io_verdict(M->cpu_wa,IO->ncpu,has_dev,IO->devutil,IO->majflt,IO->d_thr,
+                                 IO->blkpct,IO->rb+IO->wb);
+        static vdkeep_t g_vd[VDKEEP];
         static int g_vdn=0;
-        if(vd_hi_wa && vd_hi_dev && vd_mine)         verdict=1;
-        else if(!vd_hi_wa && vd_hi_dev && vd_mine)   verdict=2;
-        else if(vd_hi_dev && !vd_mine)               verdict=4;
-        else if(vd_hi_wa && !vd_hi_dev)              verdict=3;
         /* Verdicts include retained ones, so their row count is counted in advance for the box
            height; a new kind arriving this frame can add one. */
         int vdrows = g_vdn;
@@ -5283,26 +5299,9 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         /* The verdict states in one line what the rows above imply together, so that wa
            is not read on its own: it is diluted by core count and hidden when the CPU
            saturates. */
-        if(verdict){
-            vdval_t vv={ M->cpu_wa, IO->devutil, IO->blkpct, IO->majflt, IO->rb+IO->wb, IO->d_thr, IO->n_thr };
-            /* A repeat of the same kind updates the latest entry rather than adding a row - the
-               same warning across two rows would push the previous one out. */
-            if(g_vdn>0 && g_vd[0].kind==verdict){
-                g_vd[0].v=vv;
-                strftime(g_vd[0].hm,sizeof g_vd[0].hm,"%H:%M",&tv);
-                g_vd[0].live=1;
-            } else {
-                /* An entry being pushed down no longer holds, so live is cleared and it cannot be read
-                   as something happening now. */
-                if(g_vdn>0) g_vd[0].live=0;
-                for(int k=VDKEEP-1;k>0;k--) g_vd[k]=g_vd[k-1];
-                g_vd[0].kind=verdict;
-                g_vd[0].v=vv;
-                strftime(g_vd[0].hm,sizeof g_vd[0].hm,"%H:%M",&tv);
-                g_vd[0].live=1;
-                if(g_vdn<VDKEEP) g_vdn++;
-            }
-        } else if(g_vdn>0) g_vd[0].live=0;   /* The condition cleared; the record stays */
+        { vdval_t vv={ M->cpu_wa, IO->devutil, IO->blkpct, IO->majflt, IO->rb+IO->wb, IO->d_thr, IO->n_thr };
+          char hm[8]; strftime(hm,sizeof hm,"%H:%M",&tv);
+          vd_keep_step(g_vd,&g_vdn,verdict,&vv,hm); }
         /* Draw retained verdicts newest first: those still holding in their own colour, past
            ones dimmed to grey. */
         for(int k=0;k<g_vdn;k++){

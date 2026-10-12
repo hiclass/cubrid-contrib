@@ -19,12 +19,12 @@
 # an overflow shifts the pipe and misaligns the Memory row below.  Numbers win over labels.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$(mktemp -u /tmp/cpucell.XXXXXX)"
-trap 'rm -f "$BIN"' EXIT
-gcc -O2 -Wall -Wextra -o "$BIN" "$ROOT/tools/cpucell-test.c" 2>/dev/null \
-  || { echo "-> FAIL (compile failed)"; exit 1; }
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/cpucell-test.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
+# The test is compiled together with cub_top.c, so it calls the dashboard's own functions.
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n#include "%s"\n' \
+    "$ROOT/src/cub_top.c" "$ROOT/tools/cpucell-test.c" > "$TMP/t.c"
+gcc -O2 -std=gnu99 -w -I "$ROOT/src" -o "$TMP/t" "$TMP/t.c" 2>"$TMP/cc.err" \
+  || { cat "$TMP/cc.err"; echo "-> FAIL (compile failed)"; exit 1; }
 echo "CPU row cell widths (label-dropping rule)"
-"$BIN" || { echo "→ FAIL"; exit 1; }
-CS="$ROOT/src/cub_top.c"
-grep -qF 'CPUCELL(c4,"us"' "$CS" || { echo "-> FAIL (CPUCELL missing from the source)"; exit 1; }
+"$TMP/t" || { echo "→ FAIL"; exit 1; }
 echo "→ PASS"
