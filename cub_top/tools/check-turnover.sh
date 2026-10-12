@@ -17,6 +17,7 @@
 # Turnover and refill from synthetic BCB snapshots, through cap_turnover() itself.
 # A scan that never rereads must give 0% refill however long it runs, and a large
 # buffer must not lose replacements: pages are compared by (volid, pageid), not a hash.
+# An instance switch must drop the previous buffer pool snapshot.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
 TMP=${TMPDIR:-/tmp}/cub_top-turnover.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
@@ -52,6 +53,17 @@ int main(void){
     ok&=run("working set 1.5x the buffer",nb,4,nb+nb/2,40,25.0,100.0);
     ok&=run("working set 3x the buffer (outside window)",nb,4,3L*nb,60,25.0,0.0);
     ok&=run("262144 BCBs, 1% new pages per frame",262144,100,0,20,1.0,0.0);
+    /* An instance switch on a frame a large buffer skips must not keep the old snapshot */
+    { static proc_t P; P.pid=999999;
+      B.ok=1; B.partial=0; g_bt=&BTABS[0];
+      PG.ok=1; PG.nbuf=524288; PG.every=2; PG.frame=5; PG.resident=500000; PG.dirty=1234; PG.have_log=1;
+      reset_instance_state();
+      B.ok=1; B.partial=0; g_bt=&BTABS[0];
+      pgbuf_scan(&P);
+      int sw=!PG.ok && PG.resident==0 && PG.dirty==0 && !PG.have_log;
+      printf("  %-4s %-40s ok=%d resident=%d dirty=%d log=%d (want 0 0 0 0)\n",sw?"ok":"FAIL",
+             "instance switch drops the old snapshot",PG.ok,PG.resident,PG.dirty,PG.have_log);
+      ok&=sw; }
     return ok?0:1;
 }
 C

@@ -2691,6 +2691,11 @@ static void reset_instance_state(void){
     g_dyn_rss=0; g_dyn_mapped=0;
     memset(&B,0,sizeof B);
     memset(&A,0,sizeof A);
+    /* Buffer pool snapshot: the arrays are kept, what they describe is not.  A large
+       buffer is read every few frames, so a stale ok would show the previous
+       instance's residency, dirty and log values under the new name. */
+    { pgrec_t *rec=PG.rec; int cap=PG.reccap;
+      memset(&PG,0,sizeof PG); PG.rec=rec; PG.reccap=cap; }
     /* cubrid.conf parameters are per database too ([@db] sections differ), so without
        clearing them the previous instance's values make a verdict like "configured
        512M" entirely wrong. */
