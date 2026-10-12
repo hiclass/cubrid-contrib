@@ -186,6 +186,7 @@ util = (diskstats io_ms 델타) / 경과시간(ms) × 100
 | `pgbuf.zone_free` | 빈 BCB(invalid 존) | `resident + zone_free = num_buffers` |
 | `pgbuf.vol<N>.resident / .dirty` | 볼륨별 분해 | `cub_volmap --bufmap` 볼륨 헤더의 `buf N pages (dirty M)` 과 같은 값 |
 | `pgbuf.hdr_mismatch / hdr_unread` | 페이지 헤더 대조 불일치 / 읽기 실패 수 | 소량(교체 중)은 정상, 5% 초과면 비활성 처리됨 |
+| `pgbuf.hdr_read / hdr_reused` | 이번 프레임에 읽은 헤더 수 / 직전 검증값을 그대로 쓴 수 | 유휴 시 재사용이 대부분이고 매 프레임 1/8 은 다시 읽는다 |
 | `pgbuf.oldest_dirty_pageid/offset` | 가장 오래된 dirty 페이지의 `oldest_unflush_lsa` | 리커버리 redo 의 시작점 후보 |
 | `log.append_*` | 로그 꼬리(`hdr.append_lsa`) | 새 로그 레코드가 붙는 위치 |
 | `log.nxio_*` | 아직 디스크에 안 쓴 첫 LSA(`append.nxio_lsa`) | WAL 경계: 이보다 앞선 로그는 영속 |

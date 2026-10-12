@@ -237,6 +237,9 @@ typedef struct {
     int nreg;
     int reg_dropped;   /* Regions past MAXREG: not classified, so the breakdown falls short of the total */
     unsigned long rss_kb,pss_kb,swap_kb,vsize_kb;
+    /* Whole-process totals summed from this frame's smaps, every region included (even past
+       MAXREG): the same figures smaps_rollup gives, without reading it again */
+    int smaps_ok; unsigned long s_rss_kb,s_pss_kb,s_swap_kb,s_clean_kb;
     unsigned long minflt,majflt,blkio_ticks;
     unsigned long utime,stime;     /* Cumulative CPU in clock ticks; utilization comes from the delta */
     int nthreads;
@@ -292,55 +295,89 @@ typedef struct { double master,broker,cas,pl,server_rss; int npl,ncas;
 } tier_t;
 static double tcpu_delta(int pid,double dt);
 static tier_t *g_enum_T=NULL; static double g_enum_dt=0;   /* For the pass 2 tier aggregation */
+/* One rollup per CUBRID process, shared by the instance list and the tier totals.  The
+   target server's comes from this frame's smaps (g_tgt_*); the current database's PL and
+   the master are read every frame; other processes - other databases, brokers, CAS - are
+   context rather than the analysed instance and are re-read every RU_EVERY enumerations. */
+#define RU_EVERY 4
+#define RU_MAX 512
+typedef struct { int pid; double pss,rss,fm,sw; int age,seen; } ru_t;
+static ru_t g_ru[RU_MAX]; static int g_run=0;
+static unsigned g_enum_epoch=0;            /* Enumerations so far */
+static int g_tgt_pid=-1; static unsigned g_tgt_epoch=~0u;
+static double g_tgt_pss,g_tgt_rss,g_tgt_fm,g_tgt_sw;
+static double ru_get(int pid,int every_frame,double*rss,double*fm,double*sw){
+    double r_=0,f_=0,w_=0,p_;
+    if(pid==g_tgt_pid && g_tgt_epoch==g_enum_epoch){
+        p_=g_tgt_pss; r_=g_tgt_rss; f_=g_tgt_fm; w_=g_tgt_sw;
+    } else {
+        ru_t *e=NULL;
+        for(int i=0;i<g_run;i++) if(g_ru[i].pid==pid){ e=&g_ru[i]; break; }
+        if(!e && g_run<RU_MAX){ e=&g_ru[g_run++]; memset(e,0,sizeof *e); e->pid=pid; e->age=RU_EVERY; }
+        if(!e) p_=rollup_pss_rss(pid,&r_,&f_,&w_);
+        else {
+            if(every_frame || e->age>=RU_EVERY){ e->pss=rollup_pss_rss(pid,&e->rss,&e->fm,&e->sw); e->age=0; }
+            e->seen=1; p_=e->pss; r_=e->rss; f_=e->fm; w_=e->sw;
+        }
+    }
+    if(rss) *rss=r_;
+    if(fm) *fm=f_;
+    if(sw) *sw=w_;
+    return p_;
+}
+enum { PK_SERVER=1, PK_PL, PK_MASTER, PK_BROKER, PK_CAS };
 static int enum_instances(void){
     g_ninst=0;
+    for(int i=0;i<g_run;i++){ g_ru[i].age++; g_ru[i].seen=0; }
+    /* One /proc walk collects every CUBRID process; servers are needed before PL attribution */
+    static struct { int pid,kind; } pk[RU_MAX]; int npk=0;
     DIR *d=opendir("/proc"); if(!d) return 0;
     struct dirent *e; char p[300],b[256];
-    while((e=readdir(d))){
+    while((e=readdir(d)) && npk<RU_MAX){
         if(e->d_name[0]<'0'||e->d_name[0]>'9') continue;
         snprintf(p,sizeof p,"/proc/%.20s/comm",e->d_name);
         if(read_file(p,b,sizeof b)<=0) continue;
         char*nl=strchr(b,'\n'); if(nl)*nl=0;
-        if(strcmp(b,"cub_server")||g_ninst>=MAXINST) continue;
+        int k = !strcmp(b,"cub_server")?PK_SERVER : !strncmp(b,"cub_pl",6)?PK_PL :
+                !strcmp(b,"cub_master")?PK_MASTER : !strcmp(b,"cub_broker")?PK_BROKER :
+                !strcmp(b,"cub_cas")?PK_CAS : 0;
+        if(k){ pk[npk].pid=atoi(e->d_name); pk[npk].kind=k; npk++; }
+    }
+    closedir(d);
+    for(int i=0;i<npk;i++){
+        if(pk[i].kind!=PK_SERVER || g_ninst>=MAXINST) continue;
         inst_t*x=&g_inst[g_ninst];
         memset(x,0,sizeof *x);
-        x->pid=atoi(e->d_name);
+        x->pid=pk[i].pid;
         cmd_db(x->pid,x->db,sizeof x->db);
         if(!x->db[0]) snprintf(x->db,sizeof x->db,"-");
-        x->pss=rollup_pss_rss(x->pid,&x->rss,&x->filemap,&x->swap);
+        x->pss=ru_get(x->pid,0,&x->rss,&x->filemap,&x->swap);
         g_ninst++;
     }
-    rewinddir(d);
-    while((e=readdir(d))){                      /* pass 2: PL attribution and tier aggregation together */
-        if(e->d_name[0]<'0'||e->d_name[0]>'9') continue;
-        snprintf(p,sizeof p,"/proc/%.20s/comm",e->d_name);
-        if(read_file(p,b,sizeof b)<=0) continue;
-        char*nl=strchr(b,'\n'); if(nl)*nl=0;
-        int pid=atoi(e->d_name);
-        if(!strncmp(b,"cub_pl",6)){
+    for(int i=0;i<npk;i++){                     /* PL attribution and tier aggregation together */
+        int pid=pk[i].pid;
+        if(pk[i].kind==PK_PL){
             char db[64]; cmd_db(pid,db,sizeof db);
-            double pl=rollup_pss_rss(pid,NULL,NULL,NULL);
-            for(int i=0;i<g_ninst;i++)
-                if(!strcmp(g_inst[i].db,db)){ g_inst[i].pl_pss+=pl; g_inst[i].pl_n++; break; }
-            /* Tier aggregation, finished in this same walk: running it separately repeats the
-               whole /proc walk and the same rollups twice per frame (25ms measured).
-               Only the current DB's PL is counted. */
-            if(g_enum_T && (!g_cur_db[0] || !strcmp(db,g_cur_db))){
+            int cur = !g_cur_db[0] || !strcmp(db,g_cur_db);
+            double pl=ru_get(pid,cur,NULL,NULL,NULL);
+            for(int j=0;j<g_ninst;j++)
+                if(!strcmp(g_inst[j].db,db)){ g_inst[j].pl_pss+=pl; g_inst[j].pl_n++; break; }
+            /* Only the current DB's PL is counted in the tiers */
+            if(g_enum_T && cur){
                 g_enum_T->pl+=pl; g_enum_T->npl++;
                 g_enum_T->cpu_pl+=tcpu_delta(pid,g_enum_dt);
             }
             continue;
         }
-        if(!g_enum_T) continue;
-        int is_master=!strcmp(b,"cub_master"), is_broker=!strcmp(b,"cub_broker");
-        int is_cas=!strcmp(b,"cub_cas");
-        if(!is_master&&!is_broker&&!is_cas) continue;
-        double pss=rollup_pss_rss(pid,NULL,NULL,NULL);
-        if(is_master){ g_enum_T->master+=pss; g_enum_T->cpu_master+=tcpu_delta(pid,g_enum_dt); }
-        else if(is_broker){ g_enum_T->broker+=pss; g_enum_T->cpu_broker+=tcpu_delta(pid,g_enum_dt); }
+        if(!g_enum_T || pk[i].kind==PK_SERVER) continue;
+        double pss=ru_get(pid,pk[i].kind==PK_MASTER,NULL,NULL,NULL);
+        if(pk[i].kind==PK_MASTER){ g_enum_T->master+=pss; g_enum_T->cpu_master+=tcpu_delta(pid,g_enum_dt); }
+        else if(pk[i].kind==PK_BROKER){ g_enum_T->broker+=pss; g_enum_T->cpu_broker+=tcpu_delta(pid,g_enum_dt); }
         else { g_enum_T->cas+=pss; g_enum_T->ncas++; g_enum_T->cpu_cas+=tcpu_delta(pid,g_enum_dt); }
     }
-    closedir(d);
+    /* Processes gone since the last walk leave the cache */
+    { int m=0; for(int i=0;i<g_run;i++) if(g_ru[i].seen) g_ru[m++]=g_ru[i]; g_run=m; }
+    g_enum_epoch++;
     for(int i=0;i<g_ninst;i++) for(int j=i+1;j<g_ninst;j++)    /* Alphabetical by db */
         if(strcmp(g_inst[i].db,g_inst[j].db)>0){
             inst_t t=g_inst[i]; g_inst[i]=g_inst[j]; g_inst[j]=t; }
@@ -354,6 +391,7 @@ static int inst_find(const char*db){
 /* Full smaps parse: regions plus Rss/Pss/Referenced */
 static void parse_smaps(proc_t *P){
     char f[64]; snprintf(f,sizeof f,"/proc/%d/smaps",P->pid);
+    P->smaps_ok=0; P->s_rss_kb=P->s_pss_kb=P->s_swap_kb=P->s_clean_kb=0;
     FILE *fp=fopen(f,"r"); if(!fp) return;
     char line[1024]; region_t *cur=NULL;
     P->nreg=0; P->reg_dropped=0;
@@ -376,18 +414,33 @@ static void parse_smaps(proc_t *P){
                 while(*q && *q!='\n' && n+1<sizeof cur->path) cur->path[n++]=*q++;
                 cur->path[n]=0;
             }
-        } else if(cur){
-            if(!strncmp(line,"Rss:",4))              cur->rss_kb=strtoul(line+4,NULL,10);
-            else if(!strncmp(line,"Pss:",4))         cur->pss_kb=strtoul(line+4,NULL,10);
-            else if(!strncmp(line,"Referenced:",11)) cur->ref_kb=strtoul(line+11,NULL,10);
+        } else {
+            /* Totals over every region, a dropped one included */
+            unsigned long v;
+            if(!strncmp(line,"Rss:",4)){ v=strtoul(line+4,NULL,10); P->s_rss_kb+=v; if(cur) cur->rss_kb=v; }
+            else if(!strncmp(line,"Pss:",4)){ v=strtoul(line+4,NULL,10); P->s_pss_kb+=v; if(cur) cur->pss_kb=v; }
+            else if(!strncmp(line,"Referenced:",11)){ if(cur) cur->ref_kb=strtoul(line+11,NULL,10); }
+            else if(!strncmp(line,"Swap:",5))           P->s_swap_kb +=strtoul(line+5,NULL,10);
+            else if(!strncmp(line,"Shared_Clean:",13))  P->s_clean_kb+=strtoul(line+13,NULL,10);
+            else if(!strncmp(line,"Private_Clean:",14)) P->s_clean_kb+=strtoul(line+14,NULL,10);
         }
     }
     fclose(fp);
+    P->smaps_ok = (P->nreg>0);
 }
 
 /* Use rollup where present, otherwise sum smaps (old-kernel fallback) */
 static void parse_rollup(proc_t *P){
     P->rss_kb=P->pss_kb=P->swap_kb=0;
+    /* This frame's smaps already gives the totals: smaps_rollup is not read again, and the
+       instance list takes the same figures (ru_get) */
+    if(P->smaps_ok && P->s_rss_kb){
+        P->rss_kb=P->s_rss_kb; P->pss_kb=P->s_pss_kb; P->swap_kb=P->s_swap_kb;
+        g_tgt_pid=P->pid; g_tgt_epoch=g_enum_epoch;
+        g_tgt_pss=P->s_pss_kb*1024.0; g_tgt_rss=P->s_rss_kb*1024.0;
+        g_tgt_fm=P->s_clean_kb*1024.0; g_tgt_sw=P->s_swap_kb*1024.0;
+        return;
+    }
     if(CAP.rollup){
         char f[64]; snprintf(f,sizeof f,"/proc/%d/smaps_rollup",P->pid);
         FILE *fp=fopen(f,"r");
@@ -2317,6 +2370,8 @@ static struct {
     int nbuf, resident, dirty, flushing, z1,z2,z3, zvoid, zinv, mismatch, unread, badvpid;
     int mismatch_raw;   /* Mismatches before the recheck, including replacements between the two reads */
     int recheck;        /* Number rechecked */
+    int hdr_read, hdr_reused;   /* Headers read this frame / carried from the last verified read */
+    int nrec_all;               /* Records before a degraded frame dropped the unverified */
     int degraded;       /* Frames where remaining mismatches crossed the threshold and dropped to valid-only mode */
     int tempvol;      /* Resident pages of temporary volumes (volid at or above PG_MAXVOL); this is normal */
     int vol_res[PG_MAXVOL], vol_dirty[PG_MAXVOL];
@@ -2374,6 +2429,7 @@ static void pgbuf_dump(const char*db){
     if(ok) rename(tmp,g_bcb_dump); else unlink(tmp);
 }
 
+static inline uint64_t vp_key(int volid,int pageid);
 /* Zone counters, by the zone field kept in a record (flags>>16) */
 static void pg_zone_add(int z,int d){
     if(z==1) PG.z1+=d; else if(z==2) PG.z2+=d; else if(z==3) PG.z3+=d;
@@ -2463,8 +2519,39 @@ static void pgbuf_scan(proc_t*P){
         snprintf(PG.why,sizeof PG.why,g_ascii?"abnormal VPIDs: %d — offset mismatch suspected":"비정상 VPID %d개 — 오프셋 불일치 의심",PG.badvpid); return; }
     /* pass 2: gather the page headers (prv 16B: lsa 8, pageid 4, volid 2, ptype/pflag 2) and compare */
     PG.mismatch=PG.unread=0; PG.mismatch_raw=0; PG.recheck=0; PG.degraded=0;
-    if(PG.nrec>0){
-        vm_gather(P->pid,addr,PG.nrec,16,hdr,okf);
+    PG.hdr_read=PG.hdr_reused=0;
+    /* Header cache by BCB index.  Reading every resident page's header pins each remote page
+       and was the largest cost of a frame.  A BCB that still holds the page last verified
+       there, clean then and clean now, keeps that header: a page changes only by being
+       modified, which dirties it.  A page modified and flushed between two frames looks
+       clean both times, so a rotating 1/HC_SLICE of the carried headers is re-read each
+       frame - a carried LSA is at most HC_SLICE frames old, and the gate keeps seeing
+       every slot. */
+    #define HC_SLICE 8
+    static uint64_t *hc_key=NULL,*hc_lsa=NULL; static unsigned char *hc_ok=NULL; static int hc_cap=0;
+    static unsigned hc_round=0;
+    static int *ridx=NULL; static uint64_t *raddr=NULL; static int rcap2=0;
+    if(nbuf>hc_cap){ free(hc_key); free(hc_lsa); free(hc_ok);
+        hc_key=malloc(8*(size_t)nbuf); hc_lsa=malloc(8*(size_t)nbuf); hc_ok=calloc((size_t)nbuf,1);
+        hc_cap=(hc_key&&hc_lsa&&hc_ok)?nbuf:0; }
+    if(PG.nrec>rcap2){ free(ridx); free(raddr);
+        ridx=malloc(sizeof(int)*(size_t)PG.nrec); raddr=malloc(8*(size_t)PG.nrec);
+        rcap2=(ridx&&raddr)?PG.nrec:0; }
+    if(!hc_cap || (PG.nrec>0 && !rcap2)){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; }
+    if(PG.frame<=1) memset(hc_ok,0,(size_t)hc_cap);   /* First scan, or reset_instance_state() cleared PG */
+    hc_round++;
+    int nread=0;
+    for(int k=0;k<PG.nrec;k++){
+        pgrec_t*r=&PG.rec[k]; int bi=pg_bidx[k];
+        uint64_t key=vp_key(r->volid,r->pageid);
+        if(hc_ok[bi] && hc_key[bi]==key && !(r->flags&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING))
+           && (unsigned)bi%HC_SLICE!=hc_round%HC_SLICE){
+            r->page_lsa=hc_lsa[bi]; r->hdr_ok=1; PG.hdr_reused++; continue; }
+        hc_ok[bi]=0; ridx[nread]=k; raddr[nread]=addr[k]; nread++;
+    }
+    PG.hdr_read=nread;
+    if(nread>0){
+        vm_gather(P->pid,raddr,nread,16,hdr,okf);
         /* Collect the mismatched indices for the recheck.  addr[] is overwritten there, so
            the original iopage addresses are kept alongside. */
         static int *midx=NULL; static uint64_t *maddr=NULL; static int mcap=0;
@@ -2476,17 +2563,20 @@ static void pgbuf_scan(proc_t*P){
         /* Without the index arrays no mismatch could be rechecked or counted, and 0
            mismatches would pass the gate - the frame is dropped instead */
         if(!mcap){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; }
-        for(int k=0;k<PG.nrec;k++){
-            pgrec_t*r=&PG.rec[k];
-            if(!okf[k]){ PG.unread++; continue; }
+        for(int j=0;j<nread;j++){
+            int k=ridx[j]; pgrec_t*r=&PG.rec[k];
+            if(!okf[j]){ PG.unread++; continue; }
             uint64_t lsa; int32_t hp; int16_t hv;
-            memcpy(&lsa,hdr+(size_t)k*16,8); memcpy(&hp,hdr+(size_t)k*16+8,4); memcpy(&hv,hdr+(size_t)k*16+12,2);
+            memcpy(&lsa,hdr+(size_t)j*16,8); memcpy(&hp,hdr+(size_t)j*16+8,4); memcpy(&hv,hdr+(size_t)j*16+12,2);
             if(hp!=r->pageid || hv!=r->volid){
                 PG.mismatch_raw++;
                 midx[nm]=k; maddr[nm]=addr[k]; nm++;
                 continue;
             }
             r->page_lsa=lsa; r->hdr_ok=1;
+            /* Cached only when clean at this read; a dirty page's header may still change */
+            if(!(r->flags&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING))){
+                int bi=pg_bidx[k]; hc_key[bi]=vp_key(r->volid,r->pageid); hc_lsa[bi]=lsa; hc_ok[bi]=1; }
         }
         /* Recheck.  Pass 1 (BCB array) and pass 2 (page headers) are taken at different
            times, so pages replaced in between necessarily disagree; a flat 5%
@@ -2533,6 +2623,8 @@ static void pgbuf_scan(proc_t*P){
                             pg_zone_add(r->zone,-1); pg_zone_add(nz,+1);
                             r->pageid=npid; r->volid=nvid; r->flags=nfl; r->zone=(int16_t)nz;
                             r->oldest_lsa=nol; r->page_lsa=lsa; r->hdr_ok=1;
+                            if(!(nfl&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING))){
+                                int bi=pg_bidx[midx[j]]; hc_key[bi]=vp_key(nvid,npid); hc_lsa[bi]=lsa; hc_ok[bi]=1; }
                             replaced++;
                         } else PG.mismatch++;      /* Still wrong after the recheck: a genuine mismatch */
                     }
@@ -2548,6 +2640,8 @@ static void pgbuf_scan(proc_t*P){
            offset failing all 32,768 reads still passed as healthy (a deliberate
            corruption test returned enabled=1).  Reading no header at all empties
            the LSA axis, so it is treated as an offset error. */
+        /* Shares of all records: a carried header was verified when it was read, and with a
+           wrong offset nothing is ever carried, so every header is read again */
         if(PG.nrec>100 && PG.unread>PG.nrec/2){ PG.ok=0;
             snprintf(PG.why,sizeof PG.why,
                      g_ascii?"page headers unreadable %d/%d — iopage offset mismatch suspected"
@@ -2559,7 +2653,7 @@ static void pgbuf_scan(proc_t*P){
                          g_ascii?"page header vs BCB mismatch %d/%d after recheck — offset mismatch suspected"
                                 :"재검 후에도 페이지 헤더·BCB 불일치 %d/%d — 오프셋 불일치 의심",PG.mismatch,PG.nrec);
                 return; }
-            PG.degraded=1;
+            PG.degraded=1; PG.nrec_all=PG.nrec;
             /* Verified records only, as the mode says: the unverified are dropped and the
                record totals recounted.  Zone counts stay - they cover every BCB, empty ones
                included, and come from the BCB itself. */
@@ -2588,7 +2682,7 @@ static void pgbuf_scan(proc_t*P){
         snprintf(PG.why,sizeof PG.why,
                  g_ascii?"%d slots; %d/%d unverified after recheck — counted from verified records only"
                         :"슬롯 %d개; 재검 후 %d/%d 미검증 — 검증된 레코드만 집계",
-                 nbuf,PG.mismatch,PG.nrec);
+                 nbuf,PG.mismatch,PG.nrec_all);
     else if(PG.recheck>0)
         snprintf(PG.why,sizeof PG.why,
                  g_ascii?"%d page slots checked (%d rechecked, %d residual)"
@@ -6003,8 +6097,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                " pgbuf.zone1_hot=%d pgbuf.zone2_warm=%d pgbuf.zone3_cold=%d pgbuf.zone_void=%d pgbuf.zone_free=%d"
                " pgbuf.hdr_mismatch=%d pgbuf.hdr_unread=%d pgbuf.scan_ms=%.1f\n",
                PG.nbuf,PG.resident,PG.dirty,PG.flushing,PG.z1,PG.z2,PG.z3,PG.zvoid,PG.zinv,PG.mismatch,PG.unread,PG.ms);
-        printf("pgbuf.hdr_mismatch_raw=%d pgbuf.rechecked=%d pgbuf.degraded=%d\n",
-               PG.mismatch_raw,PG.recheck,PG.degraded);
+        printf("pgbuf.hdr_mismatch_raw=%d pgbuf.rechecked=%d pgbuf.degraded=%d pgbuf.hdr_read=%d pgbuf.hdr_reused=%d\n",
+               PG.mismatch_raw,PG.recheck,PG.degraded,PG.hdr_read,PG.hdr_reused);
         for(int v=0;v<PG_MAXVOL;v++) if(PG.vol_res[v]>0)
             printf("pgbuf.vol%d.resident=%d pgbuf.vol%d.dirty=%d\n",v,PG.vol_res[v],v,PG.vol_dirty[v]);
         if(PG.have_oldest) printf("pgbuf.oldest_dirty_pageid=%lld pgbuf.oldest_dirty_offset=%d\n",
@@ -6288,6 +6382,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     PG.mismatch_raw=(int)rp_num(t,"pgbuf.hdr_mismatch_raw",0);
     PG.recheck=(int)rp_num(t,"pgbuf.rechecked",0);
     PG.degraded=(int)rp_num(t,"pgbuf.degraded",0);
+    PG.hdr_read=(int)rp_num(t,"pgbuf.hdr_read",0); PG.hdr_reused=(int)rp_num(t,"pgbuf.hdr_reused",0);
     /* The LSA axis.  Both are emitted only when present, so presence is the flag; a
        frame without them must not inherit the previous frame's values. */
     PG.have_oldest=rp_find(t,"pgbuf.oldest_dirty_pageid",b,sizeof b);
