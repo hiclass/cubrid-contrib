@@ -50,10 +50,11 @@ while i<len(t):
         while i<len(t) and t[i] not in ' \n\r': i+=1
     tk.append(key)
 # -d and --dump-json are two runs.  cap.cellNN.*, cap.ceiling_* and cap.used_of_ceiling_pct
-# exist only when that run observed a saturated frame, so on a busy disk one run can have
-# them and the other not; they say nothing about whether --dump-json is derived from -d.
+# exist only when that run observed a saturated frame, and cap.*await_ms only when the
+# device did any I/O in the window, so one run can have them and the other not; they say
+# nothing about whether --dump-json is derived from -d.
 import re
-RUNDEP=re.compile(r'cap\.(cell\d+\.|ceiling_(iops|bps|util_pct|qdepth|epoch)$|used_of_ceiling_pct$)')
+RUNDEP=re.compile(r'cap\.(cell\d+\.|ceiling_(iops|bps|util_pct|qdepth|epoch)$|used_of_ceiling_pct$|(read_|write_)?await_ms$)')
 def stable(keys): return [k for k in keys if not RUNDEP.match(k)]
 tk2,dk2=stable(tk),stable(list(d.keys()))
 diff=set(tk2)^set(dk2)
