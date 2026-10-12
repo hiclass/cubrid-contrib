@@ -58,7 +58,7 @@ caps: vm_readv=no(pread 폴백) rollup=no(smaps 합산) proc_io=yes … ← 구 
 ## 구 컴파일러 호환 (gcc 4.4 / CentOS 6)
 
 - `-std=gnu99`만 사용. C11 기능(`_Static_assert`, `_Generic`, 익명 union 등) 미사용
-- 시각은 `gettimeofday` 사용 → glibc < 2.17에서 `-lrt` 링크 불필요
+- 시각은 `gettimeofday` 사용 → glibc < 2.17에서 `-lrt` 링크 불필요 (`tools/check-librt.sh`가 바이너리의 librt 전용 함수 참조를 검사)
 - `-std=c99 -pedantic -Wall -Wextra`에서 error·ISO C 위반 0 확인
 
 ## 방법 B의 오프셋 처리 — libdw 대신 자기검증

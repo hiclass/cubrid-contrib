@@ -2357,7 +2357,7 @@ static void pgbuf_dump(const char*db){
     h.nbuf=PG.nbuf; h.nrec=PG.nrec; h.dirty=PG.dirty; h.pagesize=(int32_t)g_pagesize;
     h.log_append=PG.have_log?PG.raw_append:~(uint64_t)0; h.log_nxio=PG.have_log?PG.raw_nxio:~(uint64_t)0;
     h.log_eof=PG.have_log?PG.raw_eof:~(uint64_t)0; h.oldest_dirty=PG.have_oldest?PG.raw_oldest:~(uint64_t)0;
-    snprintf(h.db,sizeof h.db,"%s",db?db:"");
+    snprintf(h.db,sizeof h.db,"%.*s",(int)sizeof h.db-1,db?db:"");   /* fixed 32-byte field: truncation intended */
     int ok = fwrite(&h,sizeof h,1,f)==1 && (PG.nrec==0 || fwrite(PG.rec,sizeof(pgrec_t),(size_t)PG.nrec,f)==(size_t)PG.nrec);
     ok = (fclose(f)==0) && ok;
     if(ok) rename(tmp,g_bcb_dump); else unlink(tmp);
@@ -2543,7 +2543,8 @@ static void pgbuf_scan(proc_t*P){
                  nbuf,PG.recheck,PG.mismatch);
     else
         snprintf(PG.why,sizeof PG.why,g_ascii?"%d page slots checked":"페이지 슬롯 %d개 확인",nbuf);
-    PG.ms=now_ms()-t0; clock_gettime(CLOCK_REALTIME,&PG.when);
+    PG.ms=now_ms()-t0;
+    { struct timeval tv; gettimeofday(&tv,NULL); PG.when.tv_sec=tv.tv_sec; PG.when.tv_nsec=tv.tv_usec*1000L; }
     /* Order matters: pgbuf_dump overwrites the --bcb-dump file, so a one-shot run must
        read the turnover baseline BEFORE that, or the baseline becomes this very frame
        and turnover is always 0. */
