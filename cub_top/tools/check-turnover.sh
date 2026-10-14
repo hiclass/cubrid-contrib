@@ -53,10 +53,10 @@ int main(void){
     ok&=run("working set 1.5x the buffer",nb,4,nb+nb/2,40,25.0,100.0);
     ok&=run("working set 3x the buffer (outside window)",nb,4,3L*nb,60,25.0,0.0);
     ok&=run("262144 BCBs, 1% new pages per frame",262144,100,0,20,1.0,0.0);
-    /* An instance switch on a frame a large buffer skips must not keep the old snapshot */
+    /* An instance switch must not keep the old snapshot, whatever the next scan does */
     { static proc_t P; P.pid=999999;
       B.ok=1; B.partial=0; g_bt=&BTABS[0];
-      PG.ok=1; PG.nbuf=524288; PG.every=2; PG.frame=5; PG.resident=500000; PG.dirty=1234; PG.have_log=1;
+      PG.ok=1; PG.nbuf=524288; PG.frame=5; PG.resident=500000; PG.dirty=1234; PG.have_log=1;
       reset_instance_state();
       B.ok=1; B.partial=0; g_bt=&BTABS[0];
       pgbuf_scan(&P);

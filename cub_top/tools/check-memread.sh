@@ -107,7 +107,7 @@ int main(int c,char**v){
     printf("  sample: %d headers read (want 140 = zone 1-2 minus 10 not resident), %d skipped as not resident, cold mismatches %d (want 0), untouched page still not resident: %s\n",
            PG.nhdr,PG.nonres,PG.mismatch_raw,still_out?"yes":"NO");
     if(!PG.ok || PG.nhdr!=140 || PG.nonres!=10 || PG.mismatch_raw!=0 || !still_out) bad=1;
-    g_pg_detail=0; PG.every=1;                    /* 2b: large buffer, not asked for */
+    g_pg_detail=0;                                /* 2b: large buffer, not asked for */
     pgbuf_scan(&P);
     printf("  large buffer unasked: enabled=%d large=%d (want 0 1) reason=\"%s\"\n",PG.ok,PG.large,PG.why);
     if(PG.ok || !PG.large) bad=1;

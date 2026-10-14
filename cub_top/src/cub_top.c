@@ -2337,7 +2337,7 @@ static const region_t *g_reg_db=NULL,*g_reg_lg=NULL;   /* Filled by classify_reg
  *   disagrees with the BCB vpid beyond a threshold (pages under replacement
  *   legitimately differ a little).
  *   Cost: 512MB buffer = 32,768 BCB x 144B plus a 16B gather - a few ms.
- *   Diluted to one frame in N above 262,144 BCBs.
+ *   Above PG_LARGE BCBs it runs only on request, then every frame.
  *   --bcb-dump FILE writes the snapshot (volmap --bufmap overlays it).
  */
 typedef struct { int64_t pageid; int offset; } lsa_t;   /* struct log_lsa: pageid:48 | offset:16 (little-endian bitfield) */
@@ -2372,7 +2372,7 @@ static struct {
     lsa_t oldest_dirty; int have_oldest;
     lsa_t log_nxio, log_append, log_eof; int have_log;
     uint64_t raw_oldest, raw_nxio, raw_append, raw_eof;
-    double ms; long frame; int every;
+    double ms; long frame;
     pgrec_t *rec; int nrec, reccap;
     struct timespec when;
 } PG;
@@ -2492,7 +2492,6 @@ static void pgbuf_scan(proc_t*P){
         return; }
     pg_log(P);                 /* O(1), kept on a large buffer too */
     int detail = g_pg_detail || g_bcb_dump[0];
-    if(detail && PG.every>1 && PG.ok && (PG.frame%PG.every)!=1) return;   /* Requested on a large buffer: diluted */
     double t0=now_ms();
     unsigned long pool=B.base+B.sym[S_PGBUF];
     int32_t nbuf=rd_i32(P->pid,pool+g_bt->off_pgbuf_nbuf);
@@ -2507,7 +2506,6 @@ static void pgbuf_scan(proc_t*P){
     uint64_t tab=0;
     if(vmread(P->pid,pool+g_bt->pg.bcbtab,&tab,8)!=8 || !tab || nbuf<=0 || nbuf>(1<<26)){
         PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"BCB_table pointer unreadable":"BCB_table 포인터 읽기 실패"); return; }
-    PG.every = nbuf>262144 ? (nbuf+262143)/262144 : 1;
     size_t szb=(size_t)g_bt->pg.sz_bcb, need=szb*(size_t)nbuf;
     static unsigned char*buf=NULL; static size_t cap=0;
     static uint64_t*addr=NULL; static unsigned char*hdr=NULL,*okf=NULL; static int acap=0;
@@ -3467,7 +3465,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->rss_srv=P->rss_kb*1024.0; s->rss_master=T->master; s->rss_pl=T->pl;
     s->rss_broker=T->broker; s->rss_cas=T->cas;
     s->cap_iops=CAP2.dev_iops; s->cap_await=CAP2.await_ms<0?0:CAP2.await_ms;
-    s->cap_readmit=CAP2.readmit_pct<0?0:CAP2.readmit_pct;
+    s->cap_readmit=CAP2.readmit_pct;          /* -1 = not measured: it alone separates shortage from scan */
     s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps<0?0:CAP2.miss_pps;
     s->cap_head=CAP2.headroom_pct<0?0:CAP2.headroom_pct;
     s->pg_ok      = PG.ok || AG.ok;
@@ -4179,7 +4177,8 @@ static void cv_subbars(int x,int y,int w,const pser_t*se,int ns,int hrows){
         /* Where several samples share a cell, take the maximum - a spike is not averaged away
            (the same rule as the line chart's peak-preserving downsample). */
         /* Reserve the right-hand value slot in advance so a bar cannot cover the number. */
-        char vtx[24]; snprintf(vtx,sizeof vtx,"%s",pf_val(HN>0?hs_val(&HS[HN-1],se[si].key):0,se[si].fmt));
+        double lastv = HN>0 ? hs_val(&HS[HN-1],se[si].key) : 0;
+        char vtx[24]; snprintf(vtx,sizeof vtx,"%s",lastv<0?"-":pf_val(lastv,se[si].fmt));   /* -1 = not measured */
         int vw=(int)strlen(vtx)+1;
         int bw=gw-vw; if(bw<2) bw=gw;
         /* Braille cell buffer: hrows rows by bw columns for this series, two samples per cell horizontally. */
@@ -4376,6 +4375,10 @@ static void vd_buf(char*o,size_t n,const char**col){
     if(b->pg_res_pct<90.0){ *col=VD_INFO;
         snprintf(o,n,g_ascii?"buffer still filling (%.0f%% resident) - hit-rate judgement deferred, read %s/s"
                            :"· 버퍼 채우는 중 (상주 %.0f%%) — 히트율 판단 보류, 읽기 %s/s",b->pg_res_pct,H(rb)); return; }
+    if(rb>=8.0*1024*1024 && b->cap_readmit<0){ *col=VD_INFO;
+        snprintf(o,n,g_ascii?"read %s/s, cold zone %.0f%% - re-admit not measured (no page-scan baseline), so shortage and scan are not told apart"
+                           :"· 읽기 %s/s · cold 존 %.0f%% — 재적재율 미측정(페이지 스캔 기준 없음)이라 버퍼 부족과 스캔을 가르지 않음",
+                 H(rb),b->pg_cold_pct); return; }
     /* Cold zone occupancy alone cannot separate a short buffer from a scan - both run
        cold.  Only the refill rate separates them: pages evicted and read back again
        mean the working set exceeds the buffer and more buffer helps, while read-once
@@ -4423,6 +4426,8 @@ static void vd_host(char*o,size_t n,const char**col,int ncores){
                        :"· 호스트 정상 — 사용 %.1f/%d 코어, RAM %.0f%%, 장치 %.0f%%, CUBRID 는 RAM 의 %.0f%%",
              b->busy_cores,ncores,b->ram>0?b->osused/b->ram*100:0,b->devutil,cubpct);
 }
+/* Re-admit percentage; -1 = not measured */
+static const char* readmit_s(double v){ static char b[24]; if(v<0) return "-"; snprintf(b,sizeof b,"%.0f%%",v); return b; }
 /* Flush span in log pages; -1 = not known (no page scan this frame) */
 static const char* span_s(double v){ static char b[24]; if(v<0) return "?"; snprintf(b,sizeof b,"%.0f",v); return b; }
 /* D: the drain side, buffer back to volume */
@@ -5753,9 +5758,9 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
                          CAP_BS_NAME[b],CAP_RW_NAME[r],cc->iops,cc->await_ms,cc->qd);
               } }
             if(CAP2.hit_pct>=0)
-                printf(g_ascii?"│  ├─ ◌ buffer  hit %.1f%% (source: %s) · admitted %.0f pages/s · re-read %.0f%%\n"
-                              :"│  ├─ ◌ 버퍼  히트 %.1f%% (출처: %s) · 적재 초당 %.0f페이지 · 재적재 %.0f%%\n",
-                       CAP2.hit_pct,CAP2.hit_src,CAP2.miss_pps<0?0:CAP2.miss_pps,CAP2.readmit_pct<0?0:CAP2.readmit_pct);
+                printf(g_ascii?"│  ├─ ◌ buffer  hit %.1f%% (source: %s) · admitted %.0f pages/s · re-read %s\n"
+                              :"│  ├─ ◌ 버퍼  히트 %.1f%% (출처: %s) · 적재 초당 %.0f페이지 · 재적재 %s\n",
+                       CAP2.hit_pct,CAP2.hit_src,CAP2.miss_pps<0?0:CAP2.miss_pps,readmit_s(CAP2.readmit_pct));
             if(CAP2.ps_ok)
                 printf(g_ascii?"│  ├─ ● engine  fetch %.0f/s ioread %.0f/s iowrite %.0f/s log-write %.0f/s commit %.0f/s\n"
                               :"│  ├─ ● 엔진  fetch %.0f/s ioread %.0f/s iowrite %.0f/s 로그쓰기 %.0f/s 커밋 %.0f/s\n",
@@ -7899,7 +7904,7 @@ int main(int argc,char **argv){
                 }
                 else if(k==' ') paused=!paused;
                 else if(k=='r'){ with_a=1; a_pending=1; }            /* Reanalyse once */
-                else if(k=='d'){ g_pg_detail=!g_pg_detail; PG.every=1; }   /* Page-level scan of a large buffer, on request */
+                else if(k=='d') g_pg_detail=!g_pg_detail;   /* Page-level scan of a large buffer, every frame, on request */
                 else if(k=='a'){ g_a_auto=!g_a_auto;                  /* Toggle automatic mode */
                                  if(g_a_auto){ with_a=1; a_pending=1; } }
                 else if(k=='l') g_ascii=!g_ascii;   /* Switch labels between Korean and English, for a tty without Hangul support */
