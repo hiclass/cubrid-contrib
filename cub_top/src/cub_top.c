@@ -3053,7 +3053,6 @@ static const char* L(const char*ko){
       {"I/O 포화 · 장치 사용률 · 캐시 흡수율","i/o saturation · device util · cache absorb"},
       {"표본이 부족합니다 — 선을 그리려면 2개 이상 필요","not enough samples — need 2+ to draw a line"},
       {"측정 불가 구간은 0 으로 표기","unmeasurable spans drawn as 0"},
-      {"핫 측정 꺼짐(--no-hot) — 생략","hot disabled (--no-hot) — omitted"},
       {"계열별 정규화(단위 상이)","normalized per series"},
       {"메이저=디스크","major=disk"}};
     if(!g_ascii) return ko;
@@ -3172,15 +3171,15 @@ static void cv_box(int x,int y,int w,int h,const char*title){ cv_box2(x,y,w,h,ti
    orange background would mix two signals in one channel; instead the growth
    since the previous frame is painted orange at the end of the filled bar, where
    it is visible in place and does not collide with the background. */
-static void cv_meter3(int x,int y,int w,double frac,double hot,double dfrac){
+static void cv_meter3(int x,int y,int w,double frac,double share,double dfrac){
     if(y<0||y>=CV.h) return;
     if(frac<0)frac=0;
     if(frac>1)frac=1;
     int n=(int)(frac*w+0.5), hn=0;
     if(n==0 && frac>0 && w>0) n=1;   /* A non-zero value occupying no cells reads as "none" */
-    if(hot>0){
-        if(hot>1)hot=1;
-        hn=(int)(hot*w+0.5);
+    if(share>0){
+        if(share>1)share=1;
+        hn=(int)(share*w+0.5);
         if(hn<1)hn=1;
     }
     /* Growth range [dn, n); at least one cell, so small changes stay visible */
@@ -3202,8 +3201,8 @@ static void cv_meter3(int x,int y,int w,double frac,double hot,double dfrac){
         else   { snprintf(col,sizeof col,"38;5;236%s",bg); cv_put(x+i,y,"⠤",col); }
     }
 }
-static void cv_meter(int x,int y,int w,double frac,double hot){
-    cv_meter3(x,y,w,frac,hot,0);
+static void cv_meter(int x,int y,int w,double frac){
+    cv_meter3(x,y,w,frac,0,0);
 }
 /* Per-core usage bars, sorted busiest first.  A total gauge cannot tell "12
    cores' worth spread over 12" from "6 saturated", and the latter is the
@@ -4884,7 +4883,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
            saturation.  Before the first frame delivers per-core values, fall back to
            the old gauge. */
         if(M->ncore_pct>0) cv_cores(25,y+1,VX-26,M->core_pct,M->ncore_pct);
-        else               cv_meter(25,y+1,VX-26,M->busy_cores/nc,0);
+        else               cv_meter(25,y+1,VX-26,M->busy_cores/nc);
         { char c1[16],c2[16],c4[16],c5[16];
           snprintf(c1,sizeof c1,"%d",nc);
           snprintf(c2,sizeof c2,"%.1f",M->busy_cores);
@@ -4917,7 +4916,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                 cv_put(cx,y+1,padf(c3k,6,1),"38;5;244");
           } } }
       cv_put(2,y+2,padf("Memory",10,0),"250");
-      cv_meter(25,y+2,VX-26,mt>0?used/mt:0,0);
+      cv_meter(25,y+2,VX-26,mt>0?used/mt:0);
       if(os_wide)
           snprintf(v,sizeof v,"%7s|%7s|%3.0f%%|%7s|%7s|%6s",
                    H(mt),H(used),mt>0?used/mt*100:0,H(av),
@@ -4945,7 +4944,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                 char pl[24]; snprintf(pl,sizeof pl,"(PL %s)",HC(g_inst[i].pl_rss));
                 cv_put(13,yy,padf(pl,11,0),"38;5;244");
             }
-            cv_meter(25,yy,VX-26,mt>0?iv/mt:0,0);
+            cv_meter(25,yy,VX-26,mt>0?iv/mt:0);
             /* Instances have no avail or total.  pct rounds up: writing 0.6% as 0% reads as
                unused and makes the column width jump. */
             double pc = mt>0?iv/mt*100:0;
@@ -5050,7 +5049,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
             /* Columns from the right: value 8, delta 8, sparkline, then the gauge */
             int xval=bx+bw-12, xdel=xval-9, xsp=xdel-(spark?spark+1:0);
             int mx0=bx+nmw+8, mw=xsp-mx0-1;
-            if(mw>=4) cv_meter(mx0,y+1+i,mw,vv[i]/mx,0);   /* Narrow: drop the gauge, the value column stands in */
+            if(mw>=4) cv_meter(mx0,y+1+i,mw,vv[i]/mx);   /* Narrow: drop the gauge, the value column stands in */
             if(HN>=4){
                 double d=TIER_HS(&HS[HN-1],hk[i])-TIER_HS(&HS[0],hk[i]);
                 double base=TIER_HS(&HS[0],hk[i]);
@@ -5487,7 +5486,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
             yy=y+1+i;
             cv_put(2,yy,R[i].g,R[i].g[0]=='?'?"38;5;203":"38;5;39");
             cv_put(4,yy,padf(R[i].nm,14,0),"250");
-            cv_meter(MET_X,yy,PRI_X-MET_X-1,R[i].frac,0);
+            cv_meter(MET_X,yy,PRI_X-MET_X-1,R[i].frac);
             cv_put(PRI_X,yy,padf(R[i].prim,7,1),R[i].warn?"38;5;203":"250");
             cv_put(SEC_X,yy,padf(R[i].sec,16,1),"38;5;244");
           } }
