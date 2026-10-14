@@ -24,7 +24,7 @@
 #  2. Page headers: only a sample of pages the engine used recently (LRU zones 1-2) is
 #     read, never cold ones, and a page not resident is skipped rather than swapped in.
 #     A buffer above PG_LARGE BCBs is not scanned unless asked for.
-#  3. With a server running: engine aggregates agree with the BCB scan, --hot is refused,
+#  3. With a server running: engine aggregates agree with the BCB scan, --hot is not an option,
 #     no clear_refs is ever opened, the shim on the real target, and replay of the keys.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"; BIN="$ROOT/cub_top"
@@ -154,7 +154,7 @@ print("  %s   engine aggregates agree with the BCB scan (within 1%% of %d slots)
 sys.exit(1 if diff else 0)
 PY
     if "$BIN" -d --hot >/dev/null 2>"$TMP/hot.err"; then echo "  FAIL --hot accepted"; bad=1
-    else echo "  ok   --hot refused: $(head -1 "$TMP/hot.err" | cut -c1-80)…"; fi
+    else echo "  ok   --hot is not an option: $(head -1 "$TMP/hot.err" | cut -c1-80)"; fi
     n=$(printf '%s' "$out" | grep -c 'hot_pct\|^hot\.')
     if [ "$n" = 0 ]; then echo "  ok   no hot keys in the dump"; else echo "  FAIL $n hot lines in the dump"; bad=1; fi
     if command -v strace >/dev/null; then

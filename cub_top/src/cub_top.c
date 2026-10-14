@@ -3293,7 +3293,6 @@ static void cv_chart_n(int x,int y,int w,int h,const double*const*v,const int*co
         cv_put(x+cx,y+cy,buf,col);
     }
 }
-/* Compatibility wrapper for the older two-series callers; same colours as before (211/203) */
 /* Write the canvas out.  Each row is placed absolutely (ESC[y;1H) with no newline:
    descending by newline scrolls when the canvas is taller than the terminal, which
    pushes the top row off and back on, flickering.
@@ -6314,11 +6313,6 @@ static int rp_find(const char *txt,const char *key,char *out,size_t on){
     memcpy(out,v,vl); out[vl]=0; return 1;
 }
 static double rp_num(const char *txt,const char *key,double dflt);
-/* A key renamed since older recordings: the current name, else the old one */
-static double rp_num2(const char *txt,const char *key,const char *old,double dflt){
-    double v=rp_num(txt,key,-1e300);
-    return v>-1e299 ? v : rp_num(txt,old,dflt);
-}
 static double rp_num(const char *txt,const char *key,double dflt){
     char b[128]; if(!rp_find(txt,key,b,sizeof b)) return dflt;
     char *end; double d=strtod(b,&end); return (end==b)?dflt:d;
@@ -6421,11 +6415,11 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     IO->n_thr =(int)rp_num(t,"server.threads_total",0);
 
     /* Tier figures are RSS; recordings made before that carried PSS under *_pss_bytes */
-    T->server_rss=rp_num2(t,"tier.server_rss_bytes","tier.server_pss_bytes",0);
-    T->master=rp_num2(t,"tier.master_rss_bytes","tier.master_pss_bytes",0);
-    T->broker=rp_num2(t,"tier.broker_rss_bytes","tier.broker_pss_bytes",0);
-    T->cas   =rp_num2(t,"tier.cas_rss_bytes","tier.cas_pss_bytes",0);
-    T->pl    =rp_num2(t,"tier.pl_rss_bytes","tier.pl_pss_bytes",0);
+    T->server_rss=rp_num(t,"tier.server_rss_bytes",0);
+    T->master=rp_num(t,"tier.master_rss_bytes",0);
+    T->broker=rp_num(t,"tier.broker_rss_bytes",0);
+    T->cas   =rp_num(t,"tier.cas_rss_bytes",0);
+    T->pl    =rp_num(t,"tier.pl_rss_bytes",0);
     T->ncas  =(int)rp_num(t,"tier.cas_count",0);
     T->npl   =(int)rp_num(t,"tier.pl_count",0);
     T->cpu_master=rp_num(t,"tier.master_cores",0);
@@ -6623,8 +6617,8 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     g_ninst=0;
     { inst_t *x0=inst_add();
       if(x0){ snprintf(x0->db,sizeof x0->db,"%s",P->db); x0->pid=P->pid;
-              x0->rss=rp_num2(t,"tier.server_rss_bytes","tier.server_pss_bytes",0);
-              x0->pl_rss=rp_num2(t,"tier.pl_rss_bytes","tier.pl_pss_bytes",0); } }
+              x0->rss=rp_num(t,"tier.server_rss_bytes",0);
+              x0->pl_rss=rp_num(t,"tier.pl_rss_bytes",0); } }
     g_cur=0;
     /* Method A: present when the recording was taken with it (live always is).  Its
        absence leaves A empty, which the A box shows as "not measured". */
@@ -6670,8 +6664,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
         snprintf(k,sizeof k,"instance.%s.rss_bytes",x->db);    x->rss=rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.file_bytes",x->db);   x->filemap=rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.swap_bytes",x->db);   x->swap=rp_num(t,k,0);
-        { char k2[128]; snprintf(k,sizeof k,"instance.%s.pl_rss_bytes",x->db); snprintf(k2,sizeof k2,"instance.%s.pl_pss_bytes",x->db);
-          x->pl_rss=rp_num2(t,k,k2,0); }
+        snprintf(k,sizeof k,"instance.%s.pl_rss_bytes",x->db); x->pl_rss=rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.pl_count",x->db);     x->pl_n=(int)rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.tracked",x->db);      if(rp_num(t,k,0)>0) g_cur=g_ninst-1;
     }
@@ -7749,15 +7742,6 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"--replay-speed")&&i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_rep_speed)) return 2; i++; }
         else if(!strcmp(argv[i],"--dump-hist")) dump_hist=1;
         else if(!strcmp(argv[i],"--heap")) with_a=1;
-        else if(!strcmp(argv[i],"--no-hot")) ;               /* Backward compatibility: there is no hot measurement */
-        else if(!strcmp(argv[i],"--hot")||!strcmp(argv[i],"--hot-limit-gb")||!strcmp(argv[i],"--hot-every")){
-            /* Measuring hot means writing clear_refs - a walk of every target PTE - so the monitor
-               itself would be the load; it was removed rather than offered */
-            fprintf(stderr,g_ascii?"cub_top: %s was removed - measuring hot needs a clear_refs write, a walk of every page"
-                                   " table entry of the server, and a monitor must not put that load on it.\n"
-                                  :"cub_top: %s 는 제거됐다 — 핫 측정은 clear_refs 쓰기(서버 페이지 테이블 전수 순회)가 필요해"
-                                   " 모니터가 대상에 부하를 준다.\n",argv[i]);
-            return 2; }
         else if(!strcmp(argv[i],"--pgbuf-detail")) g_pg_detail=1;
         else if(!strcmp(argv[i],"--ascii")) g_ascii=1;
         else if(!strcmp(argv[i],"--ko")) force_ko=1;
