@@ -126,6 +126,20 @@ print(f"  ok   256-core list replays whole ({len(a['os.core_pct'])}B)")
 PY
 fi
 
+# 2b') a profile cell at a rounding edge: read_ratio is printed to 0.01, so a recorded
+#      write-heavy frame at 0.299 reads back as 0.30 - the recorded cell must win
+if command -v python3 >/dev/null && grep -q '"cap.profile"' "$REC"; then
+    python3 - "$REC" "$TMP/edge.jsonl" <<'PY'
+import json,sys
+d=json.loads(open(sys.argv[1]).readline())
+d['cap.read_ratio']=0.30; d['cap.profile']='>64KB/write-heavy'
+open(sys.argv[2],'w').write(json.dumps(d,ensure_ascii=False)+'\n')
+PY
+    got=$("$BIN" --replay "$TMP/edge.jsonl" --dump-json 2>/dev/null | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline()).get("cap.profile"))')
+    if [ "$got" = ">64KB/write-heavy" ]; then echo "  ok   profile cell at a rounding edge replays as recorded"
+    else echo "  FAIL profile cell at a rounding edge replayed as $got"; bad=1; fi
+fi
+
 # 2c) the plot view says it is a replay and when it was recorded (driven in a pty)
 if command -v python3 >/dev/null; then
     python3 - "$BIN" "$REC" <<'PY' || bad=1

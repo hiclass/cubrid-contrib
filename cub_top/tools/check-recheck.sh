@@ -47,8 +47,11 @@ static uint64_t lsa_raw(long long pg,int off){ return ((uint64_t)pg)|((uint64_t)
 void test_after_pass1(void){
     put_bcb(3,200,0,0x00010000u /* LRU1, clean */,lsa_raw(-1,-1));
 }
-int main(void){
+int main(int argc,char**argv){
     static proc_t P; P.pid=getpid(); CAP.vm_readv=1;
+    /* Every header is read only for a --bcb-dump snapshot; the replaced page is cold (LRU3)
+       before the swap, so the default sample would not read it */
+    if(argc>1) snprintf(g_bcb_dump,sizeof g_bcb_dump,"%s",argv[1]);
     B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
     bcbs_=calloc(NB,(size_t)g_bt->pg.sz_bcb);
     for(int i=0;i<NB;i++) iop_[i]=calloc(1,(size_t)g_bt->pg.iobuf_iopg+64);
@@ -71,7 +74,7 @@ int main(void){
 }
 HC
 gcc -O2 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/t" "$TMP/t.c" 2>"$TMP/cc.err" || { cat "$TMP/cc.err"; echo "→ FAIL (compile failed)"; exit 1; }
-"$TMP/t" > "$TMP/out"; rc=$?
+"$TMP/t" "$TMP/dump1" > "$TMP/out"; rc=$?
 sed 's/^/  /' "$TMP/out"
 # Degraded mode: above 5% unverifiable records, only verified records are counted, the
 # dump is not overwritten and turnover skips the frame.

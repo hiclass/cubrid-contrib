@@ -8,11 +8,8 @@
   --ascii            라벨을 영문으로 강제 (자동: 비 UTF-8 로케일·한글 폭 미지원 tty 는 영문)
   --ko               한글 라벨 강제 (자동 판정이 영문으로 잘못 내렸을 때)
   --offsets F        오프셋 표 파일/디렉터리 (tools/collect-offsets.sh 산출물 — 디렉터리면 버전 자동 선택; 생략 시 실행파일 옆 offsets/ 자동 탐색)
-  --hot              최근접근(hot) 측정 켜기 — clear_refs 쓰기 필요(기본 OFF: 대상 PTE 전수 순회 ~30ms/GB + minor fault 유발)
-  --hot-limit-gb N   핫 측정 자동 해제 임계 상주 크기(기본 2GB) — 이보다 크면 --hot 이어도 끈다
-  --hot-every S      핫 측정 최소 간격(초, 기본 60) — 매 프레임 호출하지 않는다
-  --no-hot           (하위호환) 핫 측정 끄기 — 기본이 이미 OFF 다
-  --bcb-dump F       버퍼풀 BCB 스냅샷을 파일 F 로 (cub_volmap --bufmap F 가 지도에 얹음; 라이브는 매 프레임 갱신)
+  --pgbuf-detail     버퍼 슬롯 26만 개(16K 페이지 4GB) 초과 버퍼풀도 페이지 단위로 스캔 (기본은 엔진 집계만 — 전수 스캔은 대상에 접촉이 크다)
+  --bcb-dump F       버퍼풀 BCB 스냅샷을 파일 F 로 (cub_volmap --bufmap F 가 지도에 얹음; 라이브는 매 프레임 갱신, 이때는 헤더를 전수 읽음)
   --capacity-state F 용량 상한(포화 시 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정
   -p, --plot         시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)
   --interval S       샘플 창(초, 0.05~3600, 기본 0.5)

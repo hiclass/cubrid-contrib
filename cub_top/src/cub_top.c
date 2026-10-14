@@ -131,7 +131,6 @@ static struct {
     int mem_pread;       /* /proc/pid/mem pread available */
     int rollup;          /* smaps_rollup present */
     int proc_io;         /* /proc/pid/io present */
-    int clear_refs;      /* clear_refs writable */
     char note[256];
 } CAP;
 static int g_ascii=0;   /* --ascii: English canvas labels, for terminals whose input method follows Hangul rendering */   /* Korean/English label, toggled by l or --ascii */
@@ -181,52 +180,98 @@ static int32_t rd_i32(int pid,unsigned long a){
 /* The one-line capability summary shown with the fallback warning */
 static void cap_note(void){
     snprintf(CAP.note,sizeof CAP.note,
-        "vm_readv=%s rollup=%s proc_io=%s clear_refs=%s",
-        CAP.vm_readv?"yes":(g_ascii?"no(pread fallback)":"no(pread 폴백)"),
+        "vm_readv=%s rollup=%s proc_io=%s",
+        CAP.vm_readv?"yes":!CAP.mem_pread?(g_ascii?"no(denied)":"no(거부)"):(g_ascii?"no(pread fallback)":"no(pread 폴백)"),
         CAP.rollup?"yes":(g_ascii?"no(smaps sum)":"no(smaps 합산)"),
-        CAP.proc_io?"yes":"no", CAP.clear_refs?"yes":"no");
+        CAP.proc_io?"yes":"no");
+}
+static int  g_perm_limited=0;
+static char g_perm_why[192]="";
+/* First readable mapping of pid, the probe address; 0 when maps is unreadable */
+static unsigned long first_readable_map(int pid){
+    char p[64], ln[512]; unsigned long a=0,s,e; char perm[8];
+    snprintf(p,sizeof p,"/proc/%d/maps",pid);
+    FILE *fp=fopen(p,"r"); if(!fp) return 0;
+    while(fgets(ln,sizeof ln,fp))
+        if(sscanf(ln,"%lx-%lx %7s",&s,&e,perm)==3 && perm[0]=='r' && !strstr(ln,"[vvar]") && !strstr(ln,"[vsyscall]")){ a=s; break; }
+    fclose(fp);
+    return a;
+}
+/* Memory reads denied though maps/smaps are readable: Yama ptrace_scope>=1 checks only the attach mode */
+static void perm_vm_denied(int err){
+    int sc=-1; FILE *f=fopen("/proc/sys/kernel/yama/ptrace_scope","r");
+    if(f){ if(fscanf(f,"%d",&sc)!=1) sc=-1; fclose(f); }
+    g_perm_limited=1;
+    if(sc>=3)      /* no attach at all, root included, until reboot */
+        snprintf(g_perm_why,sizeof g_perm_why,
+                 g_ascii?"memory read denied (%s): kernel.yama.ptrace_scope=%d - engine view off (no process may attach; fixed until reboot)"
+                        :"메모리 읽기 거부(%s): kernel.yama.ptrace_scope=%d - 엔진 직독 꺼짐 (root 포함 전면 금지, 재부팅 전 변경 불가)",
+                 err==EACCES?"EACCES":"EPERM",sc);
+    else if(sc>=1)
+        snprintf(g_perm_why,sizeof g_perm_why,
+                 g_ascii?"memory read denied (%s): kernel.yama.ptrace_scope=%d - engine view off (needs root/CAP_SYS_PTRACE%s)"
+                        :"메모리 읽기 거부(%s): kernel.yama.ptrace_scope=%d - 엔진 직독 꺼짐 (root/CAP_SYS_PTRACE%s 필요)",
+                 err==EACCES?"EACCES":"EPERM",sc,sc==1?(g_ascii?" or ptrace_scope=0":" 또는 ptrace_scope=0"):"");
+    else
+        snprintf(g_perm_why,sizeof g_perm_why,
+                 g_ascii?"memory read denied (%s) - engine view off (run as the server owner or root)"
+                        :"메모리 읽기 거부(%s) - 엔진 직독 꺼짐 (서버 소유자 또는 root 로 실행)",
+                 err==EACCES?"EACCES":"EPERM");
 }
 static void cap_probe(int pid){
     char p[64], buf[64];
     memset(&CAP,0,sizeof CAP);
-    CAP.mem_pread=1;
+    g_perm_limited=0; g_perm_why[0]=0;   /* Per target; the smaps path sets its own reason below */
+    /* Probe the target itself: a self read always passes, while Yama or another owner
+       refuses only reads of the target */
+    unsigned long ta=first_readable_map(pid);
+    int denied=0, derr=0;
+    /* maps unreadable: memory reads need the stricter attach mode, so they fail too (smaps path reports it) */
+    if(ta){
+        CAP.mem_pread=1;
 #ifdef __NR_process_vm_readv
-    {   /* Read one real byte to confirm kernel support */
-        char t; struct iovec l,r; unsigned long self=(unsigned long)&t;
-        l.iov_base=&buf[0]; l.iov_len=1; r.iov_base=(void*)self; r.iov_len=1;
-        long n=syscall(__NR_process_vm_readv,getpid(),&l,1UL,&r,1UL,0UL);
-        CAP.vm_readv = (n==1);
-    }
+        struct iovec l,r; l.iov_base=&buf[0]; l.iov_len=1; r.iov_base=(void*)ta; r.iov_len=1;
+        long n=syscall(__NR_process_vm_readv,pid,&l,1UL,&r,1UL,0UL);
+        if(n==1) CAP.vm_readv=1;
+        else if(errno==EPERM||errno==EACCES){ denied=1; derr=errno; }
+        else CAP.vm_readv=(errno!=ENOSYS);           /* other errors are address-specific */
 #endif
+        if(!CAP.vm_readv){
+            /* /proc/pid/mem is checked on read too (2.6.32 allows only the tracer), so a byte is read */
+            snprintf(p,sizeof p,"/proc/%d/mem",pid);
+            int fd=open(p,O_RDONLY);
+            if(fd>=0 && pread(fd,buf,1,(off_t)ta)==1) denied=0;
+            else if(errno==EPERM||errno==EACCES){ CAP.mem_pread=0; if(!denied) derr=errno; denied=1; }
+            if(fd>=0) close(fd);
+        }
+        if(denied){ CAP.vm_readv=0; CAP.mem_pread=0; perm_vm_denied(derr); }
+    }
     snprintf(p,sizeof p,"/proc/%d/smaps_rollup",pid); CAP.rollup=file_exists(p);
     snprintf(p,sizeof p,"/proc/%d/io",pid);           CAP.proc_io=file_exists(p);
-    snprintf(p,sizeof p,"/proc/%d/clear_refs",pid);   CAP.clear_refs=file_exists(p);
     /* Old-kernel simulation switch, to exercise the fallback paths without a real
        CentOS 6 (2.6.32) machine.
-       CUB_TOP_COMPAT="no-vm_readv,no-rollup,no-clear_refs,no-proc_io" */
+       CUB_TOP_COMPAT="no-vm_readv,no-rollup,no-proc_io" */
     { const char *cm=getenv("CUB_TOP_COMPAT");
       if(cm){
           if(strstr(cm,"no-vm_readv"))   CAP.vm_readv=0;
           if(strstr(cm,"no-rollup"))     CAP.rollup=0;
-          if(strstr(cm,"no-clear_refs")) CAP.clear_refs=0;
           if(strstr(cm,"no-proc_io"))    CAP.proc_io=0;
       } }
     cap_note();
 }
 
 /* Permission scope: for a target owned by another user the ptrace check blocks
- * smaps/maps/io/clear_refs (regions, PSS, I/O, hot set), while status and stat
+ * smaps/maps/io (regions, PSS, I/O), while status and stat
  * stay readable (totals, CPU).  "Not permitted" is reported distinctly from
- * "measured zero" - a 0 would read as "uses no memory". */
-static int  g_perm_limited=0;
-static char g_perm_why[192]="";
+ * "measured zero" - a 0 would read as "uses no memory".  g_perm_limited/g_perm_why
+ * are defined with cap_probe, which also sets them when only memory reads are denied. */
 
 /* ---------------------- /proc parsers ---------------------- */
 typedef struct {
     unsigned long start,end;
     char perm[8];
     char path[192];
-    unsigned long rss_kb,pss_kb,ref_kb;
+    unsigned long rss_kb,pss_kb;
     char is_stack;    /* Marked in the first classify_regions loop when the pthread stack pattern matches */
 } region_t;
 
@@ -364,7 +409,7 @@ static int inst_find(const char*db){
     return -1;
 }
 
-/* Full smaps parse: regions plus Rss/Pss/Referenced */
+/* Full smaps parse: regions plus Rss/Pss */
 static void parse_smaps(proc_t *P){
     char f[64]; snprintf(f,sizeof f,"/proc/%d/smaps",P->pid);
     P->smaps_ok=0; P->s_rss_kb=P->s_pss_kb=P->s_swap_kb=P->s_clean_kb=0;
@@ -395,7 +440,6 @@ static void parse_smaps(proc_t *P){
             unsigned long v;
             if(!strncmp(line,"Rss:",4)){ v=strtoul(line+4,NULL,10); P->s_rss_kb+=v; if(cur) cur->rss_kb=v; }
             else if(!strncmp(line,"Pss:",4)){ v=strtoul(line+4,NULL,10); P->s_pss_kb+=v; if(cur) cur->pss_kb=v; }
-            else if(!strncmp(line,"Referenced:",11)){ if(cur) cur->ref_kb=strtoul(line+11,NULL,10); }
             else if(!strncmp(line,"Swap:",5))           P->s_swap_kb +=strtoul(line+5,NULL,10);
             else if(!strncmp(line,"Shared_Clean:",13))  P->s_clean_kb+=strtoul(line+13,NULL,10);
             else if(!strncmp(line,"Private_Clean:",14)) P->s_clean_kb+=strtoul(line+14,NULL,10);
@@ -441,8 +485,8 @@ static void parse_rollup(proc_t *P){
         if(!g_perm_limited){
             g_perm_limited=1;
             snprintf(g_perm_why,sizeof g_perm_why,
-                     g_ascii?"target owned by another user: maps/smaps/io/clear_refs blocked - totals from status only (run as the server owner or root for the full view)"
-                            :"대상이 다른 사용자 소유: maps/smaps/io/clear_refs 차단 - status 기반 총량만 (전체는 서버 소유자 또는 root 로 실행)");
+                     g_ascii?"target owned by another user: maps/smaps/io blocked - totals from status only (run as the server owner or root for the full view)"
+                            :"대상이 다른 사용자 소유: maps/smaps/io 차단 - status 기반 총량만 (전체는 서버 소유자 또는 root 로 실행)");
         }
         return;
     }
@@ -522,62 +566,6 @@ static void count_d_threads(int pid,int *d_out,int *n_out,unsigned long *blk_out
           if(*p) *blk_out += strtoul(p,NULL,10); }
     }
     closedir(d);
-}
-
-/* clear_refs auto-suppression.  Writing clear_refs walks the target's whole PTE
- * set, so the cost is linear in resident size (~27-31ms/GB) and the target then
- * takes a burst of minor faults.  It is off by default (--hot requests it) and
- * suppressed above a resident threshold, with the reason reported. */
-static double g_hot_limit_gb=2.0;     /* Above this resident size, hot measurement disables itself */
-static double g_hot_every=60.0;       /* Minimum call interval, seconds */
-static char   g_hot_off_why[128]="";  /* Auto-suppression reason, shown on screen and in terse */
-static double g_hot_last_ms=-1e18;    /* Time of the last call */
-static double g_hot_cost_ms=-1;       /* Measured cost of the last call */
-static int    g_hot_measured=0;       /* Whether hot was actually measured this run */
-static void do_clear_refs(int pid){
-    if(!CAP.clear_refs) return;
-    /* Resident size gate: not called at all with a large buffer pool */
-    { double rss_gb=0;
-      char rp[64]; snprintf(rp,sizeof rp,"/proc/%d/smaps_rollup",pid);
-      FILE*rf=fopen(rp,"r");
-      if(rf){ char ln[256];
-              while(fgets(ln,sizeof ln,rf)){
-                  if(strncmp(ln,"Rss:",4)) continue;
-                  unsigned long k=0;
-                  if(sscanf(ln+4,"%lu",&k)==1) rss_gb=(double)k/1048576.0;
-                  break;
-              }
-              fclose(rf); }
-      /* Old kernels without smaps_rollup: fall back to VmRSS from status */
-      if(rss_gb<=0){
-          char sp[64]; snprintf(sp,sizeof sp,"/proc/%d/status",pid);
-          FILE*sf=fopen(sp,"r");
-          if(sf){ char ln[256];
-                  while(fgets(ln,sizeof ln,sf)){
-                      if(strncmp(ln,"VmRSS:",6)) continue;
-                      unsigned long k=0;
-                      if(sscanf(ln+6,"%lu",&k)==1) rss_gb=(double)k/1048576.0;
-                      break;
-                  }
-                  fclose(sf); }
-      }
-      if(rss_gb>g_hot_limit_gb){
-          snprintf(g_hot_off_why,sizeof g_hot_off_why,
-                   g_ascii?"hot off: resident %.1fGB > %.1fGB limit (clear_refs walks every PTE; ~30ms/GB and induces minor faults on the target)"
-                          :"핫 자동 해제: 상주 %.1fGB > 한도 %.1fGB (clear_refs 는 PTE 전수 순회 — 약 30ms/GB, 대상에 minor fault 유발)",
-                   rss_gb,g_hot_limit_gb);
-          CAP.clear_refs=0; return; }
-    }
-    /* Minimum interval; not called every frame */
-    { double now=now_ms();
-      if(now-g_hot_last_ms < g_hot_every*1000.0) return;
-      g_hot_last_ms=now; }
-    char f[64]; snprintf(f,sizeof f,"/proc/%d/clear_refs",pid);
-    int fd=open(f,O_WRONLY); if(fd<0){ CAP.clear_refs=0; return; }
-    double t0=now_ms();
-    if(write(fd,"1\n",2)<0) CAP.clear_refs=0; else g_hot_measured=1;
-    g_hot_cost_ms=now_ms()-t0;
-    close(fd);
 }
 
 /* meminfo */
@@ -1331,6 +1319,19 @@ static tgt_t TG[]={
   {"SZ_PSTAT_METADATA", NULL,NULL,"pstat_metadata",             56},
   {"OFF_PSTATMD_PSID",  NULL,"psid","pstat_metadata",            0},
   {"OFF_PSTATMD_START", NULL,"start_offset","pstat_metadata",   20},
+  /* Engine-maintained buffer pool aggregates (zone counts, victim candidates, dirty count):
+     kept by the engine for its own LRU and flush control, so read without a BCB scan */
+  {"OFF_PGBUF_LRULIST", "pgbuf_Pool","buf_LRU_list",          NULL, 56},
+  {"OFF_PGBUF_NLRU",    "pgbuf_Pool","num_LRU_list",          NULL, 40},
+  {"OFF_PGBUF_QUOTA",   "pgbuf_Pool","quota",                 NULL, 328},
+  {"OFF_QUOTA_NPRIV",   NULL,"num_private_LRU_list","pgbuf_page_quota", 0},
+  {"OFF_PGBUF_MONITOR", "pgbuf_Pool","monitor",               NULL, 280},
+  {"OFF_MON_DIRTIES",   NULL,"dirties_cnt","pgbuf_page_monitor",      0},
+  {"SZ_PGBUF_LRU",      NULL,NULL,"pgbuf_lru_list",                 128},
+  {"OFF_LRU_C1",        NULL,"count_lru1","pgbuf_lru_list",         80},
+  {"OFF_LRU_C2",        NULL,"count_lru2","pgbuf_lru_list",         84},
+  {"OFF_LRU_C3",        NULL,"count_lru3","pgbuf_lru_list",         88},
+  {"OFF_LRU_VICT",      NULL,"count_vict_cand","pgbuf_lru_list",    92},
 };
 #define NTG ((int)(sizeof TG/sizeof TG[0]))
 /* The standalone dwoff's GOT/OKF/NOTE are unused here; out[] replaces them */
@@ -1404,7 +1405,9 @@ enum { DW_PGBUF=0, DW_XC_ENT, DW_XC_USE, DW_XC_CLN, DW_QLIST, DW_QPOOL,
        /* pgbuf/log, one to one with the tail of TG[] */
        DW_BCBTAB, DW_SZ_BCB, DW_BCB_VPID, DW_BCB_FLAGS, DW_BCB_OLSA, DW_BCB_IOPG,
        DW_IOBUF_IOPG, DW_LOG_NXIO, DW_LOG_APPEND, DW_LOG_EOF,
-       DW_PS_NVALS, DW_PS_GSTATS, DW_PS_INIT, DW_PS_SZMD, DW_PS_MDPSID, DW_PS_MDSTART, DW_N };
+       DW_PS_NVALS, DW_PS_GSTATS, DW_PS_INIT, DW_PS_SZMD, DW_PS_MDPSID, DW_PS_MDSTART,
+       DW_AG_LRULIST, DW_AG_NLRU, DW_AG_QUOTA, DW_AG_NPRIV, DW_AG_MONITOR, DW_AG_DIRTIES,
+       DW_AG_SZLRU, DW_AG_C1, DW_AG_C2, DW_AG_C3, DW_AG_VICT, DW_N };
 
 /* Extraction takes about 8 seconds over 125MB of .debug_info, so its result is cached
    as text in /var/tmp/cub_top.dw-<uid>-<size>-<mtime>.tbl, keyed by the .so's size and
@@ -1430,7 +1433,7 @@ static void dw_cache_write(const char *path,const long out[]){
     if(fd<0) return;
     FILE *f=fdopen(fd,"w");
     if(!f){ close(fd); unlink(tmp); return; }
-    for(int i=0;i<NTG;i++) if(out[i]>=0) fprintf(f,"%s %ld\n",TG[i].key,out[i]);
+    for(int i=0;i<NTG;i++) fprintf(f,"%s %ld\n",TG[i].key,out[i]);   /* -1 too: absent means an older key set */
     if(fclose(f)==0) { if(rename(tmp,path)!=0) unlink(tmp); }
     else unlink(tmp);
 }
@@ -1442,13 +1445,13 @@ static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
              (int)geteuid(),(long long)st.st_size,(long long)st.st_mtime);
     FILE*cf=dw_cache_open_trusted(cpath);
     if(cf){
-        int got=0; char k[64]; long v;
+        int got=0, seen=0; char k[64]; long v;
         for(int i=0;i<DW_N;i++) out[i]=-1;
         while(fscanf(cf,"%63s %ld",k,&v)==2)
             for(int i=0;i<NTG;i++)
-                if(!strcmp(k,TG[i].key)){ out[i]=v; got++; break; }
+                if(!strcmp(k,TG[i].key)){ out[i]=v; seen++; if(v>=0) got++; break; }
         fclose(cf);
-        if(got>0) return 1;
+        if(got>0 && seen>=NTG) return 1;     /* Written before keys were added: extract again once */
     }
     fprintf(stderr,"cub_top: 오프셋 표가 이 환경과 안 맞아 %s 의 DWARF 에서 직접 추출합니다"
                    " (1회, 수 초 — 결과는 %s 에 캐시)\n",so,cpath);
@@ -1690,6 +1693,8 @@ typedef struct {
     /* st_size of each root symbol (SYMN order) in that build; 0 = not recorded.  The gate
        compares them with the running .so: a struct that changed size is another layout. */
     int ssz[S_NSYM];
+    /* Engine buffer pool aggregates; -1 disables only them.  Append at the struct end only */
+    struct { int lrulist, nlru, quota, npriv, monitor, dirties, sz_lru, c1, c2, c3, vict; } ag;
 } btab_t;
 static const btab_t BTABS[]={
     {"table-11.5","11.5.0.2374",SYMN,0,
@@ -1700,7 +1705,8 @@ static const btab_t BTABS[]={
      0 /* off_lk_ntran: on 11.x num_trans is at the head of lk_Gl */,
      {8,144,44,64,128,136,8,48,280,488} /* pg, measured with dwoff on 11.5.0.2374 */,
      {0,8,44,56,0,20} /* ps, measured with dwoff on 11.5.0.2374 */,
-     {648,608,48,16,4,640,416,408,4,4,184,1360,56,16968} /* ssz, readelf -s of 11.5.0.2374 */},
+     {648,608,48,16,4,640,416,408,4,4,184,1360,56,16968} /* ssz, readelf -s of 11.5.0.2374 */,
+     {56,40,328,0,280,0,128,80,84,88,92} /* ag, measured with dwoff on 11.5.0.2374 */},
 };
 /* DWARF or offset-file values into the pg group.  If any is missing all become -1 - no partial trust. */
 static void ps_from_dw(btab_t*bt,const long dw[]){
@@ -1708,6 +1714,11 @@ static void ps_from_dw(btab_t*bt,const long dw[]){
     int ok=1; for(int i=0;i<6;i++) if(v[i]<0) ok=0;
     int *f=(int*)&bt->ps;
     for(int i=0;i<6;i++) f[i]= ok ? (int)v[i] : -1;
+}
+static void ag_from_dw(btab_t*bt,const long dw[]){
+    int ok=1; for(int i=DW_AG_LRULIST;i<=DW_AG_VICT;i++) if(dw[i]<0) ok=0;
+    int *f=(int*)&bt->ag;
+    for(int i=DW_AG_LRULIST;i<=DW_AG_VICT;i++) f[i-DW_AG_LRULIST]= ok ? (int)dw[i] : -1;
 }
 static void pg_from_dw(btab_t*bt,const long dw[]){
     long v[10]={dw[DW_BCBTAB],dw[DW_SZ_BCB],dw[DW_BCB_VPID],dw[DW_BCB_FLAGS],dw[DW_BCB_OLSA],
@@ -1854,7 +1865,7 @@ static const char *hdelta(const char *nm,double cur){
     return o;
 }
 static struct {
-    int ok; int partial; char why[128];   /* partial marks anchor-probing count-only mode */
+    int ok; int partial; char why[320];   /* partial marks anchor-probing count-only mode */
     unsigned long base, sym[S_NSYM];
     unsigned long ssz[S_NSYM];        /* st_size of each root symbol in this .so */
     bitem_t it[16]; int n;
@@ -1878,7 +1889,9 @@ static void method_b(proc_t *P){
           ld=ls.st_dev; li=ls.st_ino; lk=1; g_lib_gen++; g_cver[0]=0; } }
     if(!g_cver[0]) detect_cubrid_ver(so);   /* From the very file the process mapped */
     if(!CAP.vm_readv && !CAP.mem_pread){
-        snprintf(B.why,sizeof B.why,g_ascii?"cannot read process memory":"프로세스 메모리 읽기 불가"); return; }
+        if(g_perm_why[0]) snprintf(B.why,sizeof B.why,"%s",g_perm_why);
+        else snprintf(B.why,sizeof B.why,g_ascii?"cannot read process memory":"프로세스 메모리 읽기 불가");
+        return; }
 
     /* Cache across frames: symbol addresses and the adopted table are constant for
        the same .so and pid.  The L4 self-check is still re-read every frame. */
@@ -2038,7 +2051,7 @@ static void method_b(proc_t *P){
             fbt.sz_catalog =(int)fv[DW_SZ_CAT];  fbt.sz_fpcache=(int)fv[DW_SZ_FP];
             fbt.sz_conn    =(int)fv[DW_SZ_CONN]; fbt.sz_vacuum =(int)fv[DW_SZ_VAC];
             fbt.off_lk_ntran=(int)fv[DW_LK_NTRAN];
-            pg_from_dw(&fbt,fv); ps_from_dw(&fbt,fv);
+            pg_from_dw(&fbt,fv); ps_from_dw(&fbt,fv); ag_from_dw(&fbt,fv);
             memcpy(fbt.ssz,fss,sizeof fbt.ssz);
             f_ready=1;
             f_exact = r_explicit || (g_cver[0] && fver[0] && !strcmp(fver,g_cver));
@@ -2066,7 +2079,7 @@ static void method_b(proc_t *P){
             dwbt.sz_catalog =(int)dwv[DW_SZ_CAT];  dwbt.sz_fpcache=(int)dwv[DW_SZ_FP];
             dwbt.sz_conn    =(int)dwv[DW_SZ_CONN]; dwbt.sz_vacuum =(int)dwv[DW_SZ_VAC];
             dwbt.off_lk_ntran=(int)dwv[DW_LK_NTRAN];
-            pg_from_dw(&dwbt,dwv); ps_from_dw(&dwbt,dwv);
+            pg_from_dw(&dwbt,dwv); ps_from_dw(&dwbt,dwv); ag_from_dw(&dwbt,dwv);
             memset(dwbt.ssz,0,sizeof dwbt.ssz);   /* From this very .so: nothing to compare */
             TRY_BOTH(&dwbt,1);
         } else if(dwst==2 && dwwhy[0])
@@ -2346,7 +2359,9 @@ typedef struct {            /* Dump record, fixed 32B little-endian: the contrac
 static int *pg_bidx=NULL; static int pg_bidx_cap=0;
 #define PG_MAXVOL 256
 static struct {
-    int ok; char why[128];
+    int ok; char why[384];
+    int large;          /* Not scanned: a large buffer without a request */
+    int nhdr, nonres, pm_unchecked;   /* Headers read (sample or all), skipped as not resident, read without a pagemap check */
     int nbuf, resident, dirty, flushing, z1,z2,z3, zvoid, zinv, mismatch, unread, badvpid;
     int mismatch_raw;   /* Mismatches before the recheck, including replacements between the two reads */
     int recheck;        /* Number rechecked */
@@ -2437,18 +2452,58 @@ static void pg_recount(void){
         if(r->flags&PGBUF_F_FLUSHING) PG.flushing++;
     }
 }
+/* Whether addr is resident in pid, from /proc/pid/pagemap (bit 63).  Reading pagemap does not
+   touch the page; reading a swapped-out page would swap it in.  One 4KB block (512 pages) is
+   cached since header addresses run in order.  Unreadable pagemap: -1 (not checked). */
+static int pm_present(int pid,unsigned long addr){
+    static int fd=-1, fpid=-1; static uint64_t blk[512]; static long bno=-1;
+    if(fpid!=pid){ if(fd>=0) close(fd); char p[64]; snprintf(p,sizeof p,"/proc/%d/pagemap",pid);
+                   fd=open(p,O_RDONLY); fpid=pid; bno=-1; }
+    if(fd<0) return -1;
+    unsigned long pg=addr/4096; long b=(long)(pg/512);
+    if(b!=bno){ if(pread(fd,blk,sizeof blk,(off_t)b*(off_t)sizeof blk)!=(ssize_t)sizeof blk) return -1; bno=b; }
+    return (int)(blk[pg%512]>>63);
+}
+static void pg_log(proc_t*P){
+    /* Log tail, the upper bound of WAL continuity: append >= nxio (the disk boundary) >= page LSA */
+    PG.have_log=0;
+    if(B.sym[S_LOGGL] && g_bt->pg.log_nxio>=0){
+        unsigned long lg=B.base+B.sym[S_LOGGL]; uint64_t a=0,n=0,e=0;
+        if(vmread(P->pid,lg+g_bt->pg.log_append,&a,8)==8 && vmread(P->pid,lg+g_bt->pg.log_nxio,&n,8)==8
+           && vmread(P->pid,lg+g_bt->pg.log_eof,&e,8)==8){
+            PG.raw_append=a; PG.raw_nxio=n; PG.raw_eof=e;
+            PG.log_append=lsa_dec(a); PG.log_nxio=lsa_dec(n); PG.log_eof=lsa_dec(e);
+            /* Check: pageid must be non-negative and append >= nxio */
+            if(PG.log_append.pageid>=0 && PG.log_nxio.pageid>=0 && lsa_cmp(PG.log_append,PG.log_nxio)>=0) PG.have_log=1;
+        }
+    }
+}
+static int g_pg_detail=0;   /* Page-level detail on a large buffer: asked for (live d, --pgbuf-detail, --bcb-dump) */
+#define PG_LARGE 262144     /* BCBs above which the whole-array scan runs only on request */
+#define PG_SAMPLE 256       /* Headers read to verify the offsets; a wrong offset mismatches all of them */
 static void pgbuf_scan(proc_t*P){
     PG.frame++;
+    PG.have_log=0;
     g_bcb_saved=0; g_bcb_why[0]=0;
     if(!B.ok){ PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"method B off — %s":"방법 B 비활성 — %s",B.why); return; }
     if(B.partial||g_bt->pg.sz_bcb<0){ PG.ok=0;
         snprintf(PG.why,sizeof PG.why,g_ascii?"table lacks BCB offsets (probe mode or old offsets/*.tbl — re-run tools/collect-offsets.sh)"
                                             :"표에 BCB 오프셋 없음 (탐사 모드 또는 구 offsets/*.tbl — tools/collect-offsets.sh 재수집)");
         return; }
-    if(PG.every>1 && PG.ok && (PG.frame%PG.every)!=1) return;   /* Large buffer: diluted, keeping the previous snapshot */
+    pg_log(P);                 /* O(1), kept on a large buffer too */
+    int detail = g_pg_detail || g_bcb_dump[0];
+    if(detail && PG.every>1 && PG.ok && (PG.frame%PG.every)!=1) return;   /* Requested on a large buffer: diluted */
     double t0=now_ms();
     unsigned long pool=B.base+B.sym[S_PGBUF];
     int32_t nbuf=rd_i32(P->pid,pool+g_bt->off_pgbuf_nbuf);
+    /* A whole-array scan of a large buffer (2M BCBs = 300MB a pass) is load the monitor would
+       put on the host: by default only the engine's own aggregates are shown */
+    if(nbuf>PG_LARGE && !detail){ PG.ok=0; PG.large=1; PG.nbuf=nbuf;
+        snprintf(PG.why,sizeof PG.why,
+                 g_ascii?"%d slots: page-level scan only on request (live d, --pgbuf-detail, --bcb-dump); engine aggregates shown"
+                        :"슬롯 %d개: 페이지 단위 스캔은 요청 시에만 (라이브 d, --pgbuf-detail, --bcb-dump) — 엔진 집계로 표시",nbuf);
+        return; }
+    PG.large=0;
     uint64_t tab=0;
     if(vmread(P->pid,pool+g_bt->pg.bcbtab,&tab,8)!=8 || !tab || nbuf<=0 || nbuf>(1<<26)){
         PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"BCB_table pointer unreadable":"BCB_table 포인터 읽기 실패"); return; }
@@ -2504,10 +2559,33 @@ static void pgbuf_scan(proc_t*P){
     }
     if(PG.badvpid>nbuf/100){ PG.ok=0;
         snprintf(PG.why,sizeof PG.why,g_ascii?"abnormal VPIDs: %d — offset mismatch suspected":"비정상 VPID %d개 — 오프셋 불일치 의심",PG.badvpid); return; }
-    /* pass 2: gather the page headers (prv 16B: lsa 8, pageid 4, volid 2, ptype/pflag 2) and compare */
+    /* pass 2: gather the page headers (prv 16B: lsa 8, pageid 4, volid 2, ptype/pflag 2) and compare.
+       Reading a header touches that buffer page (the kernel marks it accessed, and swaps it in if
+       it was out), so only a sample the engine itself used recently is read - zone 1, then zone 2,
+       evenly spread - and only if resident.  All headers only for a --bcb-dump snapshot. */
     PG.mismatch=PG.unread=0; PG.mismatch_raw=0; PG.recheck=0; PG.degraded=0;
-    if(PG.nrec>0){
-        vm_gather(P->pid,addr,PG.nrec,16,hdr,okf);
+    PG.nhdr=PG.nonres=PG.pm_unchecked=0;
+    int full = g_bcb_dump[0]!=0;
+    static int *hsel=NULL; static uint64_t *haddr=NULL; static int hcap=0;
+    if(PG.nrec>hcap){ free(hsel); free(haddr);
+        hsel=(int*)malloc(sizeof(int)*(size_t)PG.nrec); haddr=(uint64_t*)malloc(sizeof(uint64_t)*(size_t)PG.nrec);
+        hcap=(hsel&&haddr)?PG.nrec:0;
+        if(!hcap){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; } }
+    { int nc=0;
+      if(full) for(int k=0;k<PG.nrec;k++) hsel[nc++]=k;
+      else {
+          for(int z=1;z<=2;z++) for(int k=0;k<PG.nrec;k++) if(PG.rec[k].zone==z) hsel[nc++]=k;
+          if(nc>PG_SAMPLE){ for(int j=0;j<PG_SAMPLE;j++) hsel[j]=hsel[(int)((long)j*nc/PG_SAMPLE)]; nc=PG_SAMPLE; }
+      }
+      int m=0;
+      for(int j=0;j<nc;j++){
+          int pr=pm_present(P->pid,(unsigned long)addr[hsel[j]]);
+          if(pr==0){ PG.nonres++; continue; }
+          if(pr<0) PG.pm_unchecked++;
+          hsel[m]=hsel[j]; haddr[m]=addr[hsel[j]]; m++; }
+      PG.nhdr=m; }
+    if(PG.nhdr>0){
+        vm_gather(P->pid,haddr,PG.nhdr,16,hdr,okf);
         /* Collect the mismatched indices for the recheck.  addr[] is overwritten there, so
            the original iopage addresses are kept alongside. */
         static int *midx=NULL; static uint64_t *maddr=NULL; static int mcap=0;
@@ -2519,14 +2597,14 @@ static void pgbuf_scan(proc_t*P){
         /* Without the index arrays no mismatch could be rechecked or counted, and 0
            mismatches would pass the gate - the frame is dropped instead */
         if(!mcap){ PG.ok=0; snprintf(PG.why,sizeof PG.why,"malloc"); return; }
-        for(int k=0;k<PG.nrec;k++){
-            pgrec_t*r=&PG.rec[k];
-            if(!okf[k]){ PG.unread++; continue; }
+        for(int j=0;j<PG.nhdr;j++){
+            int k=hsel[j]; pgrec_t*r=&PG.rec[k];
+            if(!okf[j]){ PG.unread++; continue; }
             uint64_t lsa; int32_t hp; int16_t hv;
-            memcpy(&lsa,hdr+(size_t)k*16,8); memcpy(&hp,hdr+(size_t)k*16+8,4); memcpy(&hv,hdr+(size_t)k*16+12,2);
+            memcpy(&lsa,hdr+(size_t)j*16,8); memcpy(&hp,hdr+(size_t)j*16+8,4); memcpy(&hv,hdr+(size_t)j*16+12,2);
             if(hp!=r->pageid || hv!=r->volid){
                 PG.mismatch_raw++;
-                midx[nm]=k; maddr[nm]=addr[k]; nm++;
+                midx[nm]=k; maddr[nm]=haddr[j]; nm++;
                 continue;
             }
             r->page_lsa=lsa; r->hdr_ok=1;
@@ -2593,17 +2671,18 @@ static void pgbuf_scan(proc_t*P){
            offset failing all 32,768 reads still passed as healthy (a deliberate
            corruption test returned enabled=1).  Reading no header at all empties
            the LSA axis, so it is treated as an offset error. */
-        if(PG.nrec>100 && PG.unread>PG.nrec/2){ PG.ok=0;
+        if(PG.nhdr>100 && PG.unread>PG.nhdr/2){ PG.ok=0;
             snprintf(PG.why,sizeof PG.why,
                      g_ascii?"page headers unreadable %d/%d — iopage offset mismatch suspected"
-                            :"페이지 헤더 읽기 실패 %d/%d — iopage 오프셋 불일치 의심",PG.unread,PG.nrec);
+                            :"페이지 헤더 읽기 실패 %d/%d — iopage 오프셋 불일치 의심",PG.unread,PG.nhdr);
             return; }
-        if(PG.nrec>100 && PG.mismatch>PG.nrec/20){
-            if(PG.mismatch>PG.nrec/2){ PG.ok=0;
+        if(PG.nhdr>100 && PG.mismatch>PG.nhdr/20){
+            if(PG.mismatch>PG.nhdr/2){ PG.ok=0;
                 snprintf(PG.why,sizeof PG.why,
                          g_ascii?"page header vs BCB mismatch %d/%d after recheck — offset mismatch suspected"
-                                :"재검 후에도 페이지 헤더·BCB 불일치 %d/%d — 오프셋 불일치 의심",PG.mismatch,PG.nrec);
+                                :"재검 후에도 페이지 헤더·BCB 불일치 %d/%d — 오프셋 불일치 의심",PG.mismatch,PG.nhdr);
                 return; }
+          if(full){   /* Records are verified one by one only when every header was read */
             PG.degraded=1; PG.nrec_all=PG.nrec;
             /* Verified records only, as the mode says: the unverified are dropped and the
                record totals recounted.  Zone counts stay - they cover every BCB, empty ones
@@ -2614,18 +2693,7 @@ static void pgbuf_scan(proc_t*P){
                 m++; }
             PG.nrec=m;
             pg_recount();
-        }
-    }
-    /* Log tail, the upper bound of WAL continuity: append >= nxio (the disk boundary) >= page LSA */
-    PG.have_log=0;
-    if(B.sym[S_LOGGL] && g_bt->pg.log_nxio>=0){
-        unsigned long lg=B.base+B.sym[S_LOGGL]; uint64_t a=0,n=0,e=0;
-        if(vmread(P->pid,lg+g_bt->pg.log_append,&a,8)==8 && vmread(P->pid,lg+g_bt->pg.log_nxio,&n,8)==8
-           && vmread(P->pid,lg+g_bt->pg.log_eof,&e,8)==8){
-            PG.raw_append=a; PG.raw_nxio=n; PG.raw_eof=e;
-            PG.log_append=lsa_dec(a); PG.log_nxio=lsa_dec(n); PG.log_eof=lsa_dec(e);
-            /* Check: pageid must be non-negative and append >= nxio */
-            if(PG.log_append.pageid>=0 && PG.log_nxio.pageid>=0 && lsa_cmp(PG.log_append,PG.log_nxio)>=0) PG.have_log=1;
+          }
         }
     }
     PG.ok=1;
@@ -2640,7 +2708,8 @@ static void pgbuf_scan(proc_t*P){
                         :"페이지 슬롯 %d개 확인 (재검 %d건, 잔여 %d건)",
                  nbuf,PG.recheck,PG.mismatch);
     else
-        snprintf(PG.why,sizeof PG.why,g_ascii?"%d page slots checked":"페이지 슬롯 %d개 확인",nbuf);
+        snprintf(PG.why,sizeof PG.why,g_ascii?"%d page slots checked (%d headers%s)":"페이지 슬롯 %d개 확인 (헤더 %d개%s)",
+                 nbuf,PG.nhdr,full?(g_ascii?", all":", 전수"):(g_ascii?" sampled":" 표본"));
     PG.ms=now_ms()-t0;
     { struct timeval tv; gettimeofday(&tv,NULL); PG.when.tv_sec=tv.tv_sec; PG.when.tv_nsec=tv.tv_usec*1000L; }
     /* Order matters: pgbuf_dump overwrites the --bcb-dump file, so a one-shot run must
@@ -2650,6 +2719,50 @@ static void pgbuf_scan(proc_t*P){
     if(!PG.degraded) pgbuf_dump(P->db);   /* A degraded frame keeps the last verified snapshot on disk */
     else snprintf(g_bcb_why,sizeof g_bcb_why,g_ascii?"degraded frame (unverified headers) - previous snapshot kept"
                                                     :"degraded 프레임(미검증 헤더) — 이전 스냅샷 유지");
+}
+/* Engine-maintained buffer pool aggregates: per-LRU-list zone counts and victim candidates,
+   and the dirty count the flush control keeps.  The engine updates them for its own LRU and
+   flush decisions (not perfmon), so they are read whether or not anyone watches, in O(1) -
+   a few KB of memory the engine itself touches on every fix - instead of a BCB scan. */
+static struct {
+    int ok; char why[320];
+    int nlist, nshared, nbuf;      /* LRU lists read (shared + private), buffers */
+    long z1, z2, z3, vict;         /* Sums over the lists */
+    long long dirty;
+    double ms;
+} AG;
+static void pgbuf_agg(proc_t*P){
+    memset(&AG,0,sizeof AG);
+    if(!B.ok){ snprintf(AG.why,sizeof AG.why,"%s",g_ascii?"method B off":"방법 B 비활성"); return; }
+    if(B.partial||g_bt->ag.sz_lru<=0){ snprintf(AG.why,sizeof AG.why,"%s",
+        g_ascii?"table lacks the aggregate offsets":"표에 집계 오프셋 없음"); return; }
+    double t0=now_ms();
+    unsigned long pool=B.base+B.sym[S_PGBUF];
+    int32_t nbuf=rd_i32(P->pid,pool+g_bt->off_pgbuf_nbuf);
+    int32_t nsh=rd_i32(P->pid,pool+g_bt->ag.nlru), npv=rd_i32(P->pid,pool+g_bt->ag.quota+g_bt->ag.npriv);
+    uint64_t lists=0; int64_t dirty=-1;
+    int okp = vmread(P->pid,pool+g_bt->ag.lrulist,&lists,8)==8 && lists;
+    int okd = vmread(P->pid,pool+g_bt->ag.monitor+g_bt->ag.dirties,&dirty,8)==8;
+    int n=nsh+npv;
+    if(!okp || !okd || nbuf<=0 || nsh<=0 || npv<0 || n>nbuf || dirty<0 || dirty>nbuf){
+        snprintf(AG.why,sizeof AG.why,g_ascii?"aggregates fail the sanity check (lists %d+%d, dirty %lld)"
+                                              :"집계값 검증 실패 (리스트 %d+%d, dirty %lld)",nsh,npv,(long long)dirty);
+        return; }
+    size_t sz=(size_t)g_bt->ag.sz_lru, need=sz*(size_t)n;
+    static unsigned char*buf=NULL; static size_t cap=0;
+    if(need>cap){ free(buf); buf=malloc(need); cap=buf?need:0; if(!buf){ snprintf(AG.why,sizeof AG.why,"malloc"); return; } }
+    if(vmread(P->pid,(unsigned long)lists,buf,need)!=(ssize_t)need){
+        snprintf(AG.why,sizeof AG.why,"%s",g_ascii?"LRU list array unreadable":"LRU 리스트 배열 읽기 실패"); return; }
+    for(int i=0;i<n;i++){
+        const unsigned char*b=buf+(size_t)i*sz; int32_t c1,c2,c3,v;
+        memcpy(&c1,b+g_bt->ag.c1,4); memcpy(&c2,b+g_bt->ag.c2,4); memcpy(&c3,b+g_bt->ag.c3,4); memcpy(&v,b+g_bt->ag.vict,4);
+        if(c1<0||c2<0||c3<0||v<0){ snprintf(AG.why,sizeof AG.why,g_ascii?"negative count in list %d":"리스트 %d 의 음수 개수",i); return; }
+        AG.z1+=c1; AG.z2+=c2; AG.z3+=c3; AG.vict+=v;
+    }
+    if(AG.z1+AG.z2+AG.z3>nbuf){
+        snprintf(AG.why,sizeof AG.why,g_ascii?"zone sums exceed the buffer (%ld > %d)":"존 합이 버퍼를 넘음 (%ld > %d)",
+                 AG.z1+AG.z2+AG.z3,nbuf); return; }
+    AG.nlist=n; AG.nshared=nsh; AG.nbuf=nbuf; AG.dirty=dirty; AG.ok=1; AG.ms=now_ms()-t0;
 }
 /* Formatting helper */
 static const char* lsa_str(lsa_t l){ static char ring[6][32]; static int k=0; char*o=ring[k++%6];
@@ -2670,10 +2783,9 @@ static void method_a(proc_t *P){
 
 /* ---------------- Classify cub_server regions into six kinds ---------------- */
 typedef struct {
-    char name[20]; double mapped,rss,ref; long long cfg; char grade;
-    double prev_mapped;         /* grow for view 3 (over configured), tied to the allocation-over-configuration axis */
+    char name[20]; double mapped,rss; long long cfg; char grade;
+    double prev_mapped;         /* grow for view 2 (over configured), tied to the allocation-over-configuration axis */
     double prev_rss;            /* Previous-frame baseline (live) for the grow column */
-    double prev_ref;            /* Previous-frame hot baseline, for view 3's hot delta column */
 } srg_t;
 static srg_t SR[8]; static int NSR=0;
 static double g_dyn_rss=0,g_dyn_mapped=0;
@@ -2688,8 +2800,8 @@ static int path_is_so(const char *p){
 static int path_is_heap(const char *p){ return !strcmp(p,"[heap]"); }
 
 static void classify_regions(proc_t *P){
-    double code_m=0,code_r=0,code_f=0,arena_m=0,stk_m=0,stk_r=0,stk_f=0;
-    double oth_m=0,oth_r=0,oth_f=0;   /* Executable segments, message catalogues, /dev/shm and the like */
+    double code_m=0,code_r=0,arena_m=0,stk_m=0,stk_r=0;
+    double oth_m=0,oth_r=0;   /* Executable segments, message catalogues, /dev/shm and the like */
     region_t *db=NULL,*lg=NULL,*prev=NULL;
     long long cfg_db=prm_get("data_buffer_size"), cfg_lg=prm_get("log_buffer_size");
     /* Match large anonymous rw regions against the configured size (100-140%); [heap] is not a buffer candidate */
@@ -2705,46 +2817,46 @@ static void classify_regions(proc_t *P){
         double sz=(double)(r->end-r->start);
         int guard = prev && prev->path[0]==0 && !strchr(prev->perm,'w') && !strchr(prev->perm,'r');
         if(r->path[0] && path_is_so(r->path)){
-            code_m+=sz; code_r+=r->rss_kb*1024.0; code_f+=r->ref_kb*1024.0; }
+            code_m+=sz; code_r+=r->rss_kb*1024.0; }
         else if(r->path[0]==0 && !strchr(r->perm,'w') && !strchr(r->perm,'r')) arena_m+=sz;
         else if(r->path[0]==0 && strchr(r->perm,'r') && strchr(r->perm,'w')
                 && guard && (prev->end-prev->start)<(1UL<<20)
                 && sz>=8384512.0 && sz<=8388608.0){
             r->is_stack=1;                                                 /* pthread stacks */
-            stk_m+=sz; stk_r+=r->rss_kb*1024.0; stk_f+=r->ref_kb*1024.0;
+            stk_m+=sz; stk_r+=r->rss_kb*1024.0;
         }
-        else if(!strncmp(r->path,"[stack",6)){ stk_m+=sz; stk_r+=r->rss_kb*1024.0; stk_f+=r->ref_kb*1024.0; }
+        else if(!strncmp(r->path,"[stack",6)){ stk_m+=sz; stk_r+=r->rss_kb*1024.0; }
         else if(r->path[0] && !path_is_heap(r->path)){
-            oth_m+=sz; oth_r+=r->rss_kb*1024.0; oth_f+=r->ref_kb*1024.0; }
+            oth_m+=sz; oth_r+=r->rss_kb*1024.0; }
         prev=r;
     }
     /* Dynamic heap = unmatched anonymous rw + [heap] - pattern stacks.
        Excluding [heap] (the glibc main arena) leaves tens of MB unattributed.
        Stacks are excluded by the is_stack marking rather than by size, so a genuine
        8MB heap block without a guard is not dropped. */
-    double dyn_m=0,dyn_r=0,dyn_f=0;
+    double dyn_m=0,dyn_r=0;
     for(int i=0;i<P->nreg;i++){
         region_t *r=&P->reg[i];
         int anon = (r->path[0]==0 || path_is_heap(r->path));
         if(!anon||!strchr(r->perm,'w')||!strchr(r->perm,'r')) continue;
         if(r==db||r==lg||r->is_stack) continue;
-        dyn_m+=(double)(r->end-r->start); dyn_r+=r->rss_kb*1024.0; dyn_f+=r->ref_kb*1024.0;
+        dyn_m+=(double)(r->end-r->start); dyn_r+=r->rss_kb*1024.0;
     }
     g_reg_db=db; g_reg_lg=lg;   /* Exposed so method_a does not double-count */
     NSR=0;
-    #define PUT(nm_,mp_,rs_,rf_,cfg_,gr_) do{ if(NSR<8){ srg_t*x=&SR[NSR++]; \
+    #define PUT(nm_,mp_,rs_,cfg_,gr_) do{ if(NSR<8){ srg_t*x=&SR[NSR++]; \
         snprintf(x->name,sizeof x->name,"%s",nm_); x->mapped=(mp_); x->rss=(rs_); \
-        x->ref=(rf_); x->cfg=(cfg_); x->grade=(gr_);} }while(0)
-    if(db) PUT("data_buffer",(double)(db->end-db->start),db->rss_kb*1024.0,db->ref_kb*1024.0,cfg_db,'M');
-    if(lg) PUT("log_buffer", (double)(lg->end-lg->start),lg->rss_kb*1024.0,lg->ref_kb*1024.0,cfg_lg,'M');
+        x->cfg=(cfg_); x->grade=(gr_);} }while(0)
+    if(db) PUT("data_buffer",(double)(db->end-db->start),db->rss_kb*1024.0,cfg_db,'M');
+    if(lg) PUT("log_buffer", (double)(lg->end-lg->start),lg->rss_kb*1024.0,cfg_lg,'M');
     /* When A/B explain more than half the dynamic heap the grade is "estimated", not
        "unattributed": leaving the largest row permanently at '?' reads as no
        decomposition at all. */
-    PUT("dynamic-heap",dyn_m,dyn_r,dyn_f,-1,'U');
-    PUT("thread stacks",stk_m,stk_r,stk_f,-1,'R');
-    PUT("code (.so)",code_m,code_r,code_f,-1,'M');
-    if(oth_m>0) PUT("bin/shm etc",oth_m,oth_r,oth_f,-1,'M');
-    PUT("glibc arena",arena_m,0,0,-1,'R');
+    PUT("dynamic-heap",dyn_m,dyn_r,-1,'U');
+    PUT("thread stacks",stk_m,stk_r,-1,'R');
+    PUT("code (.so)",code_m,code_r,-1,'M');
+    if(oth_m>0) PUT("bin/shm etc",oth_m,oth_r,-1,'M');
+    PUT("glibc arena",arena_m,0,-1,'R');
     #undef PUT
     g_dyn_rss=dyn_r; g_dyn_mapped=dyn_m;
 }
@@ -2759,10 +2871,6 @@ static const srg_t *sr_find(const char *nm){
 }
 static double sr_rss(const char *nm){ const srg_t*x=sr_find(nm); return x?x->rss:0.0; }
 static double sr_mapped(const char *nm){ const srg_t*x=sr_find(nm); return x?x->mapped:0.0; }
-static double sr_hotpct(const char *nm){
-    const srg_t*x=sr_find(nm);
-    return (x && x->rss>0) ? x->ref/x->rss*100.0 : 0.0;
-}
 
 /* Bumped whenever the target process changes (switch or restart).  Baselines kept
    across frames - engine counters, the turnover page set, per-item deltas - belong
@@ -2780,6 +2888,7 @@ static void reset_instance_state(void){
     g_dyn_rss=0; g_dyn_mapped=0;
     memset(&B,0,sizeof B);
     memset(&A,0,sizeof A);
+    memset(&AG,0,sizeof AG);
     /* Buffer pool snapshot: the arrays are kept, what they describe is not.  A large
        buffer is read every few frames, so a stale ok would show the previous
        instance's residency, dirty and log values under the new name. */
@@ -2888,8 +2997,8 @@ static const char *GR(char g){
 
 #define RCHAR_MIN (64.0*1024.0)   /* Floor below which the absorb denominator is meaningless (64KB/s) */
 /* ---- Live dashboard: canvas / braille / TUI ----
- * Six-dot glyph gauges (foreground = lens metric, background = hot), four value
- * columns alloc|rss|hot|chg, three lenses, ~3 minute window, 24h time ruler.
+ * Six-dot glyph gauges (foreground = lens metric, background = a second share such as
+ * dirty), four value columns alloc|rss|conf|chg, two lenses, ~3 minute window, 24h time ruler.
  */
 #define CV_W 120   /* Ceiling of 114 plus slack */
 /* Plot mode is the tallest: nine panels (53 rows) plus the status line and the
@@ -2900,7 +3009,7 @@ typedef struct { int w,h; char ch[CV_H][CV_W][5]; char co[CV_H][CV_W][20]; } can
 static canvas_t CV;
 
 static int g_argc=0; static char **g_argv=NULL;
-static double g_interval=0.5;   /* For displaying the hot window */
+static double g_interval=0.5;   /* The sample window, for display */
 /* Method A takes time proportional to heap size (10ms small, 58-508ms on a 7GB heap
    under load).  Automatic mode targets one second but never runs more often than three
    times the last measurement - self-protection. */
@@ -2941,7 +3050,7 @@ static const char* L(const char*ko){
       {"전체 메모리 대비 점유","share of system RAM"},
       {"상주 구성 · server = data_buffer + log_buffer + dynamic-heap + 기타","resident composition"},
       {"할당(VmSize) vs 상주(VmRSS) · 간격 = 예약만 하고 안 쓰는 분량","reserved (VmSize) vs resident (VmRSS)"},
-      {"활동 · CPU · data_buffer 핫% · 폴트/s","activity · cpu · data_buffer hot% · faults/s"},
+      {"활동 · CPU · 폴트/s","activity · cpu · faults/s"},
       {"디스크 I/O","disk i/o"},
       {"I/O 포화 · 장치 사용률 · 캐시 흡수율","i/o saturation · device util · cache absorb"},
       {"표본이 부족합니다 — 선을 그리려면 2개 이상 필요","not enough samples — need 2+ to draw a line"},
@@ -3060,11 +3169,11 @@ static void cv_box2(int x,int y,int w,int h,const char*title,const char*rtitle){
     }
 }
 static void cv_box(int x,int y,int w,int h,const char*title){ cv_box2(x,y,w,h,title,NULL); }
-/* Six-dot gauge: foreground is the lens metric (green to red), background the hot range (complementary blue) */
-/* Overlay chg on the gauge.  The background already carries the hot range, so an
+/* Six-dot gauge: foreground is the lens metric (green to red), background a second share (complementary blue) */
+/* Overlay chg on the gauge.  The background already carries the second share, so an
    orange background would mix two signals in one channel; instead the growth
    since the previous frame is painted orange at the end of the filled bar, where
-   it is visible in place and does not collide with the hot background. */
+   it is visible in place and does not collide with the background. */
 static void cv_meter3(int x,int y,int w,double frac,double hot,double dfrac){
     if(y<0||y>=CV.h) return;
     if(frac<0)frac=0;
@@ -3277,7 +3386,7 @@ typedef struct {
        (db+lg+dyn+etc) must be over RSS for the identity to hold, while "CUBRID total"
        sums across processes and must therefore be PSS. */
     double srv_rss, db, lg, etc, vsz, rss, dynmap;
-    double dbhot, minflt, devutil, absorb, osused, cub, ram;
+    double minflt, devutil, absorb, osused, cub, ram;
     double cpu;                 /* Server CPU percentage, one core = 100 */
     /* A metric on the dashboard must also be in the plots, or finding a trend means
        working out which screen had it. */
@@ -3302,7 +3411,7 @@ typedef struct {
     double pg_cold_pct;         /* LRU cold zone share, percent of resident */
     double pg_span;             /* Flush lag: append.pageid - oldest_dirty.pageid, in log pages */
     double pg_lag;              /* Log fsync lag: append.pageid - nxio.pageid */
-    int hot_ok, absorb_ok;
+    int absorb_ok;
     /* Total of dynamic memory detail B (engine direct read).  It moves in steps:
        conn/lock/session are preallocated from max_clients and fixed, while only the
        plan/result/catalog caches follow actual use.  A (chunk estimate) is re-read
@@ -3315,8 +3424,7 @@ typedef struct {
 static hsam_t HS[HIST_MAX]; static int HN=0, HCAP=HIST_MAX;
 
 /* One place for the value sources.  Region values go through the sr_*() name lookups without exception; never by index. */
-static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const iod_t*IO,
-                      int hot_ok){
+static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const iod_t*IO){
     if(HN>=HCAP){ memmove(HS,HS+1,sizeof(hsam_t)*(HCAP-1)); HN=HCAP-1; }
     hsam_t*s=&HS[HN++];
     memset(s,0,sizeof *s);
@@ -3331,8 +3439,6 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->dynmap  = sr_mapped("dynamic-heap");
     { double sum=s->db+s->lg+s->dyn;
       s->etc = (s->srv_rss>sum)?(s->srv_rss-sum):0.0; }
-    s->dbhot   = sr_hotpct("data_buffer");
-    s->hot_ok  = hot_ok;
     s->heapb   = B.ok ? B.total : 0;   /* Dynamic memory B total, which moves in steps */
     s->minflt  = IO->minflt; s->majflt = IO->majflt;
     s->rbps=IO->rb; s->wbps=IO->wb; s->riops=IO->ri;
@@ -3364,7 +3470,15 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->cap_readmit=CAP2.readmit_pct<0?0:CAP2.readmit_pct;
     s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps<0?0:CAP2.miss_pps;
     s->cap_head=CAP2.headroom_pct<0?0:CAP2.headroom_pct;
-    s->pg_ok      = PG.ok;
+    s->pg_ok      = PG.ok || AG.ok;
+    if(!PG.ok && AG.ok){                /* Not scanned: the engine's own aggregates; no oldest dirty */
+        double lru=(double)(AG.z1+AG.z2+AG.z3);
+        s->pg_res_pct  = AG.nbuf>0 ? 100.0*lru/AG.nbuf : 0;
+        s->pg_dirty    = (double)AG.dirty;
+        s->pg_cold_pct = lru>0 ? 100.0*AG.z3/lru : 0;
+        s->pg_span     = -1;
+        s->pg_lag      = PG.have_log ? (double)(PG.log_append.pageid-PG.log_nxio.pageid) : 0;
+    }
     if(PG.ok){
         s->pg_res_pct  = PG.nbuf>0 ? 100.0*PG.resident/PG.nbuf : 0;
         s->pg_dirty    = PG.dirty;
@@ -3384,15 +3498,15 @@ static void hist_dump_last(void){
     fprintf(stderr,
         "hist.srv_rss=%.0f hist.db=%.0f hist.lg=%.0f hist.dyn=%.0f hist.etc=%.0f\n"
         "hist.dynmap=%.0f hist.vsz=%.0f hist.rss=%.0f hist.cub=%.0f hist.osused=%.0f\n"
-        "hist.dbhot=%.1f hist.minflt=%.0f hist.majflt=%.0f hist.rbps=%.0f hist.wbps=%.0f\n"
-        "hist.devutil=%.1f hist.absorb=%.1f hist.absorb_ok=%d hist.hot_ok=%d\n"
+        "hist.minflt=%.0f hist.majflt=%.0f hist.rbps=%.0f hist.wbps=%.0f\n"
+        "hist.devutil=%.1f hist.absorb=%.1f hist.absorb_ok=%d\n"
         "hist.pg_ok=%d hist.pg_res_pct=%.2f hist.pg_dirty=%.0f hist.pg_cold_pct=%.2f hist.pg_span=%.0f hist.pg_lag=%.0f\n"
         "hist.rss_srv=%.0f hist.rss_master=%.0f hist.rss_pl=%.0f hist.rss_broker=%.0f hist.rss_cas=%.0f\n"
         "hist.cap_iops=%.0f hist.cap_await=%.2f hist.cap_hit=%.2f hist.cap_miss=%.0f hist.cap_head=%.1f\n",
         s->srv_rss,s->db,s->lg,s->dyn,s->etc,
         s->dynmap,s->vsz,s->rss,s->cub,s->osused,
-        s->dbhot,s->minflt,s->majflt,s->rbps,s->wbps,
-        s->devutil,s->absorb,s->absorb_ok,s->hot_ok,
+        s->minflt,s->majflt,s->rbps,s->wbps,
+        s->devutil,s->absorb,s->absorb_ok,
         s->pg_ok,s->pg_res_pct,s->pg_dirty,s->pg_cold_pct,s->pg_span,s->pg_lag,
         s->rss_srv,s->rss_master,s->rss_pl,s->rss_broker,s->rss_cas,
         s->cap_iops,s->cap_await,s->cap_hit,s->cap_miss,s->cap_head);
@@ -3967,7 +4081,7 @@ static void cap_collect(proc_t*P,iod_t*IO,const dstat_t*d0,int nd0,const dstat_t
 /* ---------------- Render: time-series plots ---------------- */
 /* History field selector, chosen by enum rather than index. */
 enum { HK_OSUSED=0,HK_CUB,HK_SRV_RSS,HK_DB,HK_LG,HK_DYN,HK_ETC,
-       HK_VSZ,HK_RSS,HK_DYNMAP,HK_DBHOT,HK_MINFLT,HK_MAJFLT,
+       HK_VSZ,HK_RSS,HK_DYNMAP,HK_MINFLT,HK_MAJFLT,
        HK_RBPS,HK_WBPS,HK_DEVUTIL,HK_ABSORB,HK_CPU,
        /* CPU and I/O series, so every dashboard metric is also plotted */
        HK_BUSYC,HK_SATC,HK_WA,HK_LOAD1,HK_DTHR,HK_BLKPCT,HK_WIOPS,
@@ -3984,7 +4098,7 @@ static double hs_val(const hsam_t*s,int k){
       case HK_LG:     return s->lg;      case HK_DYN:    return s->dyn;
       case HK_ETC:    return s->etc;     case HK_VSZ:    return s->vsz;
       case HK_RSS:    return s->rss;     case HK_DYNMAP: return s->dynmap;
-      case HK_DBHOT:  return s->dbhot;   case HK_MINFLT: return s->minflt;
+      case HK_MINFLT: return s->minflt;
       case HK_MAJFLT: return s->majflt;  case HK_RBPS:   return s->rbps;
       case HK_WBPS:   return s->wbps;    case HK_DEVUTIL:return s->devutil;
       case HK_ABSORB: return s->absorb;  case HK_CPU: return s->cpu;
@@ -4309,6 +4423,8 @@ static void vd_host(char*o,size_t n,const char**col,int ncores){
                        :"· 호스트 정상 — 사용 %.1f/%d 코어, RAM %.0f%%, 장치 %.0f%%, CUBRID 는 RAM 의 %.0f%%",
              b->busy_cores,ncores,b->ram>0?b->osused/b->ram*100:0,b->devutil,cubpct);
 }
+/* Flush span in log pages; -1 = not known (no page scan this frame) */
+static const char* span_s(double v){ static char b[24]; if(v<0) return "?"; snprintf(b,sizeof b,"%.0f",v); return b; }
 /* D: the drain side, buffer back to volume */
 static void vd_flush(char*o,size_t n,const char**col){
     if(HN<1){ snprintf(o,n,"%s",g_ascii?"collecting...":"표본 수집 중…"); *col=VD_INFO; return; }
@@ -4324,13 +4440,13 @@ static void vd_flush(char*o,size_t n,const char**col){
     if(b->devutil>=80 && b->wbps>=1.0*1024*1024){ *col=VD_WARN;
         snprintf(o,n,g_ascii?"! write bottleneck - device %.0f%%, write %s/s, dirty %.0f pages":"⚠ 쓰기 병목 — 장치 %.0f%%, 쓰기 %s/s, dirty %.0f 페이지",b->devutil,H(b->wbps),b->pg_dirty); return; }
     if(b->pg_dirty>=100 && b->pg_dirty>1.5*dmin){ *col=VD_NOTE;
-        snprintf(o,n,g_ascii?"! dirty pages accumulating %.0f (flush delay %.0f log pg) - grows until checkpoint/flush catches up"
-                           :"⚠ dirty 누적 %.0f 페이지 (flush 지연 %.0f 로그pg) — 체크포인트·flush 가 따라잡기 전까지 증가",b->pg_dirty,b->pg_span); return; }
+        snprintf(o,n,g_ascii?"! dirty pages accumulating %.0f (flush delay %s log pg) - grows until checkpoint/flush catches up"
+                           :"⚠ dirty 누적 %.0f 페이지 (flush 지연 %s 로그pg) — 체크포인트·flush 가 따라잡기 전까지 증가",b->pg_dirty,span_s(b->pg_span)); return; }
     if(b->pg_dirty==0){ *col=VD_OK;
         snprintf(o,n,g_ascii?"all reflected to volumes - dirty 0, no flush delay, write %s/s":"· 볼륨 반영 완료 — dirty 0, flush 지연 없음, 쓰기 %s/s",H(b->wbps)); return; }
     *col=VD_INFO;
-    snprintf(o,n,g_ascii?"dirty %.0f pages - flush delay %.0f log pages - device %.0f%% - write %s/s":"· dirty %.0f 페이지 · flush 지연 span %.0f 로그pg · 장치 %.0f%% · 쓰기 %s/s",
-             b->pg_dirty,b->pg_span,b->devutil,H(b->wbps));
+    snprintf(o,n,g_ascii?"dirty %.0f pages - flush delay %s log pages - device %.0f%% - write %s/s":"· dirty %.0f 페이지 · flush 지연 span %s 로그pg · 장치 %.0f%% · 쓰기 %s/s",
+             b->pg_dirty,span_s(b->pg_span),b->devutil,H(b->wbps));
 }
 
 
@@ -4445,12 +4561,10 @@ static int pl_series_A(pser_t*s2,int with_vsz){
    metric.  Returns the series count (0 draws no subchart). */
 /* The permanent bottom bar, used in four-panel mode too: metrics too small to leave
    the floor of a line chart get their own bars (the volume slot of a price chart).
-   hot is commonly around 0.4%% and invisible as a line; bars normalize to their
-   own maximum, so small values keep their shape. */
+   Bars normalize to their own maximum, so small values keep their shape. */
 static int pl_subbars_always(int idx,pser_t*b){
     int n=0;
     if(idx==3){
-        b[n].key=HK_DBHOT; b[n].col=117; b[n].fmt=1; b[n].lab=g_ascii?"hot%":"핫%"; n++;
         b[n].key=HK_ABSORB;b[n].col=228; b[n].fmt=1; b[n].lab=g_ascii?"absorb":"흡수%"; n++;
     }
     return n;
@@ -4481,11 +4595,11 @@ static int pl_subbars(int idx,pser_t*b){
     }
     return n;
 }
-static void pl_panel(int idx,int y,int W,int ch,int hot_on,int ncores,
+static void pl_panel(int idx,int y,int W,int ch,int ncores,
                      const char*hdr,const char*hdr_r){
     /* Cause-metric bars go inside the panel, below the time axis and above the legend.
        Zoom shows more of them; four-panel mode shows only those invisible as lines
-       (hot%, absorption%). */
+       (absorption%). */
     pser_t bars[6]; int nb;
     if(g_plot_zoom==idx) nb=pl_subbars(idx,bars);
     else                 nb=pl_subbars_always(idx,bars);
@@ -4530,7 +4644,6 @@ static void pl_panel(int idx,int y,int W,int ch,int hot_on,int ncores,
         s2[n].key=HK_RBPS;  s2[n].col=203; s2[n].fmt=2; s2[n].lab=g_ascii?"disk read":"디스크 읽기"; n++;
         s2[n].key=HK_PGRES; s2[n].col=79;  s2[n].fmt=1; s2[n].lab=g_ascii?"buffer resident%":"버퍼 상주%"; n++;
         s2[n].key=HK_PGCOLD;s2[n].col=215; s2[n].fmt=1; s2[n].lab=g_ascii?"cold zone%":"cold 존%"; n++;
-        if(hot_on){ s2[n].key=HK_DBHOT; s2[n].col=117; s2[n].fmt=1; s2[n].lab=g_ascii?"data_buffer hot%":"data_buffer 핫%"; n++; }
         s2[n].key=HK_CAPMISS;s2[n].col=178; s2[n].fmt=3; s2[n].lab=g_ascii?"admitted pg/s":"적재 pg/s"; n++;
         /* majflt and OS cache absorption stay out of the main series: at eight series the
            right-aligned legend fills and the left entries disappear into an ellipsis
@@ -4978,13 +5091,12 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         cv_put(2,y,cutf(vb,W-4),vc); y+=1;
     }
     /* ---- cub_server regions ---- */
-    /* Three lenses; the delta is the chg column, not a lens */
-    static const char*LN[4]={"","할당/상주","핫","설정 초과"};
-    static const char*LNA[4]={"","alloc/rss","hot","config over"};
+    /* Two lenses; the delta is the grow column, not a lens */
+    static const char*LN[3]={"","할당/상주","설정 초과"};
+    static const char*LNA[3]={"","alloc/rss","config over"};
     const char **LNS = g_ascii?LNA:LN;
-    /* Four value columns: alloc | rss | hot | growth, each preceded by a space so it does
-       not touch the pipe.  hot carries its delta in parentheses and growth is the rss
-       delta - two different metrics. */
+    /* Four value columns: alloc | rss | conf | growth, each preceded by a space so it does
+       not touch the pipe. */
     /* Value width 7: just below 1024, H() produces "1023.9M", seven characters; six would
        truncate it or push the column.  grow stays at 6, being mostly small deltas. */
     int VAL_X=W-35, PCT_X=W-42, MET_X=19, MET_W=PCT_X-MET_X-1;
@@ -5023,14 +5135,9 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
               int ax=2+disp_w(t2)+4;
               if(ax+disp_w(at) <= PCT_X-2) cv_put(ax,y,at,"38;5;214");
           } }
-        /* Column order alloc | rss | hot | grow.  The hot delta has no column of its own, since
-           lens 3 (hot) shows it as a gauge. */
-        /* The heading stays "grow".  In view 2 (hot) the column carries hot deltas, and
-           rather than swapping the wording the hot and grow tokens are recoloured
-           (green, matching the +green/-red deltas below).  View 3 replaces the hot
-           column with conf, so there the wording does change, in orange. */
-        snprintf(t2,sizeof t2,"┤%7s |%7s |%7s |%6s├","alloc","rss",
-                 lens==3?"conf":"hot","grow");
+        /* Column order alloc | rss | conf | grow.  grow follows the lens: rss delta in view 1,
+           alloc delta in view 2 (over configured), whose conf heading turns orange. */
+        snprintf(t2,sizeof t2,"┤%7s |%7s |%7s |%6s├","alloc","rss","conf","grow");
         /* A heading past the right corner breaks the box, so it is pulled left by the overhang.
            If it would still collide with the title (at 60 columns), it is omitted; the
            values remain. */
@@ -5038,66 +5145,53 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
           if(hx+hw > W-1) hx = W-1-hw;
           if(hx >= title_end){
               /* View badge, just before the value headings.  Its colour matches the column it
-                 changes (green for hot, orange for over-configured), so badge, heading
+                 changes (orange for over-configured), so badge, heading
                  token and row value read as one colour. */
               { char vb2[48];
                 snprintf(vb2,sizeof vb2,"┤%s%d · %s ",g_ascii?"lens":"보기",lens,LNS[lens]);
                 int vw=disp_w(vb2), vx=hx-vw;
                 if(vx>=title_end)
-                    cv_put(vx,y,vb2, lens==2?"1;38;5;79":lens==3?"1;38;5;214":"1;36");
+                    cv_put(vx,y,vb2, lens==2?"1;38;5;214":"1;36");
               }
               cv_put(hx,y,t2,"1;36");
-              /* Token positions for columns 3 (hot/conf) and 4 (grow): border 1, field 7, separator 2 */
-              if(lens==2){ cv_put(hx+19,y,padf("hot",7,1), "1;38;5;79");
-                           cv_put(hx+28,y,padf("grow",6,1),"1;38;5;79"); }
-              else if(lens==3) cv_put(hx+19,y,padf("conf",7,1),"1;38;5;214");
+              /* Token position for column 3 (conf): border 1, field 7, separator 2 */
+              if(lens==2) cv_put(hx+19,y,padf("conf",7,1),"1;38;5;214");
           } }
-          double sm=0,ssr=0,sh=0,sd=0,sdh=0,sdm=0; int base_ok=1,hbase_ok=1,mbase_ok=1;   /* Material for the total row */
+          double sm=0,ssr=0,sc=0,sd=0,sdm=0; int base_ok=1,mbase_ok=1;   /* Material for the total row */
         for(int i=0;i<NSR;i++){
             srg_t*r=&SR[i]; int yy=y+1+i;
             cv_put(2,yy,GR(r->grade),
                    r->grade=='M'?"38;5;39":r->grade=='R'?"38;5;214":r->grade=='E'?"38;5;250":"38;5;203");
             cv_put(4,yy,padf(r->name,14,0),"250");
-            double frac=0,hotf=0,dfrac=0; char tail[24]; int warn=0;
+            double frac=0,dfrac=0; char tail[24]; int warn=0;
             /* The growth (on the rss basis) is converted to each lens's scale and painted orange at
                the end of the gauge.  A decrease already shows as a shorter bar and is
                not marked. */
             double dv=r->rss-r->prev_rss; if(dv<0) dv=0;
-            if(lens==1){ frac=r->mapped>0?r->rss/r->mapped:0; hotf=r->mapped>0?r->ref/r->mapped:0;
+            if(lens==1){ frac=r->mapped>0?r->rss/r->mapped:0;
                          dfrac=r->mapped>0?dv/r->mapped:0;
                          snprintf(tail,sizeof tail,"%.0f%%",frac*100); }
-            else if(lens==2){ frac=r->rss>0?r->ref/r->rss:0; hotf=frac;   /* View 2: hot */
-                   snprintf(tail,sizeof tail,"%.0f%%",frac*100); }
-            else { if(r->cfg>0){ frac=r->mapped/(double)r->cfg; warn=frac>1.05;   /* View 3: over configured */
-                                 hotf=r->ref/(double)r->cfg;
+            else { if(r->cfg>0){ frac=r->mapped/(double)r->cfg; warn=frac>1.05;   /* View 2: over configured */
                                  snprintf(tail,sizeof tail,"%.0f%%%s",frac*100,warn?"!":""); }
                    else snprintf(tail,sizeof tail,"n/a"); }
-            if(r->mapped>0||r->rss>0) cv_meter3(MET_X,yy,MET_W,frac,hotf,dfrac);
+            if(r->mapped>0||r->rss>0) cv_meter3(MET_X,yy,MET_W,frac,0,dfrac);
             cv_put(PCT_X,yy,padf(tail,6,1),warn?"38;5;203":"250");
             cv_put(VAL_X,   yy,padf(r->mapped>0?H(r->mapped):"-",7,1),"244");
             cv_put(VAL_X+8, yy,"|","38;5;240");
             /* Zero prints as "0B", as in the tree; a different zero per view invites confusion */
             cv_put(VAL_X+9, yy,padf(r->rss>0?H(r->rss):"0B",7,1),"250");
             cv_put(VAL_X+17,yy,"|","38;5;240");
-            if(lens==3){
-                /* View 3 (over configured) replaces hot with conf, directly comparable with alloc and rss */
-                cv_put(VAL_X+18,yy,padf(r->cfg>0?H((double)r->cfg):"-",7,1),"38;5;214");
-            } else {
-                /* hot is the amount touched; the colour is a gradient of its share of rss */
-                char hc[20]; snprintf(hc,sizeof hc,"38;5;%d",grad_of(r->rss>0?r->ref/r->rss:0));
-                cv_put(VAL_X+18,yy,padf(r->ref>0?H(r->ref):"-",7,1),hc);
-            }
+            /* conf: the configured size, directly comparable with alloc and rss */
+            cv_put(VAL_X+18,yy,padf(r->cfg>0?H((double)r->cfg):"-",7,1),lens==2?"38;5;214":"250");
             cv_put(VAL_X+26,yy,"|","38;5;240");
             /* growth is the rss delta against the previous frame.  No change prints a dot: 0B would
                read as "wrote zero bytes" and not be distinguishable from no change.
                One-shot mode has no baseline and prints '-'. */
             { char cg[24]; const char *cc="38;5;244";
-              /* grow follows the view's axis; the heading is fixed and colour signals which.
-                   View 1 = rss delta (orange).  View 2 (hot) = hot delta.
-                   View 3 (over configured) = alloc delta (orange) - the percentage
-                   is allocation over configuration, so it tracks that directly. */
-              double base = lens==2 ? r->prev_ref : lens==3 ? r->prev_mapped : r->prev_rss;
-              double cur  = lens==2 ? r->ref      : lens==3 ? r->mapped      : r->rss;
+              /* grow follows the view's axis: view 1 = rss delta, view 2 (over configured) =
+                 alloc delta - the percentage is allocation over configuration. */
+              double base = lens==2 ? r->prev_mapped : r->prev_rss;
+              double cur  = lens==2 ? r->mapped      : r->rss;
               double d    = cur-base;
               double a=d<0?-d:d;
               /* With no baseline (previous frame) the delta is undefined - print '-'.
@@ -5105,19 +5199,16 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                  through and report the whole RSS as "+512.3M growth". */
               if(base<=0)             snprintf(cg,sizeof cg,"-");
               else if(a<1.0)          snprintf(cg,sizeof cg,"·");   /* Genuinely unchanged only */
-              else { snprintf(cg,sizeof cg,"%s%s",d>0?"+":"-",H(a));
-                     cc = lens==2 ? (d>0?"1;38;5;79":"1;38;5;203")   /* Green for positive, red for negative */
-                                  : "1;38;5;214"; }                  /* rss delta in orange */
+              else { snprintf(cg,sizeof cg,"%s%s",d>0?"+":"-",H(a)); cc="1;38;5;214"; }
               cv_put(VAL_X+27,yy,padf(cg,6,1),cc); }
-            sm+=r->mapped; ssr+=r->rss; sh+=r->ref;
-            if(r->prev_ref>0 || r->ref<=0) sdh+=r->ref-r->prev_ref; else hbase_ok=0;
+            sm+=r->mapped; ssr+=r->rss; if(r->cfg>0) sc+=(double)r->cfg;
             if(r->prev_mapped>0 || r->mapped<=0) sdm+=r->mapped-r->prev_mapped; else mbase_ok=0;
             /* Baseline test: a region where both rss and prev are 0 (an arena) has no change - it
                is not missing a baseline.  Treating it as such would leave the total's
                grow at '-' forever. */
             if(r->prev_rss<=0){ if(r->rss>0) base_ok=0; }
             else sd+=r->rss-r->prev_rss;
-            r->prev_rss=r->rss; r->prev_ref=r->ref; r->prev_mapped=r->mapped;
+            r->prev_rss=r->rss; r->prev_mapped=r->mapped;
         }
         /* ---- Total row ----
            The rss total equals process RSS by definition (all smaps mappings, held by
@@ -5136,16 +5227,16 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
           cv_put(VAL_X+8, yy,"|","38;5;240");
           cv_put(VAL_X+9, yy,padf(ssr>0?H(ssr):"0B",7,1),"1;38;5;250");
           cv_put(VAL_X+17,yy,"|","38;5;240");
-          cv_put(VAL_X+18,yy,padf(sh>0?H(sh):"-",7,1),"250");
+          cv_put(VAL_X+18,yy,padf(sc>0?H(sc):"-",7,1),"250");
           cv_put(VAL_X+26,yy,"|","38;5;240");
           { char cg[24]; const char *cc="38;5;244";
-            double dv = lens==2 ? sdh : lens==3 ? sdm : sd;
-            int ok    = lens==2 ? hbase_ok : lens==3 ? mbase_ok : base_ok;
+            double dv = lens==2 ? sdm : sd;
+            int ok    = lens==2 ? mbase_ok : base_ok;
             double a=dv<0?-dv:dv;
             if(!ok)        snprintf(cg,sizeof cg,"-");
             else if(a<1.0) snprintf(cg,sizeof cg,"·");
             else { snprintf(cg,sizeof cg,"%s%s",dv>0?"+":"-",H(a));
-                   cc = lens==2 ? (dv>0?"1;38;5;79":"1;38;5;203") : "1;38;5;214"; }
+                   cc = "1;38;5;214"; }
             cv_put(VAL_X+27,yy,padf(cg,6,1),cc); }
         }
         y+=NSR+3;
@@ -5248,8 +5339,28 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     {
         char pt[96];
         snprintf(pt,sizeof pt,g_ascii?"buffer pool · page slots — buffer control blocks (◌, %.0fms)":"버퍼풀 · 페이지 슬롯 = 버퍼 제어블록(BCB) (◌, %.0fms)",PG.ok?PG.ms:0.0);
+        if(!PG.ok && AG.ok) snprintf(pt,sizeof pt,g_ascii?"buffer pool · engine aggregates (●, %.2fms)":"버퍼풀 · 엔진 집계 (●, %.2fms)",AG.ms);
         cv_box(0,y,W,6,pt);
-        if(!PG.ok){ cv_put(2,y+1,g_ascii?"off":"비활성","38;5;203"); cv_put(2,y+2,cutf(PG.why,W-4),"38;5;240"); }
+        if(!PG.ok && AG.ok){
+            /* Not scanned: the engine's own counts - zones, victim candidates, dirty - without per-page detail */
+            char ln[200]; long lru=AG.z1+AG.z2+AG.z3;
+            double rf = AG.nbuf>0 ? (double)lru/AG.nbuf : 0, df = AG.nbuf>0 ? (double)AG.dirty/AG.nbuf : 0;
+            int mw = W>90 ? 30 : 16;
+            cv_put(2,y+1,g_ascii?"in LRU":"LRU 상주","250");
+            cv_meter3(12,y+1,mw,rf,df,0);
+            snprintf(ln,sizeof ln,"%ld/%d %.0f%%   dirty %lld (%.1f%%)",lru,AG.nbuf,rf*100,AG.dirty,df*100);
+            cv_put(12+mw+2,y+1,ln,"250");
+            snprintf(ln,sizeof ln,g_ascii?"zones  hot %ld  warm %ld  cold %ld   victim candidates %ld":"존  hot %ld  warm %ld  cold %ld   victim 후보 %ld",
+                     AG.z1,AG.z2,AG.z3,AG.vict);
+            cv_put(2,y+2,ln,"250");
+            if(PG.have_log)
+                snprintf(ln,sizeof ln,g_ascii?"log append %s  flushed %s  fsync delay %lld pg":"로그 append %s  flushed %s  fsync 지연 %lld pg",
+                         lsa_str(PG.log_append),lsa_str(PG.log_nxio),(long long)(PG.log_append.pageid-PG.log_nxio.pageid));
+            else snprintf(ln,sizeof ln,g_ascii?"(log LSA unavailable)":"(로그 LSA 미확보)");
+            cv_put(2,y+3,cutf(ln,W-4),"250");
+            cv_put(2,y+4,cutf(PG.why,W-4),"38;5;244");
+        }
+        else if(!PG.ok){ cv_put(2,y+1,g_ascii?"off":"비활성","38;5;203"); cv_put(2,y+2,cutf(PG.why,W-4),"38;5;240"); }
         else {
             char ln[200];
             double rf = PG.nbuf>0 ? (double)PG.resident/PG.nbuf : 0, df = PG.nbuf>0 ? (double)PG.dirty/PG.nbuf : 0;
@@ -5258,8 +5369,10 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
             cv_meter3(12,y+1,mw,rf,df,0);           /* Foreground is the resident share, blue background the dirty share */
             snprintf(ln,sizeof ln,"%d/%d %.0f%%   dirty %d (%.1f%%)   flushing %d",PG.resident,PG.nbuf,rf*100,PG.dirty,df*100,PG.flushing);
             cv_put(12+mw+2,y+1,ln,"250");
-            snprintf(ln,sizeof ln,g_ascii?"zones  hot %d  warm %d  cold %d  void %d  free %d":"존  hot %d  warm %d  cold %d  void %d  free %d",
-                     PG.z1,PG.z2,PG.z3,PG.zvoid,PG.zinv);
+            { int p2=snprintf(ln,sizeof ln,g_ascii?"zones  hot %d  warm %d  cold %d  void %d  free %d":"존  hot %d  warm %d  cold %d  void %d  free %d",
+                              PG.z1,PG.z2,PG.z3,PG.zvoid,PG.zinv);
+              if(AG.ok && p2>0 && p2<(int)sizeof ln)
+                  snprintf(ln+p2,sizeof ln-(size_t)p2,g_ascii?"   victim candidates %ld":"   victim 후보 %ld",AG.vict); }
             cv_put(2,y+2,ln,"250");
             if(PG.have_log){
                 snprintf(ln,sizeof ln,g_ascii?"log append %s  flushed %s  fsync delay %lld pg   oldest dirty %s  flush delay %lld pg"
@@ -5413,13 +5526,13 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     {
       const char *seg[8]; int nseg=0;
       if(g_ascii){
-          seg[nseg++]="[1/2/3] alloc/hot/over";
+          seg[nseg++]="[1/2] alloc/over";
           seg[nseg++]="heap [r]eflash [a]uto";
           if(g_ninst>1) seg[nseg++]="[<>]inst";
           seg[nseg++]="[p]plot";
           seg[nseg++]="[l]lang"; seg[nseg++]="[h]help"; seg[nseg++]="[q]quit";
       } else {
-          seg[nseg++]="[1/2/3] 할당/핫/초과";
+          seg[nseg++]="[1/2] 할당/초과";
           seg[nseg++]="힙 [r]재측정 [a]자동";
           if(g_ninst>1) seg[nseg++]="[<>]인스턴스";
           seg[nseg++]="[p]시계열";
@@ -5503,7 +5616,7 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
     printf(g_ascii?"marks  ● measured  ◐ reserved  ◌ estimated  ? unattributed (split by heap detail)\n"
                   :"기호  ● 측정  ◐ 예약  ◌ 추정  ? 미귀속(아래 동적 메모리 상세가 분해)\n");
     /* Always yes in a normal environment and thus uninformative; reported only when a fallback applies */
-    if(!(CAP.vm_readv && CAP.rollup && CAP.proc_io && CAP.clear_refs))
+    if(!(CAP.vm_readv && CAP.rollup && CAP.proc_io))
         printf(g_ascii?"⚠ fallback active: %s   (see -h)\n"
                :"⚠ 폴백 동작 중: %s   (의미는 -h 참조)\n",CAP.note);
     if(P->reg_dropped)
@@ -5567,14 +5680,6 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
             printf(g_ascii?"  (config %s, alloc %.0f%%%s)":"  (설정 %s, 할당 %.0f%%%s)",
                    H((double)r->cfg),ov,
                    (ov<=120.0)?(g_ascii?" ok":" 정상"):(g_ascii?" ⚠over":" ⚠초과"));
-        }
-        if(r->rss>0&&r->ref>0){
-            /* "hot" is the share of resident pages touched in the recent window.  A low value is
-               not necessarily a problem - the workload may simply be quiet - so a
-               reading accompanies it. */
-            double hp=r->ref/r->rss*100;
-            printf(g_ascii?"  recent-access %.0f%%%s":"  최근접근 %.0f%%%s",
-                   hp,(hp<1.0)?(g_ascii?"(idle)":"(유휴)"):"");
         }
         printf("\n");
         if(!strcmp(r->name,"dynamic-heap")){
@@ -5690,6 +5795,18 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
                            lsa_str(PG.oldest_dirty),(long long)(PG.log_append.pageid-PG.oldest_dirty.pageid));
                 else printf(g_ascii?"│  └─ no dirty page — buffer fully reflected to volumes\n":"│  └─ dirty 없음 — 버퍼 내용이 볼륨에 전부 반영됨\n");
             } else printf(g_ascii?"│  └─ (log LSA unavailable)\n":"│  └─ (로그 LSA 미확보)\n");
+        } else if(AG.ok){
+            long lru=AG.z1+AG.z2+AG.z3;
+            printf(g_ascii?"├─ ● page buffer (engine aggregates, %.2fms)  in LRU %ld/%d (%.0f%%)  dirty %lld\n"
+                          :"├─ ● 버퍼풀 (엔진 집계 %.2fms)  LRU 상주 %ld/%d (%.0f%%)  dirty %lld\n",
+                   AG.ms,lru,AG.nbuf,AG.nbuf>0?100.0*lru/AG.nbuf:0,AG.dirty);
+            printf(g_ascii?"│  ├─ zones  hot %ld · warm %ld · cold %ld   victim candidates %ld\n"
+                          :"│  ├─ 존  hot %ld · warm %ld · cold %ld   victim 후보 %ld\n",AG.z1,AG.z2,AG.z3,AG.vict);
+            if(PG.have_log)
+                printf(g_ascii?"│  ├─ log  append %s  flushed(nxio) %s  → %lld log pages not yet on disk\n"
+                              :"│  ├─ 로그  append %s  flushed(nxio) %s  → 아직 디스크에 안 내려간 로그 %lld 페이지\n",
+                       lsa_str(PG.log_append),lsa_str(PG.log_nxio),(long long)(PG.log_append.pageid-PG.log_nxio.pageid));
+            printf("│  └─ %s\n",PG.why);
         } else printf(g_ascii?"├─ ? page buffer (BCB)  off — %s\n":"├─ ? 버퍼풀 (BCB)  비활성 — %s\n",PG.why);
     }
     if(CAP.proc_io){
@@ -5741,14 +5858,6 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
     /* A legend is kept so the output alone can be pasted into a ticket and still read (grade marks appear on every row) */
     printf(g_ascii?"\nmarks  ● measured (OS/engine reported)  ◐ reserved (mapped only)  ◌ estimated  ? unattributed\n"
                   :"\n등급  ● 측정(OS·엔진 직접 보고)  ◐ 예약(매핑만 확인)  ◌ 추정(패턴)  ? 미귀속\n");
-    if(g_hot_measured)
-        printf(g_ascii?"hot   share of rss touched in the last %.1fs window (clear_refs + Referenced)\n"
-                      :"핫    최근 %.1f초 창에서 접근된 상주 비율 (clear_refs + Referenced)\n", g_interval);
-    else if(g_hot_off_why[0])
-        printf(g_ascii?"hot   not measured — %s\n":"핫    측정 안 함 — %s\n",g_hot_off_why);
-    else
-        printf(g_ascii?"hot   not measured (default off; --hot enables it — writes clear_refs, ~30ms/GB on the target's PTEs)\n"
-                      :"핫    측정 안 함 (기본 OFF; --hot 으로 켬 — clear_refs 쓰기, 대상 PTE 순회 약 30ms/GB)\n");
 }
 
 /* Name to a key-safe slug (lower-case alphanumeric and '_').  Repeated keys
@@ -5769,7 +5878,7 @@ static const char *slugify(const char *s){
 }
 
 #define PLOT_MIN_COLS 60
-static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,int hot_on){
+static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
     (void)IO; (void)T;
     int raw=term_cols_raw();
     if(raw>0 && raw<PLOT_MIN_COLS){
@@ -5819,7 +5928,7 @@ static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,int hot_on
     }
     int sb_rows = nsb ? nsb*sb_per : 0;
     g_sb_per = sb_per;
-    /* Four-panel mode keeps permanent bars (hot%, absorption%) below panel 3: as lines
+    /* Four-panel mode keeps a permanent bar (absorption%) below panel 3: as a line
        those values are too small and sit on the floor.  Each panel's chart shrinks to
        make room. */
     pser_t ab[4]; int nab = g_plot_zoom ? 0 : pl_subbars_always(3,ab);
@@ -5861,11 +5970,11 @@ static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,int hot_on
         y+=1;
     }
     if(g_plot_zoom){
-        pl_panel(1,y,W,host_ch,hot_on,M->cores,t1,t2); y+=host_ch+5;
-        pl_panel(g_plot_zoom,y,W,ch,hot_on,M->cores,NULL,NULL); y+=ch+5+sb_rows;
+        pl_panel(1,y,W,host_ch,M->cores,t1,t2); y+=host_ch+5;
+        pl_panel(g_plot_zoom,y,W,ch,M->cores,NULL,NULL); y+=ch+5+sb_rows;
     }
     else for(int k=1;k<=4;k++){
-        pl_panel(k,y,W,ch,hot_on,M->cores,k==1?t1:NULL,k==1?t2:NULL);
+        pl_panel(k,y,W,ch,M->cores,k==1?t1:NULL,k==1?t2:NULL);
         y+=ch+5+(k==3?ab_rows:0);   /* The bar rows are inside the panel box */
     }
 
@@ -5925,22 +6034,14 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     double mt=M->total*1024.0, av=M->avail*1024.0;
     /* ts_epoch_ms: the sample interval is sub-second, so a recording needs more than ts_epoch */
     printf("ts=\"%s\" ts_epoch=%ld ts_epoch_ms=%.0f\n",ts,tsec,(g_ts_frac>=0?g_ts_frac:(double)tsec)*1000.0);
-    printf("caps.vm_readv=%d caps.rollup=%d caps.proc_io=%d caps.clear_refs=%d\n",
-           CAP.vm_readv,CAP.rollup,CAP.proc_io,CAP.clear_refs);
+    printf("caps.vm_readv=%d caps.mem_pread=%d caps.rollup=%d caps.proc_io=%d\n",
+           CAP.vm_readv,CAP.mem_pread,CAP.rollup,CAP.proc_io);
     printf("perm.limited=%d",g_perm_limited);
     if(g_perm_why[0]) printf(" perm.reason=\"%s\"",g_perm_why);
     printf("\n");
     if(P->reg_dropped || g_disk_dropped)
         printf("limits.regions_dropped=%d limits.regions_max=%d limits.disks_dropped=%d limits.disks_max=%d\n",
                P->reg_dropped,MAXREG,g_disk_dropped,MAXDISK);
-    /* Hot measurement state: off by default, and released automatically above the resident
-       limit even with --hot.  Why hot is empty must be visible on screen and in
-       monitoring. */
-    printf("hot.enabled=%d hot.limit_gb=%.1f hot.every_s=%.0f",
-           g_hot_measured,g_hot_limit_gb,g_hot_every);
-    if(g_hot_cost_ms>=0) printf(" hot.last_cost_ms=%.1f",g_hot_cost_ms);
-    if(g_hot_off_why[0])  printf(" hot.reason=\"%s\"",g_hot_off_why);
-    printf("\n");
     printf("os.ram_total_kb=%lu os.ram_avail_kb=%lu os.cached_kb=%lu "
            "os.swap_total_kb=%lu os.swap_free_kb=%lu\n",
            M->total,M->avail,M->cached,M->swtotal,M->swfree);
@@ -6019,7 +6120,6 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                k,r->mapped,k,r->rss);
         if(r->cfg>0) printf(" region.%s.cfg_bytes=%lld region.%s.over_pct=%.1f",
                             k,r->cfg,k,r->mapped/(double)r->cfg*100);
-        if(r->rss>0) printf(" region.%s.hot_pct=%.1f",k,r->ref/r->rss*100);
         printf("\n");
     }
     printf("heapB.enabled=%d heapB.reason=\"%s\" heapB.total_bytes=%.0f heapB.excluded=%d\n",
@@ -6076,19 +6176,29 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                PG.nbuf,PG.resident,PG.dirty,PG.flushing,PG.z1,PG.z2,PG.z3,PG.zvoid,PG.zinv,PG.mismatch,PG.unread,PG.ms);
         printf("pgbuf.hdr_mismatch_raw=%d pgbuf.rechecked=%d pgbuf.degraded=%d\n",
                PG.mismatch_raw,PG.recheck,PG.degraded);
+        printf("pgbuf.hdr_read=%d pgbuf.hdr_nonresident=%d pgbuf.hdr_pagemap_unchecked=%d\n",
+               PG.nhdr,PG.nonres,PG.pm_unchecked);
         for(int v=0;v<PG_MAXVOL;v++) if(PG.vol_res[v]>0)
             printf("pgbuf.vol%d.resident=%d pgbuf.vol%d.dirty=%d\n",v,PG.vol_res[v],v,PG.vol_dirty[v]);
         if(PG.have_oldest) printf("pgbuf.oldest_dirty_pageid=%lld pgbuf.oldest_dirty_offset=%d\n",
                                   (long long)PG.oldest_dirty.pageid,PG.oldest_dirty.offset);
+    }
+    {
         if(PG.have_log){
             printf("log.append_pageid=%lld log.append_offset=%d log.nxio_pageid=%lld log.nxio_offset=%d"
                    " log.eof_pageid=%lld log.eof_offset=%d log.flush_lag_pages=%lld",
                    (long long)PG.log_append.pageid,PG.log_append.offset,(long long)PG.log_nxio.pageid,PG.log_nxio.offset,
                    (long long)PG.log_eof.pageid,PG.log_eof.offset,(long long)(PG.log_append.pageid-PG.log_nxio.pageid));
-            if(PG.have_oldest) printf(" log.dirty_span_pages=%lld",(long long)(PG.log_append.pageid-PG.oldest_dirty.pageid));
+            if(PG.ok && PG.have_oldest) printf(" log.dirty_span_pages=%lld",(long long)(PG.log_append.pageid-PG.oldest_dirty.pageid));
             printf("\n");
         }
     }
+    printf("pgbuf.engine.enabled=%d pgbuf.engine.reason=\"%s\"\n",AG.ok,AG.ok?(g_ascii?"engine aggregates":"엔진 집계"):AG.why);
+    if(AG.ok)
+        printf("pgbuf.engine.num_buffers=%d pgbuf.engine.lists=%d pgbuf.engine.lists_shared=%d pgbuf.engine.lru_pages=%ld"
+               " pgbuf.engine.zone1=%ld pgbuf.engine.zone2=%ld pgbuf.engine.zone3=%ld pgbuf.engine.victim_candidates=%ld"
+               " pgbuf.engine.dirty=%lld pgbuf.engine.read_ms=%.2f\n",
+               AG.nbuf,AG.nlist,AG.nshared,AG.z1+AG.z2+AG.z3,AG.z1,AG.z2,AG.z3,AG.vict,AG.dirty,AG.ms);
     if(with_a){
         printf("heapA.chunks=%ld heapA.total_bytes=%.0f\n",A.chunks,A.total);
         if(A.trunc) printf("heapA.truncated_regions=%ld heapA.unwalked_bytes=%.0f\n",A.trunc,A.unwalked);
@@ -6334,15 +6444,13 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
         srg_t*x=&SR[NSR++];
         snprintf(x->name,sizeof x->name,"%s",RGN[i].name);
         x->mapped=strtod(b,NULL);
-        x->prev_rss=x->prev_ref=x->prev_mapped=0;
+        x->prev_rss=x->prev_mapped=0;
         for(int j=0;j<nold;j++)
             if(!strcmp(old[j].name,x->name)){
-                x->prev_rss=old[j].prev_rss; x->prev_ref=old[j].prev_ref;
+                x->prev_rss=old[j].prev_rss;
                 x->prev_mapped=old[j].prev_mapped; break;
             }
         snprintf(k,sizeof k,"region.%s.rss_bytes",RGN[i].slug);   x->rss=rp_num(t,k,0);
-        snprintf(k,sizeof k,"region.%s.hot_pct",RGN[i].slug);
-        x->ref=x->rss*rp_num(t,k,0)/100.0;
         snprintf(k,sizeof k,"region.%s.cfg_bytes",RGN[i].slug);   x->cfg=(long long)rp_num(t,k,-1);
         x->grade=RGN[i].grade;
     }
@@ -6366,6 +6474,9 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     PG.mismatch_raw=(int)rp_num(t,"pgbuf.hdr_mismatch_raw",0);
     PG.recheck=(int)rp_num(t,"pgbuf.rechecked",0);
     PG.degraded=(int)rp_num(t,"pgbuf.degraded",0);
+    PG.nhdr=(int)rp_num(t,"pgbuf.hdr_read",0);
+    PG.nonres=(int)rp_num(t,"pgbuf.hdr_nonresident",0);
+    PG.pm_unchecked=(int)rp_num(t,"pgbuf.hdr_pagemap_unchecked",0);
     /* The LSA axis.  Both are emitted only when present, so presence is the flag; a
        frame without them must not inherit the previous frame's values. */
     PG.have_oldest=rp_find(t,"pgbuf.oldest_dirty_pageid",b,sizeof b);
@@ -6381,6 +6492,17 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
         PG.log_nxio.offset=(int)rp_num(t,"log.nxio_offset",0);
         PG.log_eof.pageid=(int64_t)rp_num(t,"log.eof_pageid",0);
         PG.log_eof.offset=(int)rp_num(t,"log.eof_offset",0);
+    }
+    /* Engine aggregates */
+    memset(&AG,0,sizeof AG);
+    AG.ok=(int)rp_num(t,"pgbuf.engine.enabled",0);
+    if(!AG.ok) rp_str(t,"pgbuf.engine.reason",AG.why,sizeof AG.why);
+    else {
+        AG.nbuf=(int)rp_num(t,"pgbuf.engine.num_buffers",0);
+        AG.nlist=(int)rp_num(t,"pgbuf.engine.lists",0); AG.nshared=(int)rp_num(t,"pgbuf.engine.lists_shared",0);
+        AG.z1=(long)rp_num(t,"pgbuf.engine.zone1",0); AG.z2=(long)rp_num(t,"pgbuf.engine.zone2",0);
+        AG.z3=(long)rp_num(t,"pgbuf.engine.zone3",0); AG.vict=(long)rp_num(t,"pgbuf.engine.victim_candidates",0);
+        AG.dirty=(long long)rp_num(t,"pgbuf.engine.dirty",0); AG.ms=rp_num(t,"pgbuf.engine.read_ms",0);
     }
     /* Per-volume residency: only volumes that had pages are emitted, so the array is
        cleared first and filled from whichever keys exist. */
@@ -6453,6 +6575,13 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* The profile cell is derived from the restored figures, not guessed - otherwise the
        verdict names the wrong cell (">64KB" recorded, "<8KB" replayed). */
     CAP2.prof_bs=cap_bs_idx(CAP2.req_kb); CAP2.prof_rw=cap_rw_idx(CAP2.read_ratio);
+    /* The recorded cell wins: read_ratio is printed to 0.01, so 0.299 (write-heavy) replays as 0.30 (mixed) */
+    { char pf[64];
+      if(rp_find(t,"cap.profile",pf,sizeof pf)){
+          char *sl=strchr(pf,'/');
+          if(sl){ *sl=0;
+              for(int b=0;b<CAP_BS_N;b++) if(!strcmp(pf,CAP_BS_NAME[b])) CAP2.prof_bs=b;
+              for(int r=0;r<CAP_RW_N;r++) if(!strcmp(sl+1,CAP_RW_NAME[r])) CAP2.prof_rw=r; } } }
     CAP2.ps_ok    =(int)rp_num(t,"cap.perfmon_counters_running",0);
     CAP2.pb_fetch_ps  =rp_num(t,"cap.pb_fetch_per_s",0);   CAP2.pb_ioread_ps=rp_num(t,"cap.pb_ioread_per_s",0);
     CAP2.pb_iowrite_ps=rp_num(t,"cap.pb_iowrite_per_s",0); CAP2.log_iowrite_ps=rp_num(t,"cap.log_iowrite_per_s",0);
@@ -6500,17 +6629,13 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     }
     /* The recording host's capabilities, or the replay would warn of fallbacks it never had */
     CAP.vm_readv=(int)rp_num(t,"caps.vm_readv",0);  CAP.rollup=(int)rp_num(t,"caps.rollup",0);
-    CAP.proc_io=(int)rp_num(t,"caps.proc_io",0);    CAP.clear_refs=(int)rp_num(t,"caps.clear_refs",0);
+    CAP.proc_io=(int)rp_num(t,"caps.proc_io",0);
+    CAP.mem_pread=(int)rp_num(t,"caps.mem_pread",1);
     cap_note();
     P->reg_dropped=(int)rp_num(t,"limits.regions_dropped",0);
-    /* Run state of the recording host: permissions and the hot measurement */
+    /* Run state of the recording host: permissions */
     g_perm_limited=(int)rp_num(t,"perm.limited",0);
     rp_str(t,"perm.reason",g_perm_why,sizeof g_perm_why);
-    g_hot_measured=(int)rp_num(t,"hot.enabled",0);
-    g_hot_limit_gb=rp_num(t,"hot.limit_gb",g_hot_limit_gb);
-    g_hot_every   =rp_num(t,"hot.every_s",g_hot_every);
-    g_hot_cost_ms =rp_num(t,"hot.last_cost_ms",-1);
-    rp_str(t,"hot.reason",g_hot_off_why,sizeof g_hot_off_why);
     g_disk_dropped=(int)rp_num(t,"limits.disks_dropped",0);
     /* Parameters: the verdicts compare usage against these, so a replay without them
        would judge against nothing.  Only the rows terse emits are looked for. */
@@ -6545,7 +6670,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
 /* Replay loop.  Reads the recording, rebuilds each frame with rp_apply() and calls
    the same renderers the live loop calls, so nothing about the drawing differs.
    Keys are the live ones; [space] pauses, [,] and [.] step while paused. */
-static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int jsonout){
+static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
     FILE *f=fopen(path,"re");
     if(!f){ fprintf(stderr,"cub_top: --replay %s: %s\n",path,strerror(errno)); return 1; }
     char *line=malloc(RP_MAXLINE);
@@ -6602,7 +6727,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
             HN=0;
             for(size_t j = i>(size_t)HCAP ? i-(size_t)HCAP : 0; j<i; j++){
                 rp_apply(fr[j],&P,&M,&T,&IO);
-                hist_push(rp_time(fr[j]),&P,&M,&T,&IO,!no_hot);
+                hist_push(rp_time(fr[j]),&P,&M,&T,&IO);
             }
             rebuild=0; pushed=(size_t)-1;
         }
@@ -6611,10 +6736,10 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
            window growing exactly as it did live.  Only a new frame is added: while
            paused the loop redraws the same frame every 80ms, and pushing it each time
            would scroll the plots with copies (live mode guards the same way). */
-        if(pushed!=i){ hist_push(rp_time(fr[i]),&P,&M,&T,&IO,!no_hot); pushed=i; }
+        if(pushed!=i){ hist_push(rp_time(fr[i]),&P,&M,&T,&IO); pushed=i; }
         g_replaying=1; g_rep_i=(int)i; g_rep_n=(int)n;
         g_rep_ts=(time_t)rp_num(fr[i],"ts_epoch",0);
-        if(view) render_plot(&P,&M,&T,&IO,paused,!no_hot);
+        if(view) render_plot(&P,&M,&T,&IO,paused);
         else     render_dash(&P,&M,&T,&IO,lens,paused,0,-1,g_rp_have_a);
         int k, step=0;
         while((k=tui_key())>=0){
@@ -6623,7 +6748,7 @@ static int rp_run(const char *path,int view0,int no_hot,int terse,int with_a,int
             else if(k=='p'||k=='g') view=!view;
             else if(k=='l') g_ascii=!g_ascii;
             else if(k>='1'&&k<='4'){ if(view) g_plot_zoom=(k=='1'||g_plot_zoom==k-'0')?0:k-'0';
-                                     else if(k<='3') lens=k-'0'; }
+                                     else if(k<='2') lens=k-'0'; }
             else if(k=='.') step=1;                       /* step forward while paused */
             else if(k==','){ if(i>0){ i--; rebuild=1; step=-1; } }   /* step back: history is rebuilt */
         }
@@ -6701,16 +6826,13 @@ static void json_line_from_terse(FILE*tf,FILE*o){
 
 /* ---- One sample (shared by one-shot and live) ----
  * Returns collection work time in ms, excluding waits.  Window:
- *   clear_refs -> baseline -> interval -> smaps/rollup/io -> classify/method B
- * The paramdump child is harvested before the window when measuring hot, so it
- * does not pollute Referenced.
+ *   baseline -> interval -> smaps/rollup/io -> classify/method B
  */
 static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
-                          double interval,int no_hot,int with_a,FILE**pd){
+                          double interval,int with_a,FILE**pd){
     double w0=now_ms();
     P0->pid=P->pid;
     if(P->pid>=0){
-        if(*pd && !no_hot){ paramdump_finish(*pd); *pd=NULL; }
         /* A paramdump sent to a server still booting returns nothing: retry every 5s, up to 12 times */
         { static unsigned seen=0; static int tries=0; static double next=0;
           const char *cub=getenv("CUBRID");
@@ -6719,7 +6841,6 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
               tries++; next=now_ms()+5000;
               *pd=paramdump_start(cub,P->db);
           } }
-        if(!no_hot) do_clear_refs(P->pid);
         parse_status_stat(P0); parse_procio(P0);
     }
     dstat_t d0[MAXDISK]; int nd0=parse_diskstats(d0,MAXDISK);
@@ -6821,12 +6942,14 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
     if(P->pid>=0){
         classify_regions(P);
         method_b(P);
+        pgbuf_agg(P);
         /* Only a --bcb-dump baseline read this frame may carry turnover into cap_collect */
         CAP2.turnover_pct=-1; CAP2.miss_pps=-1; CAP2.readmit_pct=-1;
         pgbuf_scan(P);
         if(with_a) method_a(P);
         grade_dynamic_heap();          /* Re-grade in light of the decomposition */
     } else { NSR=0; memset(&B,0,sizeof B); snprintf(B.why,sizeof B.why,g_ascii?"cub_server not running":"cub_server 미기동");
+             memset(&AG,0,sizeof AG); snprintf(AG.why,sizeof AG.why,"%s",B.why);
              PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"cub_server not running":"cub_server 미기동"); }
     memset(IO,0,sizeof *IO);
     IO->rb=UDELTA(P->read_b,P0->read_b)/dt; IO->wb=UDELTA(P->write_b,P0->write_b)/dt;
@@ -6936,11 +7059,8 @@ static const opt_t OPTS[]={
  {"--ascii",     "", "라벨을 영문으로 강제 (자동: 비 UTF-8 로케일·한글 폭 미지원 tty 는 영문)"},
  {"--ko",        "", "한글 라벨 강제 (자동 판정이 영문으로 잘못 내렸을 때)"},
  {"--offsets",   "F","오프셋 표 파일/디렉터리 (tools/collect-offsets.sh 산출물 — 디렉터리면 버전 자동 선택; 생략 시 실행파일 옆 offsets/ 자동 탐색)"},
- {"--hot",       "", "최근접근(hot) 측정 켜기 — clear_refs 쓰기 필요(기본 OFF: 대상 PTE 전수 순회 ~30ms/GB + minor fault 유발)"},
- {"--hot-limit-gb","N","핫 측정 자동 해제 임계 상주 크기(기본 2GB) — 이보다 크면 --hot 이어도 끈다"},
- {"--hot-every", "S","핫 측정 최소 간격(초, 기본 60) — 매 프레임 호출하지 않는다"},
- {"--no-hot",    "", "(하위호환) 핫 측정 끄기 — 기본이 이미 OFF 다"},
- {"--bcb-dump",  "F","버퍼풀 BCB 스냅샷을 파일 F 로 (cub_volmap --bufmap F 가 지도에 얹음; 라이브는 매 프레임 갱신)"},
+ {"--pgbuf-detail","","버퍼 슬롯 26만 개(16K 페이지 4GB) 초과 버퍼풀도 페이지 단위로 스캔 (기본은 엔진 집계만 — 전수 스캔은 대상에 접촉이 크다)"},
+ {"--bcb-dump",  "F","버퍼풀 BCB 스냅샷을 파일 F 로 (cub_volmap --bufmap F 가 지도에 얹음; 라이브는 매 프레임 갱신, 이때는 헤더를 전수 읽음)"},
  {"--capacity-state","F","용량 상한(포화 시 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정"},
  {"-p, --plot",  "", "시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)"},
  {"--interval",  "S","샘플 창(초, 0.05~3600, 기본 0.5)"},
@@ -7133,7 +7253,7 @@ static void help_keys_dash(void){
 "    맨 윗줄        수집 시간(이 프레임에 든 실작업 ms) · 현재 시각\n"
 "    ① OS 컨텍스트  호스트 CPU·메모리 · 가동 인스턴스 목록(▶ = 지금 보는 DB)\n"
 "    ② RSS·프로세스 master / server / pl / broker / CAS 티어별 상주(top 기준)와 코어\n"
-"    ③ RSS·서버     영역별 alloc·rss·hot·grow — 1/2/3 키로 보기 전환\n"
+"    ③ RSS·서버     영역별 alloc·rss·conf·grow — 1/2 키로 보기 전환\n"
 "    ④ 동적 메모리  [B] 정확 · [A] 청크 추정 · ④' 버퍼풀 상태 · ⓐ 용량\n"
 "    ⑤ 메모리 추이  서버 전체·동적 힙 증감 + load(OS) 겹침\n"
 "    ⑥ I/O          iowait · 장치 · D스레드 → 맨 아래 한 줄 판정문\n"
@@ -7190,23 +7310,19 @@ static void help_keys_dash(void){
 "  thread stacks   워커 스택. 예약 크고 상주 극소가 정상\n"
 "  glibc arena     할당자 예약. 상주 0이면 물리 메모리 미사용\n"
 "  (설정 X, 할당 Y%)  설정 대비 매핑 비율. >105% 면 초과\n"
-"  핫 N%           상주 중 실제 접근 비율. 낮으면 올려두고 안 만지는 메모리\n"
 "  Σ 합계          4열의 합. rss 합 = 프로세스 RSS(항등)로 프로세스 박스의 server 와 같다.\n"
 "                  라벨의 PSS 는 공유 .so 를 나눠 배분한 값이다(오류 아님).\n"
 "\n"
-"  1/2/3 키로 바꾸는 것은 게이지·퍼센트와 3·4번째 열뿐이다(영역 행은 그대로).\n"
+"  1/2 키로 바꾸는 것은 게이지·퍼센트와 grow 열뿐이다(영역 행은 그대로).\n"
 "\n"
-"    보기          alloc      rss        3번째 열         grow(4번째 열)\n"
+"    보기          alloc      rss        conf(3번째 열)   grow(4번째 열)\n"
 "    ───────────   ────────   ────────   ──────────────   ─────────────────────\n"
-"    1 할당·상주   할당       상주       hot(접근량)      rss 증감      (주황)\n"
-"    2 핫          할당       상주       hot(접근량)      hot 증감   (+녹 / -적)\n"
-"    3 설정 초과   할당       상주       conf(설정값)     alloc 증감    (주황)\n"
+"    1 할당·상주   할당       상주       설정값           rss 증감      (주황)\n"
+"    2 설정 초과   할당       상주       설정값(주황)     alloc 증감    (주황)\n"
 "\n"
-"  헤더 색이 현재 보기를 알린다: hot·grow 녹색 = 보기2, conf 주황 = 보기3.\n"
-"  hot 과 grow 는 다른 지표다 — hot=최근 얼마나 만졌나(Referenced), grow=얼마나 늘었나.\n"
-"    · 잡아둔 버퍼를 읽기만 하면 hot 크고 grow 0   → data_buffer 의 정상 모습\n"
-"    · hot 낮은데 grow 만 계속 오르면              → 누수 의심\n"
-"  게이지: 전경 6점 글리프 = 보기 지표(녹→적), 배경 청색 = 핫 범위\n"
+"  게이지: 6점 글리프 = 보기 지표(녹→적), 끝의 주황 = 이번 프레임 증가분\n"
+"  최근 접근 비율(핫)은 보여주지 않는다 — 재려면 대상 페이지 테이블을 전수 순회하는\n"
+"  clear_refs 쓰기가 필요하고, 모니터가 그 부하를 만들면 안 되기 때문이다.\n"
 "\f\n"
 "── ③ 파라미터 귀속률 \"설정으로 설명 N%%\" (③ 박스 제목 옆) ──\n"
 "  서버 메모리 중 cubrid.conf 설정으로 '왜 이만큼인지' 설명되는 비율.\n"
@@ -7239,6 +7355,10 @@ static void help_keys_dash(void){
 "── ④' 버퍼풀 상태 — 페이지 슬롯 = 버퍼 제어블록(BCB, Buffer Control Block) (◌) ──\n"
 "  pgbuf_Pool.BCB_table 배열을 방법 B 와 같은 경로로 통째 읽어 어떤 페이지가 버퍼에\n"
 "  올라와 있고(resident) 몇 장이 아직 볼륨에 안 내려갔는지(dirty) 센다. 래치 없는 스냅샷.\n"
+"  페이지 헤더는 오프셋 검증용 표본 256개만(엔진이 최근 쓴 hot/warm 존, 상주 확인 후) 읽는다 —\n"
+"  헤더를 읽으면 그 버퍼 페이지를 건드리게 되므로. 전수는 --bcb-dump 일 때만.\n"
+"  버퍼 슬롯이 26만 개(16K 페이지 4GB)를 넘으면 배열 전수 스캔은 요청 시에만(d 키·--pgbuf-detail)\n"
+"  하고, 평소에는 엔진이 스스로 유지하는 집계(존별 개수·victim 후보·dirty 수, ●)를 보인다.\n"
 "  게이지: 전경=상주율, 배경(청색)=dirty 비율.  zones: hot/warm/cold = LRU 3구역,\n"
 "  void = 적재/축출 전이 중, free = 빈 BCB.  victim 은 cold 에서 뽑고 dirty 는 건너뛴다.\n"
 "  log: append = 로그 꼬리, flushed(nxio) = 디스크에 내려간 경계 → 차이 = 아직 fsync 안 된 로그.\n"
@@ -7349,7 +7469,8 @@ static void help_keys_dash(void){
 "\n"
 "    키            동작\n"
 "    ───────────   ─────────────────────────────────────────────────────────\n"
-"    1  2  3       ③ 보기 전환   1 할당·상주   2 핫(최근 접근)   3 설정 초과\n"
+"    1  2          ③ 보기 전환   1 할당·상주   2 설정 초과\n"
+"    d             ④' 대형 버퍼풀의 페이지 단위 스캔 켬/끔 (기본 끔 — 엔진 집계만)\n"
 "    r             ④ [A] 청크 추정을 지금 1회 다시 측정\n"
 "    a             ④ [A] 자동 측정 켬/끔 (주기는 측정 시간에 맞춰 자동)\n"
 "    <  >          인스턴스(DB) 이동 — 여러 cub_server 가 떠 있을 때\n"
@@ -7374,7 +7495,7 @@ static void help_keys_dash(void){
 "── 여러 데이터베이스(인스턴스) ──\n"
 "  cub_top <db명>     그 DB 를 본다.  생략하면 가동 중인 것 중 알파벳순 첫 번째\n"
 "  라이브에서 < > 로 이동. 상세 추적은 화면에 보이는 DB 하나뿐이고,\n"
-"  나머지는 총량만 집계한다(clear_refs 를 전부에 돌리면 대상 서버가 느려지기 때문).\n"
+"  나머지는 총량만 집계한다(상세 직독을 전부에 돌리면 그만큼 대상들에 접촉이 늘기 때문).\n"
 "  -d 출력은 instance.<db>.* 로 모든 인스턴스를 내보내며 tracked=1 이 현재 추적 대상이다.\n"
 "\n"
 "  자세한 한계는 docs/limitations.md, 이식성은 docs/portability.md 참조.");
@@ -7467,12 +7588,10 @@ static void help_keys_plot(void){
 "    디스크 읽기 (적색)    B/s          볼륨에서 실제로 읽어 올린 양. 버퍼가 일하면 낮다\n"
 "    버퍼 상주%% (녹색)     %%            data_buffer 중 페이지가 올라와 있는 비율\n"
 "    cold 존%% (주황)       %%            LRU cold 비중. 높으면 재사용 없이 지나가는 페이지가 많다\n"
-"    data_buffer 핫%% (하늘)%%            상주 페이지 중 최근 접근된 비율(--no-hot 이면 없음)\n"
 "    적재 pg/s (노랑)      pg/s         버퍼에 새로 올린 페이지 수 = 미스율의 직접 지표\n""    장치%%(호스트) (회색)  %%            겹침선. 호스트 전역 장치 포화도(이 인스턴스 값 아님)\n"
 "\n"
-"  패널 아래 막대 2행 — 선으로는 값이 작아 바닥에 붙어 안 보이던 지표를 따로 깐다\n"
+"  패널 아래 막대 — 선으로는 값이 작아 바닥에 붙어 안 보이던 지표를 따로 깐다\n"
 "  (주식 차트의 거래량 자리. 막대는 자기 최대 기준, 백분율은 100 기준):\n"
-"    핫%%    상주 페이지 중 최근 접근된 비율\n"
 "    흡수%%  버퍼가 미스해도 OS 페이지 캐시가 받아준 비율 — 높으면 디스크로 안 내려간다\n"
 "           (실측 호스트 캐시 64.7GB vs data_buffer 512MB)\n"
 "    OS 캐시 흡수%% (연노랑) %%           버퍼가 미스해도 OS 페이지 캐시가 받아준 비율.\n"
@@ -7567,7 +7686,7 @@ static void help_keys_plot(void){
 "── 여러 데이터베이스(인스턴스) ──\n"
 "  cub_top <db명>     그 DB 를 본다.  생략하면 가동 중인 것 중 알파벳순 첫 번째\n"
 "  라이브에서 < > 로 이동. 상세 추적은 화면에 보이는 DB 하나뿐이고,\n"
-"  나머지는 총량만 집계한다(clear_refs 를 전부에 돌리면 대상 서버가 느려지기 때문).\n"
+"  나머지는 총량만 집계한다(상세 직독을 전부에 돌리면 그만큼 대상들에 접촉이 늘기 때문).\n"
 "  -d 출력은 instance.<db>.* 로 모든 인스턴스를 내보내며 tracked=1 이 현재 추적 대상이다.\n"
 "\n"
 "  자세한 한계는 docs/limitations.md, 이식성은 docs/portability.md 참조.");
@@ -7592,18 +7711,14 @@ static int opt_num(const char *opt,const char *s,double lo,double hi,double *out
 
 int main(int argc,char **argv){
     g_argc=argc; g_argv=argv;
-    /* Hot measurement is off by default: clear_refs walks the target's PTEs at a cost
-       proportional to resident size (about 30ms/GB), after which the target takes minor
-       faults re-setting the accessed bits.  Staying non-invasive requires the default
-       to be off; --hot turns it on explicitly. */
-    int terse=0,tree=0,with_a=0,no_hot=1,live=0,view0=0,dump_hist=0,force_ko=0; double interval=0.5;
+    int terse=0,tree=0,with_a=0,live=0,view0=0,dump_hist=0,force_ko=0; double interval=0.5;
     int bcb_only=0;                   /* --bcb-dump with no display mode: write the snapshot only */
     const char *want_db=NULL;         /* The positional argument is the db to view; without it, the first alphabetically */
     /* Options that take a value.  The tests below are written "&&i+1<argc", which would
        let an option without its value match nothing (--replay with no path would sample
        live), so a missing value is rejected here first. */
     static const char *const NEEDVAL[]={"--record","--replay","--replay-speed","--offsets",
-        "--interval","--bcb-dump","--capacity-state","--hot-limit-gb","--hot-every",NULL};
+        "--interval","--bcb-dump","--capacity-state",NULL};
     for(int i=1;i<argc;i++){
         for(int n=0;NEEDVAL[n];n++)
             if(!strcmp(argv[i],NEEDVAL[n])&&i+1>=argc){
@@ -7622,10 +7737,16 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"--replay-speed")&&i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_rep_speed)) return 2; i++; }
         else if(!strcmp(argv[i],"--dump-hist")) dump_hist=1;
         else if(!strcmp(argv[i],"--heap")) with_a=1;
-        else if(!strcmp(argv[i],"--no-hot")) no_hot=1;      /* Backward compatibility: the default is already off */
-        else if(!strcmp(argv[i],"--hot")) no_hot=0;          /* Hot measurement requested explicitly */
-        else if(!strcmp(argv[i],"--hot-limit-gb") && i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_hot_limit_gb)) return 2; i++; }
-        else if(!strcmp(argv[i],"--hot-every") && i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_hot_every)) return 2; i++; }
+        else if(!strcmp(argv[i],"--no-hot")) ;               /* Backward compatibility: there is no hot measurement */
+        else if(!strcmp(argv[i],"--hot")||!strcmp(argv[i],"--hot-limit-gb")||!strcmp(argv[i],"--hot-every")){
+            /* Measuring hot means writing clear_refs - a walk of every target PTE - so the monitor
+               itself would be the load; it was removed rather than offered */
+            fprintf(stderr,g_ascii?"cub_top: %s was removed - measuring hot needs a clear_refs write, a walk of every page"
+                                   " table entry of the server, and a monitor must not put that load on it.\n"
+                                  :"cub_top: %s 는 제거됐다 — 핫 측정은 clear_refs 쓰기(서버 페이지 테이블 전수 순회)가 필요해"
+                                   " 모니터가 대상에 부하를 준다.\n",argv[i]);
+            return 2; }
+        else if(!strcmp(argv[i],"--pgbuf-detail")) g_pg_detail=1;
         else if(!strcmp(argv[i],"--ascii")) g_ascii=1;
         else if(!strcmp(argv[i],"--ko")) force_ko=1;
         else if(!strcmp(argv[i],"--offsets") && i+1<argc)
@@ -7682,7 +7803,7 @@ int main(int argc,char **argv){
     auto_lang(force_ko);   /* Detect whether Hangul can be displayed; explicit options win. */
     /* Replay draws only from the recording, so it must run before enum_instances() and
        paramdump touch /proc or the server - a replay works on a host with no CUBRID. */
-    if(g_rep_path) return rp_run(g_rep_path,view0,no_hot,terse,with_a,g_json);
+    if(g_rep_path) return rp_run(g_rep_path,view0,terse,with_a,g_json);
     static proc_t P,P0;   /* About 1MB twice including region_t[4096]: static rather than stack */
     enum_instances();
     if(want_db){
@@ -7726,7 +7847,7 @@ int main(int argc,char **argv){
         else g_pagesize=16384;
     }
 
-    g_interval=interval;            /* Used to display the hot window */
+    g_interval=interval;
 
     static iod_t IO;
     static mem_t M; static tier_t T;
@@ -7734,7 +7855,7 @@ int main(int argc,char **argv){
        be empty on the first screen (--heap gates only the one-shot output). */
     if(live) with_a=1;
     double m_a0=now_ms();
-    double work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,no_hot,with_a,&pd);
+    double work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,with_a,&pd);
     if(with_a){ g_a_dur=(now_ms()-m_a0)/1000.0-interval; if(g_a_dur<0) g_a_dur=0;
                 g_a_when=time(NULL); }
 
@@ -7756,13 +7877,13 @@ int main(int argc,char **argv){
                returns here every 150ms, so without this guard the series would
                keep scrolling - faster than when running. */
             double fr_t=now_ms()/1000.0;    /* One instant for the history and the recording */
-            if(!paused) hist_push(fr_t, &P, &M, &T, &IO, !no_hot);
+            if(!paused) hist_push(fr_t, &P, &M, &T, &IO);
             if(g_rec_path && !paused){
                 char rts[32]; time_t rt=(time_t)fr_t; struct tm tmv;
                 localtime_r(&rt,&tmv); strftime(rts,sizeof rts,"%Y-%m-%d %H:%M:%S",&tmv);
                 g_ts_frac=fr_t; rp_record(&P,&M,&T,&IO,with_a,rts,(long)rt); g_ts_frac=-1;
             }
-            if(view) render_plot(&P,&M,&T,&IO,paused,!no_hot);
+            if(view) render_plot(&P,&M,&T,&IO,paused);
             else     render_dash(&P,&M,&T,&IO,lens,paused,work_ms,
                                  a_at>=0?(now_ms()-a_at)/1000.0:-1,with_a);
             /* Key handling */
@@ -7774,10 +7895,11 @@ int main(int argc,char **argv){
                        So 1 restores the four-panel view and 2-4 zoom that panel (the
                        same key again restores). */
                     if(view) g_plot_zoom = (k=='1' || g_plot_zoom==k-'0') ? 0 : k-'0';
-                    else if(k<='3') lens=k-'0';
+                    else if(k<='2') lens=k-'0';
                 }
                 else if(k==' ') paused=!paused;
                 else if(k=='r'){ with_a=1; a_pending=1; }            /* Reanalyse once */
+                else if(k=='d'){ g_pg_detail=!g_pg_detail; PG.every=1; }   /* Page-level scan of a large buffer, on request */
                 else if(k=='a'){ g_a_auto=!g_a_auto;                  /* Toggle automatic mode */
                                  if(g_a_auto){ with_a=1; a_pending=1; } }
                 else if(k=='l') g_ascii=!g_ascii;   /* Switch labels between Korean and English, for a tty without Hangul support */
@@ -7813,7 +7935,7 @@ int main(int argc,char **argv){
             if(g_a_redo){ g_a_redo=0; with_a=1; a_pending=1; }
             {   double m0=now_ms();
                 int wa = with_a && a_pending;                 /* A runs only on scheduled frames */
-                work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,no_hot,wa?1:0,&pd);
+                work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,wa?1:0,&pd);
                 if(a_pending){ g_a_dur=(now_ms()-m0)/1000.0-interval;
                                g_a_when=time(NULL);
                                if(g_a_dur<0) g_a_dur=0;
@@ -7830,7 +7952,7 @@ int main(int argc,char **argv){
     /* For cross-checking: build one history sample by the same path the screen uses and
        write it to stderr.  tools/check-hist.sh compares it with the terse keys, so
        plots, dashboard and terse are checked against one another. */
-    if(dump_hist){ hist_push((double)now_ms()/1000.0,&P,&M,&T,&IO,!no_hot); hist_dump_last(); }
+    if(dump_hist){ hist_push((double)now_ms()/1000.0,&P,&M,&T,&IO); hist_dump_last(); }
     /* --json captures the terse output to a temporary file and converts it, so the
        content is never produced twice.  stdout is redirected at fd level, which does
        not rely on the stdio implementation. */
@@ -7886,7 +8008,7 @@ int main(int argc,char **argv){
                 g_pagesize=0;
                 if(pd){ paramdump_finish(pd); pd=NULL; }
                 if(cub && *cub) pd=paramdump_start(cub,P.db);
-                work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,no_hot,with_a,&pd);
+                work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,with_a,&pd);
             }
             if(ii>0 || only<0) printf("[@%s]\n",P.db[0]?P.db:"-");
             render_tree(&P,&M,&T,with_a,IO.rb,IO.wb,IO.ri,IO.wi,

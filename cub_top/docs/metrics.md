@@ -46,29 +46,18 @@ top·ps 로 더한 값과 같고, 실제 점유의 **상한**입니다.
 
 `data_buffer_size`는 통상 100%를 넘습니다(실측 112%). 초과분은 페이지 데이터 외에 **BCB·victim 후보 배열·해시 테이블** 같은 관리 구조가 같은 예약에 포함되기 때문이며, 버퍼 수와 페이지 크기에 따라 달라집니다.
 
-### 핫(hot) = Referenced / 상주
-샘플 창(0.5초) 동안 **실제로 접근된 비율**.
-
-측정 방법:
-```
-1. /proc/<pid>/clear_refs 에 "1" 쓰기  → 전 페이지 accessed 비트 리셋
-2. 0.5초 대기                          → 접근된 페이지는 커널이 비트를 세움
-3. smaps 의 Referenced 읽기            → 접근량
-```
-
-**왜 `page_idle`이 아닌가**: CUBRID 버퍼는 거의 전부 THP(투명 대형 페이지)입니다(`AnonHugePages` 925MB 관측). 4KB 단위 `page_idle/bitmap` 마킹이 THP에 붙지 않아 **마킹 직후 즉시 읽기에도 99%가 핫으로 오검출**됐습니다. `clear_refs`는 PMD 레벨로 동작해 THP에서 정상입니다.
-
-**활용**: `data_buffer`가 572M 상주인데 핫이 0%면, 버퍼를 크게 잡아두고 실제로는 안 쓰고 있다는 뜻입니다.
-
-**중첩 관계** — `alloc ≥ rss ≥ hot`이 항상 성립합니다(전 영역 실측 검증). 세 값은 독립 축이 아니라 중첩 부분집합이므로 게이지 하나에 손실 없이 담을 수 있고, btop 뷰는 이를 이용해 **전경 글리프=보기 지표, 배경색=핫 범위**로 두 채널을 직교시킵니다.
+### 최근 접근 비율(핫)은 내지 않는다
+"상주 중 창 안에 실제로 접근된 비율"은 `clear_refs` 로 대상의 접근 비트를 지운 뒤 smaps `Referenced` 를 읽어야 잴 수 있다.
+그 쓰기가 대상 페이지 테이블 전수 순회와 TLB 무효화를 일으키므로(상주 1GB 당 약 27ms, 메모리 집약 대역 처리량 −52%),
+모니터가 대상에 부하를 만들지 않는다는 원칙에 따라 제거했다. 지우지 않은 `Referenced` 는 우리 읽기와 커널 회수 주기가
+섞인 값이라 쓰지 않는다. 비 root 로 접근 비트를 건드리지 않는 방법(`page_idle`·DAMON)은 없다.
+버퍼풀이 얼마나 쓰이는지는 엔진이 스스로 유지하는 값(LRU 존 분포·victim 후보·dirty 수, `pgbuf.engine.*`)과
+회전율·재적재율로 본다.
 
 | 파생 지표 | 식 | 뜻 |
 |---|---|---|
 | 상주율 | `rss / alloc` | 예약 대비 실사용 |
-| 핫 비율 | `hot / rss` | 상주 중 실제 접근 |
-| **실효활용률** | `hot / alloc` | 잡아둔 것 중 실제로 쓰는 비율 |
 | 놀고있는 예약 | `alloc − rss` | 매핑했으나 물리 미사용 |
-| 올려두고 안 만짐 | `rss − hot` | 상주하나 접근 없음 |
 
 ## 변화 지표
 
@@ -188,8 +177,12 @@ util = (diskstats io_ms 델타) / 경과시간(ms) × 100
 | `pgbuf.zone_void` | 적재/축출 전이 중 | 순간값 |
 | `pgbuf.zone_free` | 빈 BCB(invalid 존) | `resident + zone_free = num_buffers` |
 | `pgbuf.vol<N>.resident / .dirty` | 볼륨별 분해 | `cub_volmap --bufmap` 볼륨 헤더의 `buf N pages (dirty M)` 과 같은 값 |
-| `pgbuf.hdr_mismatch / hdr_unread` | 페이지 헤더 대조 불일치 / 읽기 실패 수 | 소량(교체 중)은 정상, 5% 초과면 비활성 처리됨 |
+| `pgbuf.hdr_read` | 읽은 페이지 헤더 수 | 평소 표본 256개(LRU 존 1·2 에서 고르게). `--bcb-dump` 일 때만 전수 |
+| `pgbuf.hdr_nonresident` | 상주가 아니어서(pagemap) 읽지 않은 헤더 수 | 읽으면 스왑인을 일으키므로 건너뛴다 |
+| `pgbuf.hdr_pagemap_unchecked` | pagemap 을 못 읽어 상주 확인 없이 읽은 수 | 보통 0 |
+| `pgbuf.hdr_mismatch / hdr_unread` | 읽은 헤더 중 대조 불일치 / 읽기 실패 수 | 소량(교체 중)은 정상, 표본의 50% 초과면 비활성 |
 | `pgbuf.oldest_dirty_pageid/offset` | 가장 오래된 dirty 페이지의 `oldest_unflush_lsa` | 리커버리 redo 의 시작점 후보 |
+| `pgbuf.engine.*` | 엔진이 유지하는 집계: `zone1/2/3`(LRU 리스트별 `count_lru1/2/3` 합), `victim_candidates`(`count_vict_cand` 합), `dirty`(`monitor.dirties_cnt`), `lru_pages`, `lists`(공유+private) | 퍼프몬과 무관하게 늘 읽힌다(O(1), 수십 KB). 버퍼 슬롯 26만 개 초과 버퍼풀은 BCB 스캔 대신 이것을 보인다. 존1 크기는 `pgbuf_lru_hot_ratio` 로 상한이 정해져 뜨거움의 지표는 아니다. victim 후보가 cold 대비 적으면 cold 가 dirty·fix 로 막혀 있다는 뜻 |
 | `log.append_*` | 로그 꼬리(`hdr.append_lsa`) | 새 로그 레코드가 붙는 위치 |
 | `log.nxio_*` | 아직 디스크에 안 쓴 첫 LSA(`append.nxio_lsa`) | WAL 경계: 이보다 앞선 로그는 영속 |
 | `log.eof_*` | `hdr.eof_lsa` | |

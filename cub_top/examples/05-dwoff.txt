@@ -34,5 +34,16 @@ OFF_PSTAT_INIT               44       44 match   pstat_global(56) . initialized
 SZ_PSTAT_METADATA            56       56 match   struct pstat_metadata
 OFF_PSTATMD_PSID              0        0 match   struct pstat_metadata . psid
 OFF_PSTATMD_START            20       20 match   struct pstat_metadata . start_offset
+OFF_PGBUF_LRULIST            56       -1 differ  pgbuf_buffer_pool(592) . buf_LRU_list
+OFF_PGBUF_NLRU               40       -1 differ  pgbuf_buffer_pool(592) . num_LRU_list
+OFF_PGBUF_QUOTA             328       -1 differ  pgbuf_buffer_pool(592) . quota
+OFF_QUOTA_NPRIV               0       -1 differ  struct pgbuf_page_quota . num_private_LRU_list
+OFF_PGBUF_MONITOR           280       -1 differ  pgbuf_buffer_pool(592) . monitor
+OFF_MON_DIRTIES               0       -1 differ  struct pgbuf_page_monitor . dirties_cnt
+SZ_PGBUF_LRU                128       -1 differ  struct pgbuf_lru_list
+OFF_LRU_C1                   80       -1 differ  struct pgbuf_lru_list . count_lru1
+OFF_LRU_C2                   84       -1 differ  struct pgbuf_lru_list . count_lru2
+OFF_LRU_C3                   88       -1 differ  struct pgbuf_lru_list . count_lru3
+OFF_LRU_VICT                 92       -1 differ  struct pgbuf_lru_list . count_vict_cand
 
-match 30, differ 1, fail 0  |  0 discarded on desync  |  27306ms
+match 30, differ 12, fail 0  |  0 discarded on desync  |  36751ms

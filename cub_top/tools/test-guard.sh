@@ -70,7 +70,8 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
   if [ -n "$SO" ] && stat -L "$SO" >/dev/null 2>&1; then
     SZ=$(stat -L -c%s "$SO"); MT=$(stat -L -c%Y "$SO")
     CACHE="$TMP/cub_top.dw-$(id -u)-$SZ-$MT.tbl"   # the test binary's cache (uid-scoped name)
-    printf 'OFF_PGBUF_NBUF 4\n' > "$CACHE"
+    # Every key present (a cache missing one is re-extracted), all of them wrong
+    grep -oE '^  \{"(OFF|SZ)_[A-Z0-9_]+",' "$SRC" | sed 's/^  {"//;s/",$/ 4/' > "$CACHE"
     raw=$("$TMP/bad1" -d 2>/dev/null)
     en=$(printf '%s' "$raw" | grep -o 'heapB.enabled=[01]')
     tbl2=$(printf '%s' "$raw" | grep -o 'heapB.table="[^"]*"')

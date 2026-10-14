@@ -41,7 +41,7 @@ $ readelf -n cub_top | grep -A1 'ABI version'
 구 커널에 없는 인터페이스는 실행 시 탐지해 폴백합니다. 시작 시 `caps:` 줄에 상태가 표시됩니다.
 
 ```
-caps: vm_readv=yes rollup=yes proc_io=yes clear_refs=yes          ← 최신 커널
+caps: vm_readv=yes rollup=yes proc_io=yes                         ← 최신 커널
 caps: vm_readv=no(pread 폴백) rollup=no(smaps 합산) proc_io=yes … ← 구 커널
 ```
 
@@ -50,8 +50,12 @@ caps: vm_readv=no(pread 폴백) rollup=no(smaps 합산) proc_io=yes … ← 구 
 | `process_vm_readv` | 커널 3.2 / glibc 2.15 | `pread(/proc/pid/mem)` | **없음** — 방법 B 정상 동작(폴백 상태에서 자기검증 통과 확인) |
 | `smaps_rollup` | 커널 4.14 | `smaps` 전체 합산 | 비용만 증가(수 ms) |
 | `/proc/pid/io` | `CONFIG_TASK_IO_ACCOUNTING` | I/O 섹션 생략 | I/O 지표 없음 |
-| `clear_refs` | 커널 2.6.22 | 핫 측정 생략 | 핫(hot) 값 없음 |
+| `/proc/pid/pagemap` | 커널 2.6.25 | 상주 확인 없이 헤더 표본을 읽음 | `pgbuf.hdr_pagemap_unchecked` 로 표기, 스왑된 표본 페이지가 다시 적재될 수 있음 |
 | `MemAvailable` | 커널 3.14 | `MemFree` 사용 | 가용량이 보수적으로 표시 |
+
+`process_vm_readv` 와 `/proc/pid/mem` 은 시작 시(대상 전환·재시작 때도) 대상의 매핑된 주소 1바이트를 실제로 읽어 시험합니다.
+EPERM/EACCES(Yama `ptrace_scope>=1`, 2.6.32 의 tracer 전용 mem)는 폴백이 아니라 권한 제한이므로 `perm.limited=1` 과 사유를 내고
+엔진 직독을 끕니다([limitations §15](limitations.md)).
 
 `process_vm_readv`는 **glibc 래퍼가 아니라 `syscall()` 직접 호출**입니다. 따라서 glibc 2.15 미만에서도 컴파일되며, 커널이 지원하지 않으면 `ENOSYS`로 폴백합니다. 시스템콜 번호는 `<asm/unistd.h>` 매크로를 우선 쓰고 없을 때만 아키텍처별 상수로 보완합니다.
 
@@ -102,8 +106,8 @@ heapB.enabled=0 heapB.reason="오프셋 불일치(num_buffers=... != data_buffer
 
 ### 라이브 대시보드 이식 메모
 
-6점 글리프 게이지(전경=보기 지표·배경=핫),
-값 4열 `alloc|rss|hot|grow` 고정, 보기 3종, 관측창 약 3분, 하단 24시간제 시각 눈금, I/O 게이지 절대 하한).
+6점 글리프 게이지(전경=보기 지표·배경=두 번째 비율),
+값 4열 `alloc|rss|conf|grow` 고정, 보기 2종, 관측창 약 3분, 하단 24시간제 시각 눈금, I/O 게이지 절대 하한).
 
 | 항목 | 구현 |
 |---|---|

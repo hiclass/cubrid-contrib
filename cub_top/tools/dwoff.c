@@ -441,6 +441,19 @@ static tgt_t TG[]={
   {"SZ_PSTAT_METADATA", NULL,NULL,"pstat_metadata",                   56},
   {"OFF_PSTATMD_PSID",  NULL,"psid","pstat_metadata",                  0},
   {"OFF_PSTATMD_START", NULL,"start_offset","pstat_metadata",         20},
+  /* Engine-maintained buffer pool aggregates (zone counts, victim candidates, dirty count):
+     kept by the engine for its own LRU and flush control, so read without a BCB scan */
+  {"OFF_PGBUF_LRULIST", "pgbuf_Pool","buf_LRU_list",          NULL, 56},
+  {"OFF_PGBUF_NLRU",    "pgbuf_Pool","num_LRU_list",          NULL, 40},
+  {"OFF_PGBUF_QUOTA",   "pgbuf_Pool","quota",                 NULL, 328},
+  {"OFF_QUOTA_NPRIV",   NULL,"num_private_LRU_list","pgbuf_page_quota", 0},
+  {"OFF_PGBUF_MONITOR", "pgbuf_Pool","monitor",               NULL, 280},
+  {"OFF_MON_DIRTIES",   NULL,"dirties_cnt","pgbuf_page_monitor",      0},
+  {"SZ_PGBUF_LRU",      NULL,NULL,"pgbuf_lru_list",                 128},
+  {"OFF_LRU_C1",        NULL,"count_lru1","pgbuf_lru_list",         80},
+  {"OFF_LRU_C2",        NULL,"count_lru2","pgbuf_lru_list",         84},
+  {"OFF_LRU_C3",        NULL,"count_lru3","pgbuf_lru_list",         88},
+  {"OFF_LRU_VICT",      NULL,"count_vict_cand","pgbuf_lru_list",    92},
 };
 #define NTG ((int)(sizeof TG/sizeof TG[0]))
 static long GOT[NTG]; static int OKF[NTG]; static char NOTE[NTG][160];

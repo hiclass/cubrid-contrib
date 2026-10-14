@@ -49,7 +49,6 @@ chk hist.lg      region.log_buffer.rss_bytes    1 0
 chk hist.dyn     region.dynamic_heap.rss_bytes  1 0
 chk hist.dynmap  region.dynamic_heap.mapped_bytes 1 0
 chk hist.cub     total.cubrid_rss_bytes         1 0
-chk hist.dbhot   region.data_buffer.hot_pct     1 0.05
 chk hist.minflt  server.minflt_per_s            1 0
 chk hist.majflt  server.majflt_per_s            1 0
 chk hist.devutil hostdev.util_pct                  1 0.05

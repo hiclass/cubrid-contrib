@@ -1,19 +1,18 @@
 opts.used="-d"
-ts="2026-10-12 11:18:15" ts_epoch=1791803895 ts_epoch_ms=1791803895000
-caps.vm_readv=1 caps.rollup=1 caps.proc_io=1 caps.clear_refs=1
-perm.limited=1 perm.reason="대상이 다른 사용자 소유: maps/smaps/io/clear_refs 차단 - status 기반 총량만 (전체는 서버 소유자 또는 root 로 실행)"
-hot.enabled=0 hot.limit_gb=2.0 hot.every_s=60
-os.ram_total_kb=197179440 os.ram_avail_kb=71439552 os.cached_kb=74795908 os.swap_total_kb=0 os.swap_free_kb=0
-os.cpu_us_pct=28.6 os.cpu_sy_pct=6.1 os.cpu_wa_pct=0.4 os.cpu_busy_cores=22.19 os.cores_logical=64 os.cores_physical=32
-os.load1=36.33 os.load5=35.51 os.load15=34.18
-os.cores_saturated=5 os.cores_high=14 os.core_max_pct=100.0
-os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,74.0,70.6,70.0,64.0,63.3,63.3,62.5,60.0,58.8,57.7,56.0,54.9,51.0,51.0,46.0,37.3,36.0,35.4,34.7,33.3,32.7,32.7,31.2,30.6,30.6,29.4,28.0,27.5,27.5,25.5,24.0,23.5,22.4,22.4,22.4,22.0,22.0,22.0,21.6,17.6,17.6,15.4,14.0,13.7,10.0,10.0,9.8,7.8,6.0,5.9,4.1,4.0,4.0,4.0,3.9,3.8,2.0,0.0,0.0"
+ts="2026-10-14 10:20:52" ts_epoch=1791973252 ts_epoch_ms=1791973252000
+caps.vm_readv=0 caps.mem_pread=0 caps.rollup=1 caps.proc_io=1
+perm.limited=1 perm.reason="대상이 다른 사용자 소유: maps/smaps/io 차단 - status 기반 총량만 (전체는 서버 소유자 또는 root 로 실행)"
+os.ram_total_kb=197179440 os.ram_avail_kb=68497512 os.cached_kb=68303372 os.swap_total_kb=0 os.swap_free_kb=0
+os.cpu_us_pct=28.8 os.cpu_sy_pct=10.2 os.cpu_wa_pct=0.9 os.cpu_busy_cores=24.95 os.cores_logical=64 os.cores_physical=32
+os.load1=26.20 os.load5=32.70 os.load15=35.28
+os.cores_saturated=6 os.cores_high=13 os.core_max_pct=100.0
+os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,100.0,89.6,89.4,79.6,78.7,74.5,74.5,64.6,60.4,58.8,58.3,58.0,54.2,53.2,49.0,49.0,48.0,47.9,41.7,40.4,40.0,38.8,38.3,36.7,36.0,36.0,35.4,32.7,32.7,30.0,28.6,28.0,24.5,23.5,20.8,20.4,18.4,18.0,16.7,16.3,14.0,14.0,13.7,12.2,12.0,12.0,12.0,10.0,9.8,9.6,8.2,8.0,8.0,6.2,5.9,4.2,4.2,4.1,0.0"
 cubrid.version="unknown" heapB.table="-" heapB.lib="-"
 server.up=1
 instance.count=2 instance.current=cbench
-instance.cbench.pid=1177276 instance.cbench.rss_bytes=992845824 instance.cbench.file_bytes=4632576 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=206520320 instance.cbench.pl_count=1 instance.cbench.tracked=1
-instance.demodb.pid=1229138 instance.demodb.rss_bytes=1011970048 instance.demodb.file_bytes=8572928 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=205369344 instance.demodb.pl_count=1 instance.demodb.tracked=0
-server.db=cbench server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=969576 server.pss_kb=0 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=0.0 server.host_cores=64
+instance.cbench.pid=1177276 instance.cbench.rss_bytes=1005203456 instance.cbench.file_bytes=3837952 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=208977920 instance.cbench.pl_count=1 instance.cbench.tracked=1
+instance.demodb.pid=1229138 instance.demodb.rss_bytes=1019617280 instance.demodb.file_bytes=3567616 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=204025856 instance.demodb.pl_count=1 instance.demodb.tracked=0
+server.db=cbench server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=981644 server.pss_kb=0 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=4.0 server.host_cores=64
 region.dynamic_heap.mapped_bytes=0 region.dynamic_heap.rss_bytes=0
 region.thread_stacks.mapped_bytes=0 region.thread_stacks.rss_bytes=0
 region.code_so.mapped_bytes=0 region.code_so.rss_bytes=0
@@ -21,19 +20,20 @@ region.glibc_arena.mapped_bytes=0 region.glibc_arena.rss_bytes=0
 heapB.enabled=0 heapB.reason="libcubrid.so 매핑 없음" heapB.total_bytes=0 heapB.excluded=0
 cap.aggregate_ms=0.0 cap.over_budget=0 cap.budget_ms=500
 cap.perfmon_counters_running=0 cap.hit_source="-" cap.reason="방법 B 비활성"
-cap.await_ms=2.91 cap.read_await_ms=0.47 cap.write_await_ms=3.32
-cap.queue_depth=1.35
-cap.dev_iops=465 cap.proc_iops=0
-cap.req_kb=188.0 cap.read_ratio=0.01 cap.profile=">64KB/write-heavy"
+cap.await_ms=1.55 cap.read_await_ms=2.77 cap.write_await_ms=0.86
+cap.queue_depth=2.74
+cap.dev_iops=1770 cap.proc_iops=0
+cap.req_kb=105.9 cap.read_ratio=0.17 cap.profile=">64KB/write-heavy"
 cap.ceiling_cells=1
-cap.cell20.profile=">64KB/write-heavy" cap.cell20.iops=465 cap.cell20.util_pct=33.0 cap.cell20.await_ms=2.91 cap.cell20.queue_depth=1.35 cap.cell20.epoch=1791803895
-cap.ceiling_iops=465 cap.ceiling_bps=89613899 cap.ceiling_util_pct=33.0 cap.ceiling_qdepth=1.35 cap.ceiling_epoch=1791803895
+cap.cell20.profile=">64KB/write-heavy" cap.cell20.iops=1770 cap.cell20.util_pct=63.1 cap.cell20.await_ms=1.55 cap.cell20.queue_depth=2.74 cap.cell20.epoch=1791973252
+cap.ceiling_iops=1770 cap.ceiling_bps=191887663 cap.ceiling_util_pct=63.1 cap.ceiling_qdepth=2.74 cap.ceiling_epoch=1791973252
 cap.used_of_ceiling_pct=100.0
-cap.verdict="⚠ IOPS 465 로 상한 465 근접 (100%, >64KB/write-heavy) — 대기 2.9ms·큐 1.4 로 적체 없음: 한계 단정 불가(상한 근접)"
+cap.verdict="⚠ IOPS 1770 로 상한 1770 근접 (100%, >64KB/write-heavy) — 대기 1.5ms·큐 2.7 로 적체 없음: 한계 단정 불가(상한 근접)"
 pgbuf.enabled=0 pgbuf.reason="방법 B 비활성 — libcubrid.so 매핑 없음"
+pgbuf.engine.enabled=0 pgbuf.engine.reason="방법 B 비활성"
 io.read_bps=0 io.write_bps=0 io.read_iops=0 io.write_iops=0 io.cache_absorb_ok=0 io.rchar_bps=0 io.blkio_wait_pct=0.00 io.total_read_bytes=0 io.total_write_bytes=0
 server.d_threads=0 server.threads_total=117
-hostdev.name=sda hostdev.util_pct=33.0 hostdev.read_bps=834607
-tier.server_rss_bytes=992845824 tier.master_rss_bytes=3932160 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=206520320 tier.pl_count=1
-tier.server_cores=0.00 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
-total.cubrid_rss_bytes=1203298304 total.cubrid_pct_ram=0.60
+hostdev.name=sda hostdev.util_pct=63.1 hostdev.read_bps=32668695
+tier.server_rss_bytes=1005203456 tier.master_rss_bytes=2568192 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=208977920 tier.pl_count=1
+tier.server_cores=0.04 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
+total.cubrid_rss_bytes=1216749568 total.cubrid_pct_ram=0.60
