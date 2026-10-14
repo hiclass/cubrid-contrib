@@ -4379,18 +4379,20 @@ static void vd_buf(char*o,size_t n,const char**col){
         snprintf(o,n,g_ascii?"read %s/s, cold zone %.0f%% - re-admit not measured (no page-scan baseline), so shortage and scan are not told apart"
                            :"· 읽기 %s/s · cold 존 %.0f%% — 재적재율 미측정(페이지 스캔 기준 없음)이라 버퍼 부족과 스캔을 가르지 않음",
                  H(rb),b->pg_cold_pct); return; }
-    /* Cold zone occupancy alone cannot separate a short buffer from a scan - both run
-       cold.  Only the refill rate separates them: pages evicted and read back again
-       mean the working set exceeds the buffer and more buffer helps, while read-once
-       pages (refill near 0) do not benefit.  A run at 76%% refill was once misread
-       as a scan without reuse. */
+    /* Re-admit = admitted pages evicted within the last nbuf evictions: under LRU those are
+       the misses a buffer twice the size would have served, so it estimates (a lower bound)
+       the share of reads doubling removes.  It does not tell a scan from a working set
+       many times the buffer - both are low - so no "enlarging is useless" is concluded. */
     if(rb>=8.0*1024*1024 && b->cap_readmit>=30.0){ *col=VD_WARN;
-        snprintf(o,n,g_ascii?"! buffer shortage - re-admit %.0f%%, read %s/s: working set exceeds the buffer, enlarging helps"
-                           :"⚠ 버퍼 부족 — 재적재 %.0f%%·읽기 %s/s: 작업집합이 버퍼보다 크다, 증설이 듣는다",b->cap_readmit,H(rb)); return; }
-    if(rb>=8.0*1024*1024 && b->pg_cold_pct>=80.0){ *col=VD_WARN;
-        snprintf(o,n,g_ascii?"! scan without reuse - cold zone %.0f%%, re-admit %.0f%%, read %s/s: a bigger buffer will not cut reads"
-                           :"⚠ 재사용 없는 스캔 — cold 존 %.0f%%·재적재 %.0f%%·읽기 %s/s: 버퍼를 키워도 읽기가 줄지 않음",
-                 b->pg_cold_pct,b->cap_readmit,H(rb)); return; }
+        snprintf(o,n,g_ascii?"! buffer shortage - re-admit %.0f%%, read %s/s: doubling the buffer cuts reads by about %.0f%% (lower bound)"
+                           :"⚠ 버퍼 부족 — 재적재 %.0f%%·읽기 %s/s: 버퍼 2배면 디스크 읽기 약 %.0f%% 감소(추정 하한)",b->cap_readmit,H(rb),b->cap_readmit); return; }
+    if(rb>=8.0*1024*1024 && b->cap_readmit>=10.0){ *col=VD_NOTE;
+        snprintf(o,n,g_ascii?"! working set larger than the buffer - re-admit %.0f%%, read %s/s: doubling cuts reads by about %.0f%% (lower bound)"
+                           :"⚠ 작업집합이 버퍼보다 큼 — 재적재 %.0f%%·읽기 %s/s: 버퍼 2배면 디스크 읽기 약 %.0f%% 감소(추정 하한)",b->cap_readmit,H(rb),b->cap_readmit); return; }
+    if(rb>=8.0*1024*1024){ *col=VD_INFO;
+        snprintf(o,n,g_ascii?"read %s/s, re-admit %.0f%% - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
+                           :"· 읽기 %s/s · 재적재 %.0f%% — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): 버퍼 2배로 줄어드는 읽기 약 %.0f%%",
+                 H(rb),b->cap_readmit,b->cap_readmit); return; }
     if(rb<1.0*1024*1024){ *col=VD_OK;
         snprintf(o,n,g_ascii?"served from buffer - disk read %s/s, resident %.0f%%, hot+warm %.0f%%"
                            :"· 버퍼에서 처리 중 — 디스크 읽기 %s/s, 상주 %.0f%%, hot+warm 존 %.0f%%",H(rb),b->pg_res_pct,100.0-b->pg_cold_pct); return; }
@@ -4501,14 +4503,18 @@ static void vd_capacity(char*o,size_t n,const char**col){
             snprintf(o,n,g_ascii?"! %.0f pages/s admitted (turnover %.0f%%) - re-read share unknown from a file baseline: run live (-b) to tell buffer shortage from scan"
                                 :"⚠ 초당 %.0f페이지 적재(회전율 %.0f%%) — 파일 기준선이라 재적재 비율 미상: 라이브(-b)로 버퍼 부족과 스캔을 구분",
                      c->miss_pps,c->turnover_pct); return; }
+        /* Re-admit estimates the share of misses a doubled buffer removes (see vd_buf) */
+        char hit[48]="";
+        if(c->hit_pct>=0 && !strncmp(c->hit_src,"perfmon",7))
+            snprintf(hit,sizeof hit,g_ascii?", engine hit %.1f%%":", 엔진 히트율 %.1f%%",c->hit_pct);
         if(c->miss_pps>=200 && c->readmit_pct>=30){ *col=VD_WARN;
-            snprintf(o,n,g_ascii?"! buffer too small: %.0f pages/s admitted, %.0f%% are re-reads - raise data_buffer_size"
-                                :"⚠ 버퍼 부족: 초당 %.0f페이지 적재 중 %.0f%%가 재적재 — data_buffer_size 증설",
-                     c->miss_pps,c->readmit_pct); return; }
-        if(c->miss_pps>=200 && c->readmit_pct<10){ *col=VD_NOTE;
-            snprintf(o,n,g_ascii?"! %.0f pages/s admitted but almost no re-reads - scan workload: bigger buffer won't help"
-                                :"⚠ 초당 %.0f페이지 적재이나 재적재 거의 없음 — 스캔 워크로드: 버퍼 증설 무효",
-                     c->miss_pps); return; }
+            snprintf(o,n,g_ascii?"! buffer too small: %.0f pages/s admitted, %.0f%% re-reads%s - doubling cuts admissions by about %.0f%% (lower bound): raise data_buffer_size"
+                                :"⚠ 버퍼 부족: 초당 %.0f페이지 적재 중 %.0f%%가 재적재%s — 버퍼 2배면 적재 약 %.0f%% 감소(추정 하한): data_buffer_size 증설",
+                     c->miss_pps,c->readmit_pct,hit,c->readmit_pct); return; }
+        if(c->miss_pps>=200 && c->readmit_pct>=0){ *col=VD_NOTE;
+            snprintf(o,n,g_ascii?"! %.0f pages/s admitted, re-read %.0f%%%s - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
+                                :"⚠ 초당 %.0f페이지 적재, 재적재 %.0f%%%s — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): 버퍼 2배로 줄어드는 적재 약 %.0f%%",
+                     c->miss_pps,c->readmit_pct,hit,c->readmit_pct); return; }
         if(res<60.0 && c->miss_pps<20){ *col=VD_OK;
             snprintf(o,n,g_ascii?"over-provisioned: only %.0f%% of data_buffer ever used, %.0f pages/s - can shrink"
                                 :"· 과다 할당: data_buffer 중 %.0f%%만 사용, 초당 %.0f페이지 — 축소 가능",
@@ -7397,7 +7403,8 @@ static void help_keys_dash(void){
 "         헤드룸만 높고 적체가 없으면 '상한 근접 — 한계 단정 불가'로만 말하고 증설을 권고하지 않는다.\n"
 "         상한은 과거 다른 순간의 관측치라 워크로드가 가벼워지기만 해도 80%%를 넘길 수 있기 때문이다.\n"
 "         · ⚠ 지연 병목(await 20ms↑ & IOPS 낮음)\n"
-"         ⚠ 버퍼 부족(적재 많고 재적재 30%%↑) · ⚠ 스캔(적재 많고 재적재 없음 — 증설 무효)\n"
+"         ⚠ 버퍼 부족(적재 많고 재적재 30%%↑) · ⚠ 재사용 거리가 버퍼 밖(재적재 30%%↓ — 스캔이거나 작업집합이 버퍼의 수 배)\n"
+"         재적재 r%% 는 '버퍼를 2배로 늘리면 줄어드는 읽기' 의 추정 하한이다(LRU 기준).\n"
 "         · 과다 할당(버퍼 60%% 미사용 & 적재 거의 없음 — 축소 가능) · · 여유\n"
 "  비용   취합 예산 0.5초. 넘으면 그 프레임 값을 버리고 '취합 생략'을 화면에 남긴다.\n"
 "         실측 0.2~0.9ms(예산의 0.2%% 미만). 대상 프로세스 쓰기 0, 접속·락 0.\n"
@@ -7602,10 +7609,11 @@ static void help_keys_plot(void){
 "    OS 캐시 흡수%% (연노랑) %%           버퍼가 미스해도 OS 페이지 캐시가 받아준 비율.\n"
 "\n"
 "  읽는 법 — 버퍼 증설이 효과가 있을 상황인지 가른다.\n"
-"    적재↑ + 재적재 30%%↑   작업집합 > 버퍼 → 증설이 듣는다 (판정문: ⚠ 버퍼 부족 — 재적재 N%%)\n"
+"    재적재 r%%            버퍼를 2배로 늘리면 디스크 읽기가 약 r%% 준다(추정 하한, LRU 기준)\n"
 "                          근거는 줌(3) 보조막대의 '재적재' 막대에서 눈으로 확인한다\n"
-"    적재↑ + 재적재 없음   한 번 읽고 버리는 스캔 → 키워도 읽기가 줄지 않는다\n"
-"                          판정문: ⚠ 재사용 없는 스캔\n"
+"    적재↑ + 재적재 30%%↑   작업집합 > 버퍼 → 증설이 듣는다 (판정문: ⚠ 버퍼 부족)\n"
+"    적재↑ + 재적재 낮음   재사용 거리가 버퍼 밖 — 스캔이거나 작업집합이 버퍼의 수 배.\n"
+"                          둘은 이 지표로 가를 수 없고, 2배 증설 효과가 약 r%% 에 그친다는 것만 말한다\n"
 "    상주 100% + 읽기 0    버퍼에서 다 서비스되는 정상 (판정문: · 버퍼에서 서비스 중)\n"
 "    상주 60% 미만 + 적재 0 과다 할당 — 축소 가능 (판정문: · 과다 할당)\n"
 "    상주이 오르는 중       버퍼 채우는 중 — 히트율 판단 보류(기동 직후)\n"

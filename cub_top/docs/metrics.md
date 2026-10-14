@@ -235,7 +235,7 @@ cub_volmap 페이지 박스의 `buf:DIRTY unflushed / flushed` 는 마지막 두
 | `cap.buffer_hit_pct` | perfmon: `1 − ioreads/fetches`. turnover: `100 − 회전율` (성격이 다르므로 출처를 반드시 함께 읽는다) |
 | `cap.turnover_pct` | 관측창에 **새로 들어온** 페이지 ÷ 상주 = 버퍼 교체율 |
 | `cap.miss_pages_per_s` | 초당 적재 페이지 = 미스 |
-| `cap.readmit_pct` | 적재분 중 **최근 nbuf건의 내보내기 안에서 빠졌다 다시 들어온** 비율((volid, pageid) 정확 집합으로 비교). 30% 이상 = 작업집합 > 버퍼(증설 근거). 10% 미만 = 스캔(증설 무효) |
+| `cap.readmit_pct` | 적재분 중 **최근 nbuf건의 내보내기 안에서 빠졌다 다시 들어온** 비율((volid, pageid) 정확 집합으로 비교). LRU 에서 이 페이지들은 버퍼가 2배였다면 상주했을 것이므로 **2배 증설로 줄어드는 읽기의 추정 하한**이다. 30% 이상 = 작업집합 > 버퍼(증설 근거). 낮은 값은 재사용 거리가 버퍼 밖이라는 뜻이며, 스캔인지 버퍼의 수 배인 작업집합인지는 가르지 않는다 |
 | `cap.readmit_available=0` | 파일 기준선(1회 실행)에서는 재적재 이력이 없어 못 낸다 → 라이브(`-b`)로 확인 |
 
 **중요(엔진 사실)**: `perfmon_add_stat()` 은 `pstat_Global.n_watchers > 0` 이 아니면 카운터를 **아예 증가시키지 않는다**

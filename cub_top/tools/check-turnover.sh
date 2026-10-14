@@ -51,7 +51,7 @@ int main(void){
     int ok=1, nb=32768;
     ok&=run("endless scan, 1/4 of the buffer per frame",nb,4,0,40,25.0,0.0);
     ok&=run("working set 1.5x the buffer",nb,4,nb+nb/2,40,25.0,100.0);
-    ok&=run("working set 3x the buffer (outside window)",nb,4,3L*nb,60,25.0,0.0);
+    ok&=run("cyclic 3x the buffer: reuse beyond the window",nb,4,3L*nb,60,25.0,0.0);
     ok&=run("262144 BCBs, 1% new pages per frame",262144,100,0,20,1.0,0.0);
     /* An instance switch must not keep the old snapshot, whatever the next scan does */
     { static proc_t P; P.pid=999999;

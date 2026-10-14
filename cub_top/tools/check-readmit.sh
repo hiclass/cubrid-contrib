@@ -33,6 +33,35 @@ static int verdict(double readmit,double cold,const char *want_has,const char *w
     printf("  %s   readmit %5.0f cold %.0f%% -> hist %.0f, \"%s\"\n",ok?"ok  ":"FAIL",readmit,cold,HS[HN-1].cap_readmit,o);
     return ok?0:1;
 }
+/* Exact LRU of B slots under uniform random access over W pages, with a second LRU of 2B fed
+   the same accesses; the frame's resident set goes through cap_turnover. */
+static int *pv1,*nx1,*in1,h1,t1,c1, *pv2,*nx2,*in2,h2,t2,c2;
+static int lru(int p,int B,int*pv,int*nx,int*in,int*h,int*t,int*c){
+    if(in[p]){ if(pv[p]>=0) nx[pv[p]]=nx[p]; else *h=nx[p]; if(nx[p]>=0) pv[nx[p]]=pv[p]; else *t=pv[p];
+               pv[p]=-1; nx[p]=*h; if(*h>=0) pv[*h]=p; *h=p; if(*t<0) *t=p; return 1; }
+    if(*c>=B){ int v=*t; if(pv[v]>=0) nx[pv[v]]=-1; else *h=-1; *t=pv[v]; in[v]=0; (*c)--; }
+    pv[p]=-1; nx[p]=*h; if(*h>=0) pv[*h]=p; *h=p; if(*t<0) *t=p; in[p]=1; (*c)++; return 0;
+}
+static int lru_case(int B,double mult){
+    int W=(int)(B*mult); srand(7);
+    pv1=calloc(W,4); nx1=calloc(W,4); in1=calloc(W,4); pv2=calloc(W,4); nx2=calloc(W,4); in2=calloc(W,4);
+    h1=t1=h2=t2=-1; c1=c2=0;
+    static pgrec_t rec[1<<14]; reset_instance_state(); PG.rec=rec; PG.reccap=1<<14;
+    long hit1=0,hit2=0,acc=0; double rs=0; int k=0;
+    for(int f=0;f<400;f++){
+        for(int a=0;a<B/4;a++){ int p=rand()%W;
+            int g1=lru(p,B,pv1,nx1,in1,&h1,&t1,&c1), g2=lru(p,2*B,pv2,nx2,in2,&h2,&t2,&c2);
+            if(f>=100){ hit1+=g1; hit2+=g2; acc++; } }
+        PG.nrec=0; for(int p=h1;p>=0;p=nx1[p]){ pgrec_t*r=&rec[PG.nrec++]; memset(r,0,sizeof *r); r->pageid=p; }
+        PG.ok=1; PG.nbuf=B; PG.degraded=0; cap_turnover(100.0+f*0.5);
+        if(f>=100 && CAP2.readmit_pct>=0){ rs+=CAP2.readmit_pct; k++; }
+    }
+    double m1=1.0-(double)hit1/acc, m2=1.0-(double)hit2/acc, cut=100.0*(m1-m2)/m1, r=rs/k;
+    int ok = r<=cut+1.0 && r>=cut-6.0;      /* a lower bound, close to the doubled buffer's cut */
+    printf("  %s   W=%4.1fB: re-admit %5.1f%%, misses a doubled buffer removes %5.1f%%\n",ok?"ok  ":"FAIL",mult,r,cut);
+    free(pv1); free(nx1); free(in1); free(pv2); free(nx2); free(in2);
+    return ok?0:1;
+}
 /* Fake pool of NB BCBs (the review's 300,000 - above PG_LARGE).  The first 1000 BCBs
    swap between page sets A and B each frame, so from the third frame every admitted
    page was evicted two frames before: re-admit 100%. */
@@ -50,7 +79,15 @@ int main(void){
     bad|=verdict(-1,85,"재적재율 미측정","재사용 없는");
     bad|=verdict(-1,85,NULL,"⚠ 버퍼 부족");
     bad|=verdict(50,85,"버퍼 부족",NULL);
-    bad|=verdict(5,85,"재사용 없는 스캔",NULL);
+    bad|=verdict(5,85,"재사용 거리가 버퍼 밖","무효");
+    bad|=verdict(20,85,"버퍼 2배면","무효");
+    { /* capacity verdict: 300 pages/s admitted, re-admit 7% (a working set ~15x the buffer) */
+      memset(&CAP2,0,sizeof CAP2); CAP2.await_ms=1; CAP2.dev_iops=100; CAP2.qdepth=-1; CAP2.headroom_pct=-1;
+      CAP2.miss_pps=300; CAP2.readmit_pct=7; CAP2.turnover_pct=5; CAP2.hit_pct=-1; snprintf(CAP2.hit_src,sizeof CAP2.hit_src,"-");
+      PG.ok=1; PG.nbuf=1000; PG.resident=1000;
+      char o[400]; const char*c=VD_INFO; vd_capacity(o,sizeof o,&c);
+      int ok=!strstr(o,"무효") && strstr(o,"재사용 거리가 버퍼 밖");
+      printf("  %s   capacity, re-admit 7%%: \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok; }
     printf("2. large buffer (%d BCBs) scanned on request: re-admit every frame\n",NB);
     static proc_t P; P.pid=getpid(); CAP.vm_readv=1;
     B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
@@ -74,6 +111,8 @@ int main(void){
     g_pg_detail=0; pgbuf_scan(&P); cap_turnover(104.0);
     printf("  %s   not requested: scanned=%d re-admit=%.0f (want 0, -1)\n",(!PG.ok&&CAP2.readmit_pct<0)?"ok  ":"FAIL",PG.ok,CAP2.readmit_pct);
     if(PG.ok||CAP2.readmit_pct>=0) bad=1;
+    printf("3. re-admit estimates what doubling the buffer saves (exact LRU, uniform random)\n");
+    { double m[]={4,6,10,15}; for(int i=0;i<4;i++) bad|=lru_case(4096,m[i]); }
     return bad;
 }
 C
