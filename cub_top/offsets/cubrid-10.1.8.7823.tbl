@@ -12,3 +12,17 @@ SZ_FPCACHE_ENT 120
 SZ_LK_TRAN_LOCK 152
 SZ_CSS_CONN_ENTRY 392
 SZ_VACUUM_DATA 96
+# root symbol st_size (readelf -s of the same build)
+SYMSZ_pgbuf_Pool 528
+SYMSZ_xcache_Global 296
+SYMSZ_qfile_List_cache 56
+SYMSZ_qfile_List_cache_entry_pool 16
+SYMSZ_fpcache_Entry_counter 4
+SYMSZ_lk_Gl 272
+SYMSZ_sessions 128
+SYMSZ_css_Num_max_conn 4
+SYMSZ_css_Num_active_conn 4
+SYMSZ_vacuum_Data 96
+SYMSZ_log_Gl 6064
+SYMSZ_pstat_Global 56
+SYMSZ_pstat_Metadata 14728

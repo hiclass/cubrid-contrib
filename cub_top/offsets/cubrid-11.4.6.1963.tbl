@@ -31,3 +31,8 @@ OFF_PSTAT_INIT 44
 SZ_PSTAT_METADATA 56
 OFF_PSTATMD_PSID 0
 OFF_PSTATMD_START 20
+# root symbol st_size (four measured on 11.4.6.1963)
+SYMSZ_pgbuf_Pool 656
+SYMSZ_lk_Gl 568
+SYMSZ_xcache_Global 584
+SYMSZ_log_Gl 1360

@@ -521,6 +521,35 @@ int main(int argc,char**argv){
               printf("#meta size=%lld mtime=%lld\n",
                      (long long)st2.st_size,(long long)st2.st_mtime); }
         for(int i=0;i<NTG;i++) if(OKF[i]) printf("%s %ld\n",TG[i].key,GOT[i]);
+        /* st_size of the root symbols: cub_top matches a table to a build by these */
+        { static const char *mangled[]={"_ZL10pgbuf_Pool","xcache_Global","_ZL16qfile_List_cache",
+              "_ZL27qfile_List_cache_entry_pool","_ZL21fpcache_Entry_counter","lk_Gl","_ZL8sessions",
+              "_ZL15catalog_Hashmap","_ZL16css_Num_max_conn","_ZL19css_Num_active_conn",
+              "_ZL11vacuum_Data","log_Gl","pstat_Global","pstat_Metadata"};
+          static const char *plain[]={"pgbuf_Pool","xcache_Global","qfile_List_cache",
+              "qfile_List_cache_entry_pool","fpcache_Entry_counter","lk_Gl","sessions",
+              "catalog_Hashmap","css_Num_max_conn","css_Num_active_conn",
+              "vacuum_Data","log_Gl","pstat_Global","pstat_Metadata"};
+          enum { NR=(int)(sizeof plain/sizeof plain[0]) };
+          unsigned long sz[NR]; memset(sz,0,sizeof sz);
+          for(int i=0;i<eh->e_shnum;i++){
+              if(sh[i].sh_type!=SHT_SYMTAB && sh[i].sh_type!=SHT_DYNSYM) continue;
+              if(sh[i].sh_entsize!=sizeof(Elf64_Sym) || sh[i].sh_link>=eh->e_shnum) continue;
+              Elf64_Shdr *st_=&sh[sh[i].sh_link];
+              if(sh[i].sh_offset>fsz || sh[i].sh_size>fsz-sh[i].sh_offset) continue;
+              if(st_->sh_offset>fsz || st_->sh_size>fsz-st_->sh_offset) continue;
+              const Elf64_Sym *sy=(const Elf64_Sym*)(m+sh[i].sh_offset);
+              const char *str=(const char*)(m+st_->sh_offset);
+              long cnt=(long)(sh[i].sh_size/sizeof(Elf64_Sym));
+              for(long k=0;k<cnt;k++){
+                  if(sy[k].st_name>=st_->sh_size || sy[k].st_shndx==SHN_UNDEF) continue;
+                  const char *nm=str+sy[k].st_name;
+                  if(!memchr(nm,0,st_->sh_size-sy[k].st_name)) continue;
+                  for(int j=0;j<NR;j++)
+                      if(!sz[j] && (!strcmp(nm,mangled[j]) || !strcmp(nm,plain[j]))){ sz[j]=sy[k].st_size; break; }
+              }
+          }
+          for(int j=0;j<NR;j++) if(sz[j]) printf("SYMSZ_%s %lu\n",plain[j],sz[j]); }
         return 0;
     }
     if(emit_c){

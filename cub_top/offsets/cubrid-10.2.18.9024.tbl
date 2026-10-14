@@ -31,3 +31,18 @@ OFF_PSTAT_INIT 44
 SZ_PSTAT_METADATA 56
 OFF_PSTATMD_PSID 0
 OFF_PSTATMD_START 20
+# root symbol st_size (readelf -s of the same build)
+SYMSZ_pgbuf_Pool 528
+SYMSZ_xcache_Global 584
+SYMSZ_qfile_List_cache 56
+SYMSZ_qfile_List_cache_entry_pool 16
+SYMSZ_fpcache_Entry_counter 4
+SYMSZ_lk_Gl 568
+SYMSZ_sessions 416
+SYMSZ_catalog_Hashmap 408
+SYMSZ_css_Num_max_conn 4
+SYMSZ_css_Num_active_conn 4
+SYMSZ_vacuum_Data 184
+SYMSZ_log_Gl 1328
+SYMSZ_pstat_Global 56
+SYMSZ_pstat_Metadata 16632

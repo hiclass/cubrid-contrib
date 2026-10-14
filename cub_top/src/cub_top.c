@@ -1484,16 +1484,32 @@ static void detect_cubrid_ver(const char *so_path){
     if(p && ((p[4]>='1'&&p[4]<='9'))){
         snprintf(g_cver,sizeof g_cver,"%s",p+4);          /* "11.5" */
     }
-    /* Promote to a more precise string (with build number, e.g. 11.5.0.2374) if one is
-       in the file.  Found at 12.8MB in rodata on 11.5, so the first 16MB is streamed
-       in 256KB chunks (static buffer, no allocation).  Otherwise the filename-derived
-       value stands. */
+    /* Promote to the full build string (e.g. 11.5.0.2374) found in .rodata, which sits past
+       18MB in debug builds; streamed in 256KB chunks.  No section headers: first 16MB. */
     FILE *fp=fopen(so_path,"rb");
     if(fp){
         static char buf[256*1024+32];
-        long limit=16L*1024*1024, done=0; size_t carry=0;
+        long start=0, limit=16L*1024*1024, done=0; size_t carry=0;
+        { Elf64_Ehdr eh;
+          if(fread(&eh,sizeof eh,1,fp)==1 && !memcmp(eh.e_ident,ELFMAG,SELFMAG) && eh.e_ident[EI_CLASS]==ELFCLASS64
+             && eh.e_shentsize==sizeof(Elf64_Shdr) && eh.e_shnum>0 && eh.e_shnum<4096 && eh.e_shstrndx<eh.e_shnum){
+              static Elf64_Shdr shs[4096];
+              if(fseek(fp,(long)eh.e_shoff,SEEK_SET)==0 && fread(shs,sizeof(Elf64_Shdr),eh.e_shnum,fp)==eh.e_shnum){
+                  Elf64_Shdr *ns=&shs[eh.e_shstrndx];
+                  char names[8192]; size_t nl=ns->sh_size<sizeof names-1?(size_t)ns->sh_size:sizeof names-1;
+                  if(fseek(fp,(long)ns->sh_offset,SEEK_SET)==0 && fread(names,1,nl,fp)==nl){
+                      names[nl]=0;
+                      for(int i=0;i<eh.e_shnum;i++)
+                          if(shs[i].sh_name<nl && !strcmp(names+shs[i].sh_name,".rodata")){
+                              start=(long)shs[i].sh_offset; limit=(long)shs[i].sh_size; break; }
+                  }
+              }
+          }
+          if(fseek(fp,start,SEEK_SET)!=0){ start=0; limit=16L*1024*1024; rewind(fp); } }
         while(done<limit){
-            size_t got=fread(buf+carry,1,sizeof buf-32-carry,fp);
+            size_t want_=sizeof buf-32-carry;
+            if((long)want_>limit-done) want_=(size_t)(limit-done);
+            size_t got=fread(buf+carry,1,want_,fp);
             if(got==0) break;
             size_t total=carry+got;
             for(size_t i=0;i+8<total;i++){
@@ -1559,7 +1575,8 @@ static unsigned long lib_base(int pid,const char *needle,char *path,size_t plen)
    prctl, so any process could map a crafted ELF.  Every pointer derived from
    header offset/count/size fields is checked against [m, m+size) before it is
    dereferenced. */
-static int sym_lookup(const char *so,const char **names,unsigned long *out,int n){
+/* out[j] = st_value of names[j]; osz[j] (when given) = its st_size, the size of the object */
+static int sym_lookup(const char *so,const char **names,unsigned long *out,int n,unsigned long *osz){
     int fd=open(so,O_RDONLY); if(fd<0) return -1;
     struct stat st; if(fstat(fd,&st)<0){ close(fd); return -1; }
     if(st.st_size<(off_t)sizeof(Elf64_Ehdr)){ close(fd); return -1; }
@@ -1603,7 +1620,7 @@ static int sym_lookup(const char *so,const char **names,unsigned long *out,int n
             uint32_t nm4; memcpy(&nm4,nm,4);
             for(int j=0;j<n;j++)
                 if(!out[j] && nm4==want[j] && !strcmp(nm,names[j])){
-                    out[j]=sy[k].st_value; found++; break; }
+                    out[j]=sy[k].st_value; if(osz) osz[j]=sy[k].st_size; found++; break; }
         }
     }
     #undef IN_FILE
@@ -1655,7 +1672,7 @@ static const char *SYMN10[S_NSYM]={
    tried regardless of the detected version. */
 typedef struct {
     const char *tag;                 /* Table name (its source), shown on screen and in terse */
-    const char *ver_prefix;          /* Tried first when it prefix-matches g_cver */
+    const char *ver;                 /* The build it was extracted from; "exact" only on equality */
     const char **syms;               /* S_NSYM symbol names */
     int off_pgbuf_nbuf;
     int off_xc_entries,off_xc_usage,off_xc_clone;
@@ -1670,16 +1687,20 @@ typedef struct {
     struct { int bcbtab, sz_bcb, vpid, flags, olsa, iopg, iobuf_iopg, log_nxio, log_append, log_eof; } pg;
     /* perfmon offsets; -1 disables only the statistics direct read, leaving the rest */
     struct { int nvals, gstats, init, sz_md, md_psid, md_start; } ps;
+    /* st_size of each root symbol (SYMN order) in that build; 0 = not recorded.  The gate
+       compares them with the running .so: a struct that changed size is another layout. */
+    int ssz[S_NSYM];
 } btab_t;
 static const btab_t BTABS[]={
-    {"table-11.5","11.5",SYMN,0,
+    {"table-11.5","11.5.0.2374",SYMN,0,
      OFF_XCACHE_ENTRIES,OFF_XCACHE_USAGE,OFF_XCACHE_CLONE,
      OFF_QLIST_NPAGES,OFF_QPOOL_NENT,OFF_LF_ALLOCCNT,
      SZ_LK_TRAN_LOCK,SZ_SESSION_STATE,SZ_CATALOG_ENTRY,
      SZ_FPCACHE_ENT,SZ_CSS_CONN_ENTRY,SZ_VACUUM_DATA,
      0 /* off_lk_ntran: on 11.x num_trans is at the head of lk_Gl */,
      {8,144,44,64,128,136,8,48,280,488} /* pg, measured with dwoff on 11.5.0.2374 */,
-     {0,8,44,56,0,20} /* ps, measured with dwoff on 11.5.0.2374 */},
+     {0,8,44,56,0,20} /* ps, measured with dwoff on 11.5.0.2374 */,
+     {648,608,48,16,4,640,416,408,4,4,184,1360,56,16968} /* ssz, readelf -s of 11.5.0.2374 */},
 };
 /* DWARF or offset-file values into the pg group.  If any is missing all become -1 - no partial trust. */
 static void ps_from_dw(btab_t*bt,const long dw[]){
@@ -1710,8 +1731,10 @@ static char g_so_path[512]="";          /* The lib path symbols and DWARF were r
 
 /* Parse the table text.  Files and the built-in tables share this one parser, so an
    embedded table cannot be read differently from the same table on disk. */
-static int offs_text_load(const char*txt,long out[]){
+/* SYMSZ_<name> <n>: st_size of a root symbol (name as in SYMN10) in the table's build */
+static int offs_text_load(const char*txt,long out[],int ssz[]){
     for(int i=0;i<DW_N;i++) out[i]=-1;
+    if(ssz) for(int i=0;i<S_NSYM;i++) ssz[i]=0;
     char k[64]; long v; int got=0; char line[256];
     const char *p=txt;
     while(*p){
@@ -1721,12 +1744,15 @@ static int offs_text_load(const char*txt,long out[]){
         p = e ? e+1 : p+strlen(p);
         if(line[0]=='#') continue;
         if(sscanf(line,"%63s %ld",k,&v)!=2) continue;
+        if(!strncmp(k,"SYMSZ_",6)){
+            for(int i=0;i<S_NSYM;i++) if(ssz && !strcmp(k+6,SYMN10[i]) && v>0){ ssz[i]=(int)v; break; }
+            continue; }
         for(int i=0;i<NTG;i++)
             if(!strcmp(k,TG[i].key)){ out[i]=v; got++; break; }
     }
     return got;
 }
-static int offs_file_load(const char*path,long out[]){
+static int offs_file_load(const char*path,long out[],int ssz[]){
     FILE*f=fopen(path,"r"); if(!f) return 0;
     long sz; char *buf;
     fseek(f,0,SEEK_END); sz=ftell(f); fseek(f,0,SEEK_SET);
@@ -1735,7 +1761,7 @@ static int offs_file_load(const char*path,long out[]){
     if(!buf){ fclose(f); return 0; }
     size_t rd=fread(buf,1,(size_t)sz,f); buf[rd]=0;
     fclose(f);
-    int got=offs_text_load(buf,out);
+    int got=offs_text_load(buf,out,ssz);
     free(buf);
     return got;
 }
@@ -1767,7 +1793,7 @@ static int ver_match_comp(const char*a,const char*b){
    parser files use.  Embedded tables make the binary self-contained: without them a
    copy of cub_top on another host falls back to DWARF extraction or probing on any
    version that has no built-in table. */
-static int offs_embedded_load(const char*ver,long out[],char *vout,size_t vn){
+static int offs_embedded_load(const char*ver,long out[],char *vout,size_t vn,int ssz[]){
     int best=-1,bn=0;
     for(int i=0;i<EMB_TBL_N;i++){
         int n=ver_match_comp(ver,EMB_TBL[i].ver);
@@ -1775,7 +1801,7 @@ static int offs_embedded_load(const char*ver,long out[],char *vout,size_t vn){
     }
     if(best<0||bn<2) return 0;        /* below major.minor there is no basis */
     if(vout) snprintf(vout,vn,"%s",EMB_TBL[best].ver);
-    return offs_text_load(EMB_TBL[best].text,out);
+    return offs_text_load(EMB_TBL[best].text,out,ssz);
 }
 
 /* Pick the *.tbl in a directory that best matches the detected version.
@@ -1830,6 +1856,7 @@ static const char *hdelta(const char *nm,double cur){
 static struct {
     int ok; int partial; char why[128];   /* partial marks anchor-probing count-only mode */
     unsigned long base, sym[S_NSYM];
+    unsigned long ssz[S_NSYM];        /* st_size of each root symbol in this .so */
     bitem_t it[16]; int n;
     double total;      /* Sum of valid items only */
     int n_bad;         /* Items failing validation, excluded from the sum */
@@ -1879,19 +1906,23 @@ static void method_b(proc_t *P){
             snprintf(c_so,sizeof c_so,"%s",so); c_mt=mt; c_pid=P->pid; \
             c_bt=g_bt; memcpy(c_sym,B.sym,sizeof c_sym); }while(0)
 
-    /* Candidate selection: matching table first, then the rest.  Each must pass
-       L1 symbol present, L2 offset aligned, L4 paramdump cross-check.  Without
-       paramdump there is nothing to stand in for L4, so a version match is
-       required instead. */
+    /* Candidate order.  num_buffers sits at offset 0 of pgbuf_Pool in every release, so the
+       paramdump cross-check alone cannot tell builds apart; a candidate is therefore
+       also matched on the st_size of the root symbols, and every candidate goes through
+       the secondary anchors.
+         1. a table of exactly this build (builtin, then the offsets file or embedded copy)
+         2. this .so's own DWARF (or its cache)
+         3. a table of another build, accepted only when its recorded symbol sizes all
+            match and paramdump confirms num_buffers
+       A table of another build without recorded sizes is never adopted. */
     long long want=prm_get("data_buffer_pages");
+    long mxc=prm_get("max_clients");
     int32_t nbuf=0; int tried=0; char lastwhy[96]; snprintf(lastwhy,sizeof lastwhy,"후보 없음");
-    /* Run one candidate through the three gates.  Macro-internal names use tb_/tm_
-       so they cannot collide with the caller's argument. */
-    #define TRY_BTAB(bt_,match_) do{ const btab_t*tb_=(bt_); int tm_=(match_); tried++; \
-        memset(B.sym,0,sizeof B.sym);   /* sym_lookup treats out[j]!=0 as already found, so
-                                           clear it for every candidate, or the second
-                                           candidate dies with found=0. */ \
-        if(sym_lookup(so,tb_->syms,B.sym,S_NSYM)<=0){ \
+    /* One candidate through the gates; exact_ = the table is of this very build.  Macro-
+       internal names use tb_/tm_ so they cannot collide with the caller's argument. */
+    #define TRY_BTAB(bt_,exact_) do{ const btab_t*tb_=(bt_); int tm_=(exact_); tried++; \
+        memset(B.sym,0,sizeof B.sym); memset(B.ssz,0,sizeof B.ssz); \
+        if(sym_lookup(so,tb_->syms,B.sym,S_NSYM,B.ssz)<=0){ \
             snprintf(lastwhy,sizeof lastwhy,"[%s] 심볼 조회 실패",tb_->tag); break; } \
         if(!B.sym[S_PGBUF]){ \
             snprintf(lastwhy,sizeof lastwhy,"[%s] pgbuf_Pool 심볼 없음",tb_->tag); break; } \
@@ -1904,6 +1935,13 @@ static void method_b(proc_t *P){
           for(unsigned i2=0;i2<sizeof offs/sizeof offs[0];i2++) \
               if(offs[i2]>=0 && (offs[i2]&3)) bad=1; \
           if(bad){ snprintf(lastwhy,sizeof lastwhy,"[%s] 오프셋 정렬 위반",tb_->tag); break; } } \
+        /* Root symbol sizes: a struct of another size is another layout */ \
+        { int known_=0, bad_=-1; \
+          for(int i2=0;i2<S_NSYM;i2++) if(tb_->ssz[i2]>0 && B.sym[i2]){ \
+              known_++; if(B.ssz[i2]!=(unsigned long)tb_->ssz[i2]){ bad_=i2; break; } } \
+          if(bad_>=0){ snprintf(lastwhy,sizeof lastwhy,"[%s] 심볼 크기 불일치 %s %lu≠%d",tb_->tag, \
+                                SYMN10[bad_],B.ssz[bad_],tb_->ssz[bad_]); break; } \
+          if(!tm_ && !known_){ snprintf(lastwhy,sizeof lastwhy,"[%s] 다른 빌드의 표 — 심볼 크기 기록 없음",tb_->tag); break; } } \
         nbuf=rd_i32(P->pid,B.base+B.sym[S_PGBUF]+tb_->off_pgbuf_nbuf); \
         if(want>0){ \
             if(nbuf!=(int32_t)want){ \
@@ -1911,55 +1949,47 @@ static void method_b(proc_t *P){
                          tb_->tag,nbuf,want); \
                 break; } \
         } else if(!tm_){ \
-            snprintf(lastwhy,sizeof lastwhy,"[%s] paramdump 없음 — 비일치 버전 표는 미검증 채택 불가",tb_->tag); \
+            snprintf(lastwhy,sizeof lastwhy,"[%s] paramdump 없음 — 다른 빌드의 표는 미검증 채택 불가",tb_->tag); \
             break; } \
-        /* Without paramdump, sanity-check the value instead: num_buffers is
-           preallocated at boot, so it cannot be 0 or implausibly large on a live
-           server.  A corrupted offset returning 0 would otherwise be adopted. */ \
+        /* Without paramdump, sanity-check the value instead: num_buffers is \
+           preallocated at boot, so it cannot be 0 or implausibly large on a live server. */ \
         if(nbuf<=0 || nbuf>(1<<26)){ \
             snprintf(lastwhy,sizeof lastwhy,"[%s] num_buffers=%d 위생 위반(paramdump 부재)",tb_->tag,nbuf); \
             break; } \
+        /* Secondary anchors, for every candidate: the conn max symbol and lk num_trans \
+           against the range paramdump's max_clients implies */ \
+        if(want>0 && mxc>0){ \
+            if(B.sym[S_CONNMAX]){ int32_t mx_=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]); \
+                if(!(mx_>=mxc && mx_<=mxc*2+32)){ \
+                    snprintf(lastwhy,sizeof lastwhy,"[%s] 이차 앵커 불일치(conn max)",tb_->tag); break; } } \
+            if(tb_->off_lk_ntran>=0 && B.sym[S_LKGL]){ int32_t nt_=rd_i32(P->pid,B.base+B.sym[S_LKGL]+tb_->off_lk_ntran); \
+                if(!(nt_>=mxc && nt_<=mxc+16)){ \
+                    snprintf(lastwhy,sizeof lastwhy,"[%s] 이차 앵커 불일치(lk num_trans)",tb_->tag); break; } } \
+        } \
         g_bt=tb_; B.ok=1; }while(0)
+    /* A file or DWARF table: symbol names differ by release family (11.2+ mangled vs 10.x
+       C symbols), so both sets are tried; the first set's rejection reason is kept. */
+    #define TRY_BOTH(bt_,exact_) do{ char why1_[96]=""; \
+        for(int si_=0; si_<2 && !B.ok; si_++){ \
+            (bt_)->syms = si_ ? (const char**)SYMN10 : (const char**)SYMN; \
+            TRY_BTAB((bt_),(exact_)); \
+            if(si_==0 && !B.ok) snprintf(why1_,sizeof why1_,"%s",lastwhy); } \
+        if(!B.ok && why1_[0] && strstr(lastwhy,"심볼 조회")) snprintf(lastwhy,sizeof lastwhy,"%s",why1_); }while(0)
 
-    /* Promotion check for a non-builtin table (file or DWARF): beyond the pgbuf
-       anchor, its lk.num_trans offset and conn max symbol value are compared
-       against the range implied by paramdump's max_clients.  One clear mismatch
-       rejects the whole table. */
-    #define EXTRA_ANCHORS(tag_,lk_off_) do{ \
-        long mxc_=prm_get("max_clients"); \
-        if(B.ok && want>0 && mxc_>0){ \
-            int f_=0; \
-            if(B.sym[S_CONNMAX]){ \
-                int32_t mx_=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]); \
-                if(!(mx_>=mxc_ && mx_<=mxc_*2+32)) f_=1; } \
-            if(!f_ && (lk_off_)>=0 && B.sym[S_LKGL]){ \
-                int32_t nt_=rd_i32(P->pid,B.base+B.sym[S_LKGL]+(lk_off_)); \
-                if(!(nt_>=mxc_ && nt_<=mxc_+16)) f_=2; } \
-            if(f_){ B.ok=0; \
-                snprintf(lastwhy,sizeof lastwhy,"[%s] 이차 앵커 불일치(%s)", \
-                         tag_, f_==1?"conn max":"lk num_trans"); } \
-        } }while(0)
+    /* 1a. Builtin table of this very build */
+    for(int ti=0; ti<NBTABS && !B.ok; ti++)
+        if(g_cver[0] && !strcmp(g_cver,BTABS[ti].ver)) TRY_BTAB(&BTABS[ti],1);
 
-    /* Pass 1 tries only the builtin table matching the version, ahead of a
-       version-matched offsets file.  A non-matching table can pass the paramdump
-       gate (the structures are mostly identical) and be adopted carrying a size
-       error such as sz_conn 480 vs 400.  A matching table is always right. */
-    for(int ti=0; ti<NBTABS && !B.ok; ti++){
-        const btab_t *bt=&BTABS[ti];
-        int match = g_cver[0] && !strncmp(g_cver,bt->ver_prefix,strlen(bt->ver_prefix));
-        if(match) TRY_BTAB(bt,1);
-    }
-
-    /* --offsets: a portable table extracted where DWARF was available; preferred
-       on a stripped host.  Given a directory, the *.tbl best matching the
-       detected version is chosen.  An offsets/ beside the executable is used
-       automatically. */
-    if(!B.ok){
-        static char resolved[512]=""; static int rst=0;   /* 0 unparsed, 1 file, 2 none */
-        static unsigned rgen=0;
+    /* The offsets table: --offsets FILE (taken as the user's choice for this build), the
+       best *.tbl of an --offsets directory or of offsets/ beside the executable, or the
+       embedded copy.  It is "exact" when its #meta version equals the detected one. */
+    static btab_t fbt; int f_ready=0, f_exact=0;
+    {
+        static char resolved[512]=""; static int rst=0;   /* 0 unparsed, 1 file, 2 none, 3 embedded */
+        static int r_explicit=0; static unsigned rgen=0;
         if(rgen!=g_lib_gen){ rgen=g_lib_gen; rst=0; resolved[0]=0; }
         if(rst==0){
-            char cand[512]="";
+            char cand[512]=""; r_explicit=0;
             if(g_offs_file[0]) snprintf(cand,sizeof cand,"%s",g_offs_file);
             else{                       /* Auto-discovery: offsets beside the executable, or one level up */
                 char exe[400]; ssize_t el=readlink("/proc/self/exe",exe,sizeof exe-1);
@@ -1979,27 +2009,26 @@ static void method_b(proc_t *P){
                     else if(g_offs_file[0])   /* No matching table in the given directory leaves a reason */
                         snprintf(lastwhy,sizeof lastwhy,
                                  "--offsets 디렉터리에 %.20s 와 맞는 표 없음",g_cver);
-                } else { snprintf(resolved,sizeof resolved,"%s",cand); rst=1; }
+                } else { snprintf(resolved,sizeof resolved,"%s",cand); rst=1; r_explicit=(g_offs_file[0]!=0); }
             }
         }
         /* A file, when given, wins over the embedded copy: a newer patch release can be
-           handed over as a table without rebuilding the binary.  With no file, the
-           embedded table keeps a lone binary working on older versions. */
-        static char embver[32]=""; static long fv_emb[DW_N];
-        if(rst!=1 && g_cver[0]){
-            static long ev[DW_N]; static int est=0; static unsigned egen=0;
-            if(egen!=g_lib_gen){ egen=g_lib_gen; est=0; }
-            if(est==0) est = offs_embedded_load(g_cver,ev,embver,sizeof embver)>0 ? 1 : 2;
-            if(est==1){ memcpy(fv_emb,ev,sizeof ev); rst=3; }
-        }
-        if(rst==1||rst==3){
-        static long fv[DW_N]; static int fst=0; static btab_t fbt; static unsigned fgen=0;
+           handed over as a table without rebuilding the binary. */
+        static char embver[32]="";
+        static long fv[DW_N]; static int fss[S_NSYM]; static int fst=0; static unsigned fgen=0;
+        static char fver[32]="";
         if(fgen!=g_lib_gen){ fgen=g_lib_gen; fst=0; }
-        if(rst==3){ memcpy(fv,fv_emb,sizeof fv); fst=1; }
-        else if(fst==0) fst = offs_file_load(resolved,fv)>0 ? 1 : 2;
+        if(fst==0){
+            fst=2;
+            if(rst==1 && offs_file_load(resolved,fv,fss)>0){
+                fst=1; if(!offs_tbl_version(resolved,fver,sizeof fver)) fver[0]=0; }
+            else if(rst==1) snprintf(lastwhy,sizeof lastwhy,"--offsets 파일을 읽을 수 없음");
+            if(fst!=1 && g_cver[0] && offs_embedded_load(g_cver,fv,embver,sizeof embver,fss)>0){
+                fst=1; rst=3; snprintf(fver,sizeof fver,"%s",embver); }
+        }
         if(fst==1){
             fbt.tag = (rst==3) ? "offsets-embedded" : "offsets-file";
-            fbt.ver_prefix=(rst==3)?embver:g_cver; fbt.syms=SYMN;
+            fbt.ver=fver; fbt.syms=SYMN;
             fbt.off_pgbuf_nbuf =(int)fv[DW_PGBUF];
             fbt.off_xc_entries =(int)fv[DW_XC_ENT];  fbt.off_xc_usage=(int)fv[DW_XC_USE];
             fbt.off_xc_clone   =(int)fv[DW_XC_CLN];
@@ -2010,40 +2039,22 @@ static void method_b(proc_t *P){
             fbt.sz_conn    =(int)fv[DW_SZ_CONN]; fbt.sz_vacuum =(int)fv[DW_SZ_VAC];
             fbt.off_lk_ntran=(int)fv[DW_LK_NTRAN];
             pg_from_dw(&fbt,fv); ps_from_dw(&fbt,fv);
-            /* Symbol names differ by release family (11.2+ mangled vs 10.x C symbols), and the
-               table may come from another version, so both sets are tried in turn. */
-            { char why1[96]="";
-              for(int si=0; si<2 && !B.ok; si++){
-                fbt.syms = si ? (const char**)SYMN10 : (const char**)SYMN;
-                TRY_BTAB(&fbt,1);
-                if(si==0 && !B.ok) snprintf(why1,sizeof why1,"%s",lastwhy);
-              }
-              /* The second set (10.x symbols) always ends in "symbol not found" on 11.x; letting
-                 that overwrite the first set's real rejection reason would kill the
-                 diagnostic. */
-              if(!B.ok && why1[0] && strstr(lastwhy,"심볼")) snprintf(lastwhy,sizeof lastwhy,"%s",why1); }
-            EXTRA_ANCHORS("offsets-file",fv[DW_LK_NTRAN]);
-        } else if(fst==2)
-            snprintf(lastwhy,sizeof lastwhy,"--offsets 파일을 읽을 수 없음");
+            memcpy(fbt.ssz,fss,sizeof fbt.ssz);
+            f_ready=1;
+            f_exact = r_explicit || (g_cver[0] && fver[0] && !strcmp(fver,g_cver));
         }
     }
+    /* 1b. The offsets table of this very build */
+    if(!B.ok && f_ready && f_exact) TRY_BOTH(&fbt,1);
 
-    /* Pass 2, builtin tables not matching the version: meaningful only with a paramdump
-       gate, and never reached once a version-matched offsets file is adopted. */
-    for(int ti=0; ti<NBTABS && !B.ok; ti++){
-        const btab_t *bt=&BTABS[ti];
-        int match = g_cver[0] && !strncmp(g_cver,bt->ver_prefix,strlen(bt->ver_prefix));
-        if(!match) TRY_BTAB(bt,0);
-    }
-
-    /* If every builtin table fails, extract from this environment's .so DWARF and apply the same gates. */
+    /* 2. This .so's own DWARF */
     if(!B.ok){
         static long dwv[DW_N]; static int dwst=0; static char dwwhy[64]; static unsigned dgen=0;
         if(dgen!=g_lib_gen){ dgen=g_lib_gen; dwst=0; dwwhy[0]=0; }
         static btab_t dwbt;
         if(dwst==0) dwst=dw_load_or_extract(so,dwv,dwwhy,sizeof dwwhy);
         if(dwst==1){
-            dwbt.tag="dwarf-runtime"; dwbt.ver_prefix=g_cver; dwbt.syms=SYMN;
+            dwbt.tag="dwarf-runtime"; dwbt.ver=g_cver; dwbt.syms=SYMN;
             dwbt.off_pgbuf_nbuf =(int)dwv[DW_PGBUF];
             dwbt.off_xc_entries =(int)dwv[DW_XC_ENT];
             dwbt.off_xc_usage   =(int)dwv[DW_XC_USE];
@@ -2056,19 +2067,16 @@ static void method_b(proc_t *P){
             dwbt.sz_conn    =(int)dwv[DW_SZ_CONN]; dwbt.sz_vacuum =(int)dwv[DW_SZ_VAC];
             dwbt.off_lk_ntran=(int)dwv[DW_LK_NTRAN];
             pg_from_dw(&dwbt,dwv); ps_from_dw(&dwbt,dwv);
-            /* DWARF comes from this environment and counts as a match; the rejection reason is
-               kept in lastwhy.  Symbol names differ by family, so both sets are tried. */
-            { char why1[96]="";
-              for(int si=0; si<2 && !B.ok; si++){
-                dwbt.syms = si ? (const char**)SYMN10 : (const char**)SYMN;
-                TRY_BTAB(&dwbt,1);
-                if(si==0 && !B.ok) snprintf(why1,sizeof why1,"%s",lastwhy);
-              }
-              if(!B.ok && why1[0] && strstr(lastwhy,"심볼")) snprintf(lastwhy,sizeof lastwhy,"%s",why1); }
-            EXTRA_ANCHORS("dwarf-runtime",dwv[DW_LK_NTRAN]);
+            memset(dwbt.ssz,0,sizeof dwbt.ssz);   /* From this very .so: nothing to compare */
+            TRY_BOTH(&dwbt,1);
         } else if(dwst==2 && dwwhy[0])
             snprintf(lastwhy,sizeof lastwhy,"DWARF: %.56s",dwwhy);
     }
+
+    /* 3. Tables of another build, on recorded symbol sizes and paramdump */
+    for(int ti=0; ti<NBTABS && !B.ok; ti++)
+        if(!(g_cver[0] && !strcmp(g_cver,BTABS[ti].ver))) TRY_BTAB(&BTABS[ti],0);
+    if(!B.ok && f_ready && !f_exact) TRY_BOTH(&fbt,0);
 
     /* Anchor probing - last resort when both the table and DWARF are unavailable
        on a stripped build of another version. */
@@ -2078,7 +2086,7 @@ static void method_b(proc_t *P){
         const char **SYMSETS[2]; SYMSETS[0]=(const char**)SYMN; SYMSETS[1]=(const char**)SYMN10;
         for(unsigned si=0; si<2 && !B.ok; si++){
         memset(B.sym,0,sizeof B.sym);
-        if(sym_lookup(so,SYMSETS[si],B.sym,S_NSYM)>0 && B.sym[S_PGBUF]){
+        if(sym_lookup(so,SYMSETS[si],B.sym,S_NSYM,NULL)>0 && B.sym[S_PGBUF]){
             int off; int32_t v;
             if(probe_i32(P->pid,B.base+B.sym[S_PGBUF],want,want,&off,&v)){
                 /* Fix pgbuf num_buffers uniquely within the window - both the proof that the symbol

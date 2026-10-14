@@ -23,6 +23,11 @@ SRC="$ROOT/src/cub_top.c"
 TMP=${TMPDIR:-/tmp}/cub_top-guard.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
 fail=0
 say(){ printf "  %-34s %s\n" "$1" "$2"; }
+# The running server's build: the builtin table is made "this build" where a test needs it tried first
+VER=$("$ROOT/cub_top" -d 2>/dev/null | sed -n 's/.*cubrid\.version="\([0-9.]*\)".*/\1/p' | head -1)
+BUILTIN_TAG='{"table-11.5","11.5.0.2374",SYMN,0,'
+BUILTIN_SSZ='{648,608,48,16,4,640,416,408,4,4,184,1360,56,16968}'
+grep -qF "$BUILTIN_TAG" "$SRC" && grep -qF "$BUILTIN_SSZ" "$SRC" || { echo "  builtin table literal not found"; echo "→ FAIL"; exit 1; }
 
 # ---- Negative 1: alignment violation (12->11); the builtin table must fail the gate.
 #    A runtime DWARF fallback can rescue that slot, so what is tested is not
@@ -34,7 +39,10 @@ say(){ printf "  %-34s %s\n" "$1" "$2"; }
 # The test binary keeps its DWARF cache in $TMP, so corrupting it below never touches the
 # real /var/tmp cache, whether the run finishes or is interrupted.  The real caches are
 # only copied in (read), to spare the 8-second extraction.
+# The builtin table claims this build and records no sizes, so the alignment gate is the one tried.
 sed -e 's/#define OFF_LF_ALLOCCNT     12/#define OFF_LF_ALLOCCNT     11/' \
+    -e "s|{\"table-11.5\",\"11.5.0.2374\",|{\"table-11.5\",\"${VER:-11.5.0.2374}\",|" \
+    -e "s|$BUILTIN_SSZ|{0}|" \
     -e "s|/var/tmp/cub_top.dw-|$TMP/cub_top.dw-|" "$SRC" > "$TMP/bad1.c"
 grep -q "$TMP/cub_top.dw-" "$TMP/bad1.c" || { say "C misalignment build" "FAIL(cache path not redirected)"; fail=1; }
 for c in /var/tmp/cub_top.dw-"$(id -u)"-*.tbl; do [ -f "$c" ] && cp -p "$c" "$TMP/" 2>/dev/null; done
@@ -108,8 +116,8 @@ else say "L3 detects a wrong table" "PASS"; fi
 # ---- Negative 3: a table missing a field (older tables lack the xcache usage fields) ----
 #    The builtin table is made non-matching so the table file is used.  A missing offset
 #    must not be read: xcache shows the count only, session/catalog are omitted.
-TBL="$ROOT/offsets/cubrid-11.5.0.2374.tbl"
-sed 's/{"table-11.5","11.5",SYMN,0,/{"table-11.5","99.9",SYMN,0,/' "$SRC" > "$TMP/miss.c"
+TBL="$ROOT/offsets/cubrid-${VER:-none}.tbl"; [ -f "$TBL" ] || TBL="$ROOT/offsets/cubrid-11.5.0.2374.tbl"
+sed 's/{"table-11.5","11.5.0.2374",SYMN,0,/{"table-11.5","99.9",SYMN,0,/' "$SRC" > "$TMP/miss.c"
 grep -vE '^OFF_(XCACHE_USAGE|XCACHE_CLONE|LF_ALLOCCNT) ' "$TBL" > "$TMP/miss.tbl"
 if [ ! -f "$TBL" ]; then
     say "missing offset -> field not read" "SKIP(no 11.5 table)"
@@ -131,6 +139,53 @@ elif gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/miss" "$TMP/miss.c" 2>/d
     fi
 else
     say "missing offset build" "FAIL(compile failed)"; fail=1
+fi
+
+
+# ---- Negatives 4-6: choosing a table for a build (num_buffers at offset 0 cannot tell builds apart) ----
+# Test binaries live in $TMP, so no offsets/ beside them; the embedded tables are what they carry.
+# Their DWARF cache is a fresh copy of the real one: negative 1b corrupted the shared test copy.
+mkdir -p "$TMP/dw46"
+for c in /var/tmp/cub_top.dw-"$(id -u)"-*.tbl; do [ -f "$c" ] && cp -p "$c" "$TMP/dw46/" 2>/dev/null; done
+gate_build(){ # name sed-expr... : build $TMP/$1 from the source with the given edits
+    n=$1; shift
+    sed -e "s|/var/tmp/cub_top.dw-|$TMP/dw46/cub_top.dw-|" "$@" "$SRC" > "$TMP/$n.c"
+    gcc -O2 -std=gnu99 -w -I "$TMP/inc_$n" -I "$(dirname "$SRC")" -o "$TMP/$n" "$TMP/$n.c" 2>/dev/null
+}
+tblof(){ printf '%s' "$1" | grep -o 'heapB.table="[^"]*"' | sed 's/heapB.table=//;s/"//g'; }
+if [ -z "$VER" ] || "$ROOT/cub_top" -d 2>/dev/null | grep -q '^server.up=0'; then
+    say "table choice by build" "SKIP(cub_server not running)"
+elif [ "$VER" = "11.5.0.2374" ]; then
+    say "table choice by build" "SKIP(the running build is the builtin table's own)"
+else
+    # 4. The builtin table claims this build but carries 11.5.0.2374's symbol sizes: rejected on size.
+    mkdir -p "$TMP/inc_g4"
+    if gate_build g4 -e "s|{\"table-11.5\",\"11.5.0.2374\",|{\"table-11.5\",\"$VER\",|"; then
+        raw=$("$TMP/g4" -d 2>/dev/null); t=$(tblof "$raw")
+        if [ "$t" = "table-11.5" ]; then say "size gate: other build's sizes" "FAIL(adopted table-11.5)"; fail=1
+        else say "size gate: other build's sizes" "PASS($t)"; fi
+    else say "size gate build" "FAIL(compile failed)"; fail=1; fi
+    # 5. No table of this build: its own DWARF comes before tables of another build.
+    mkdir -p "$TMP/offs5" "$TMP/inc_g5"
+    for f in "$ROOT"/offsets/cubrid-*.tbl; do case "$f" in *"cubrid-$VER.tbl") ;; *) cp "$f" "$TMP/offs5/";; esac; done
+    sh "$ROOT/offsets/gen-embedded.sh" -o "$TMP/inc_g5/offsets_embedded.h" "$TMP/offs5" >/dev/null 2>&1
+    if gate_build g5; then
+        raw=$("$TMP/g5" -d 2>/dev/null); t=$(tblof "$raw")
+        case "$t" in
+          dwarf-runtime) say "no table of this build -> DWARF" "PASS($t)";;
+          table-11.5|offsets-embedded) say "no table of this build -> DWARF" "FAIL(another build's table: $t)"; fail=1;;
+          *) say "no table of this build -> DWARF" "SKIP(no DWARF here: $t)";;
+        esac
+    else say "DWARF order build" "FAIL(compile failed)"; fail=1; fi
+    # 6. Neither a table of this build nor DWARF: another build's tables fail on size, never adopted.
+    mkdir -p "$TMP/inc_g6"; cp "$TMP/inc_g5/offsets_embedded.h" "$TMP/inc_g6/" 2>/dev/null
+    if gate_build g6 -e 's/if(dwst==0) dwst=dw_load_or_extract(so,dwv,dwwhy,sizeof dwwhy);/if(dwst==0) dwst=2;/'; then
+        raw=$("$TMP/g6" -d 2>/dev/null); t=$(tblof "$raw")
+        case "$t" in
+          table-11.5|offsets-embedded|offsets-file|dwarf-runtime) say "no table, no DWARF -> not adopted" "FAIL($t)"; fail=1;;
+          *) say "no table, no DWARF -> not adopted" "PASS(${t:-B off})";;
+        esac
+    else say "no-DWARF build" "FAIL(compile failed)"; fail=1; fi
 fi
 
 
