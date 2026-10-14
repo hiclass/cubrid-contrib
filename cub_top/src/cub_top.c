@@ -36,6 +36,7 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <errno.h>
 #include <dirent.h>
 #include <elf.h>
@@ -816,85 +817,142 @@ static int pids_headroom_ok(char *why,size_t wn){
     return 1;                                              /* Unknown: proceed */
 }
 
-static FILE *paramdump_start(const char *cubrid,const char *db){
-    char bin[512], envc[512], envl[1024];
-    g_pd_why[0]=0;
-    if(!pids_headroom_ok(g_pd_why,sizeof g_pd_why)) return NULL;
-    snprintf(bin,sizeof bin,"%s/bin/cubrid",cubrid);
-    snprintf(envc,sizeof envc,"CUBRID=%s",cubrid);
+/* The server's own environment value (same owner only); 1 if found */
+static int srv_env(int pid,const char *name,char *out,size_t on){
+    char p[64]; snprintf(p,sizeof p,"/proc/%d/environ",pid);
+    int fd=open(p,O_RDONLY); if(fd<0) return 0;
+    static char e[65536]; ssize_t n=read(fd,e,sizeof e-1); close(fd);
+    if(n<=0) return 0;
+    e[n]=0;
+    size_t nl=strlen(name);
+    for(char *q=e;q<e+n;q+=strlen(q)+1)
+        if(!strncmp(q,name,nl) && q[nl]=='='){ snprintf(out,on,"%s",q+nl+1); return 1; }
+    return 0;
+}
+/* paramdump runs from the install the server itself mapped libcubrid.so from, so the
+   client and the server are the same build: a client of another version waits on the
+   handshake without an answer (11.4.5 against 11.5: no output in 20s).  Async: the pipe
+   is drained each frame without blocking and the child reaped with WNOHANG. */
+#define PD_WAIT_MS 10000           /* An attempt still running after this is killed */
+enum { PD_NONE, PD_RUNNING, PD_OK, PD_REFUSED, PD_HUNG, PD_SKIPPED };
+static int g_pd_state=PD_NONE;
+static int g_pd_async=0;           /* Live: harvest without blocking; one-shot waits up to the deadline */
+static double g_pd_deadline=0;
+static char g_pd_buf[65536]; static size_t g_pd_used=0;
+static pid_t g_pd_zombie[8]; static int g_pd_nz=0;   /* Killed children not yet reaped */
+static void paramdump_apply(char *buf);
+static void pd_reap_zombies(void){
+    int m=0;
+    for(int i=0;i<g_pd_nz;i++){ int st; pid_t r=waitpid(g_pd_zombie[i],&st,WNOHANG);
+        if(r==0) g_pd_zombie[m++]=g_pd_zombie[i]; }
+    g_pd_nz=m;
+}
+static void pd_forget_child(void){
+    if(g_pd_pid<0) return;
+    int st; pid_t r=waitpid(g_pd_pid,&st,WNOHANG);
+    if(r==0 && g_pd_nz<(int)(sizeof g_pd_zombie/sizeof g_pd_zombie[0])) g_pd_zombie[g_pd_nz++]=g_pd_pid;
+    g_pd_pid=-1;
+}
+static FILE *paramdump_start(int spid,const char *db){
+    char bin[512], envc[600], envd[600], envl[1100], root[512]="", dbs[512]="", cub[512]="";
+    g_pd_why[0]=0; g_pd_applied=0; pd_reap_zombies();   /* this instance's values are unread until it answers */
+    if(!pids_headroom_ok(g_pd_why,sizeof g_pd_why)){ g_pd_state=PD_SKIPPED; return NULL; }
+    /* Install root from the server's mapping of libcubrid.so: <root>/lib/libcubrid.so.N */
+    { char mp[64], ln[1024]; snprintf(mp,sizeof mp,"/proc/%d/maps",spid);
+      FILE *mf=fopen(mp,"r");
+      if(mf){ while(fgets(ln,sizeof ln,mf)){
+                  char *q=strstr(ln,"/libcubrid.so."); if(!q) continue;
+                  if(strstr(ln,"(deleted)")){ fclose(mf);
+                      snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"server library replaced on disk - paramdump skipped":"서버 라이브러리가 디스크에서 교체됨 — paramdump 생략");
+                      g_pd_state=PD_SKIPPED; return NULL; }
+                  char *b=strchr(ln,'/'); *q=0;
+                  char *sl=strrchr(b,'/'); if(sl && sl>b) *sl=0;      /* drop "/lib" */
+                  snprintf(root,sizeof root,"%s",b); break; }
+              fclose(mf); } }
+    if(!root[0]){ const char *c=getenv("CUBRID"); if(c&&*c) snprintf(root,sizeof root,"%s",c); }
+    if(!root[0]){ snprintf(g_pd_why,sizeof g_pd_why,"%s",g_ascii?"no CUBRID install found - paramdump skipped":"CUBRID 설치 위치 미상 — paramdump 생략");
+                  g_pd_state=PD_SKIPPED; return NULL; }
+    if(!srv_env(spid,"CUBRID",cub,sizeof cub)) snprintf(cub,sizeof cub,"%s",root);
+    if(!srv_env(spid,"CUBRID_DATABASES",dbs,sizeof dbs)){ const char *d=getenv("CUBRID_DATABASES"); if(d) snprintf(dbs,sizeof dbs,"%s",d); }
+    snprintf(bin,sizeof bin,"%s/bin/cubrid",root);
+    snprintf(envc,sizeof envc,"CUBRID=%s",cub);
+    snprintf(envd,sizeof envd,"CUBRID_DATABASES=%s",dbs);
     { const char *old=getenv("LD_LIBRARY_PATH");
       snprintf(envl,sizeof envl,"LD_LIBRARY_PATH=%s/lib%s%s",
-               cubrid, (old&&*old)?":":"", (old&&*old)?old:""); }
+               root, (old&&*old)?":":"", (old&&*old)?old:""); }
     int fd[2];
     if(pipe(fd)<0){ snprintf(g_pd_why,sizeof g_pd_why,"pipe 실패: %s",strerror(errno));
-                    return NULL; }
+                    g_pd_state=PD_SKIPPED; return NULL; }
     pid_t pid=fork();
     if(pid<0){ /* EAGAIN means the host process limit; passing over it silently would leave no way
                   to tell why the parameters are empty. */
                snprintf(g_pd_why,sizeof g_pd_why,"fork 실패: %s",strerror(errno));
-               close(fd[0]); close(fd[1]); return NULL; }
+               close(fd[0]); close(fd[1]); g_pd_state=PD_SKIPPED; return NULL; }
     if(pid==0){                                  /* Child */
         setpgid(0,0);                            /* Own pgid, so killing takes the grandchildren too */
         close(fd[0]);
-        dup2(fd[1],STDOUT_FILENO); close(fd[1]);
-        int n=open("/dev/null",O_WRONLY);        /* Stands in for 2>/dev/null */
-        if(n>=0){ dup2(n,STDERR_FILENO); close(n); }
-        putenv(envc); putenv(envl);
-        char *av[4]; av[0]=bin; av[1]=(char*)"paramdump"; av[2]=(char*)db; av[3]=NULL;
+        dup2(fd[1],STDOUT_FILENO); dup2(fd[1],STDERR_FILENO); close(fd[1]);   /* the error line is the reason */
+        putenv(envc); if(dbs[0]) putenv(envd); putenv(envl);
+        /* -C: client-server only, never opening a stopped database stand-alone */
+        char *av[5]; av[0]=bin; av[1]=(char*)"paramdump"; av[2]=(char*)"-C"; av[3]=(char*)db; av[4]=NULL;
         execvp(bin,av);
         _exit(127);                              /* exec failed; the parent sees empty output */
     }
     close(fd[1]);
     setpgid(pid,pid);                            /* Race guard: the parent sets it once too */
-    g_pd_pid=pid;
+    { int fl=fcntl(fd[0],F_GETFL,0); if(fl>=0) fcntl(fd[0],F_SETFL,fl|O_NONBLOCK); }
+    g_pd_pid=pid; g_pd_used=0; g_pd_state=PD_RUNNING; g_pd_deadline=now_ms()+PD_WAIT_MS;
     return fdopen(fd[0],"r");
 }
-/* Reap the child, waiting up to PD_WAIT_MS for a clean exit, then TERM and KILL.
-   Polling with waitpid(WNOHANG) avoids a signal handler or alarm. */
-#define PD_WAIT_MS 5000
-static void paramdump_reap(void){
-    if(g_pd_pid<0) return;
-    int st;
-    for(int i=0;i<PD_WAIT_MS/10;i++){
-        pid_t r=waitpid(g_pd_pid,&st,WNOHANG);
-        if(r==g_pd_pid || (r<0 && errno==ECHILD)){ g_pd_pid=-1; return; }
-        usleep(10000);
-    }
-    kill(-g_pd_pid,SIGTERM);         /* The whole group, so a grandchild left behind is still reaped */
-    for(int i=0;i<50;i++){
-        if(waitpid(g_pd_pid,&st,WNOHANG)==g_pd_pid){ g_pd_pid=-1; return; }
-        usleep(10000);
-    }
-    kill(-g_pd_pid,SIGKILL);
-    waitpid(g_pd_pid,&st,0);
-    g_pd_pid=-1;
+/* Stop an attempt now: the group is killed and reaped later without waiting */
+static void paramdump_abort(FILE **pd){
+    if(!*pd) return;
+    if(g_pd_pid>0) kill(-g_pd_pid,SIGKILL);
+    fclose(*pd); *pd=NULL; pd_forget_child(); pd_reap_zombies();
+    if(g_pd_state==PD_RUNNING) g_pd_state=PD_NONE;
 }
-static int paramdump_finish(FILE *fp){
-    if(!fp){ g_pd_applied=0; if(g_pagesize<=0) g_pagesize=16384; return -1; }
-    /* Keep the pipe non-blocking and read only until the deadline, so a hung paramdump
-       cannot stall cub_top on its first frame. */
-    int fd=fileno(fp);
-    int fl=fcntl(fd,F_GETFL,0);
-    if(fl>=0) fcntl(fd,F_SETFL,fl|O_NONBLOCK);
-    double deadline=now_ms()+PD_WAIT_MS;
-
-    char buf[65536]; size_t used=0; int timed_out=0;
-    while(used+1<sizeof buf){
-        ssize_t n=read(fd,buf+used,sizeof buf-1-used);
-        if(n>0){ used+=(size_t)n; continue; }
-        if(n==0) break;                                   /* EOF: the child exited */
-        if(errno==EAGAIN||errno==EWOULDBLOCK){
-            if(now_ms()>=deadline){ timed_out=1; break; }
-            usleep(5000); continue;
+/* Drain the pipe.  wait_ms 0 never blocks (live frames); one-shot passes the deadline so the
+   values reach its single frame.  Returns 1 once the attempt has ended (*pd closed). */
+static int paramdump_poll(FILE **pd,int wait_ms){
+    pd_reap_zombies();
+    if(!*pd) return 1;
+    int fd=fileno(*pd);
+    double until=now_ms()+wait_ms;
+    for(;;){
+        ssize_t n=read(fd,g_pd_buf+g_pd_used,sizeof g_pd_buf-1-g_pd_used);
+        if(n>0){ g_pd_used+=(size_t)n; if(g_pd_used+1<sizeof g_pd_buf) continue; }
+        int eof = n==0 || g_pd_used+1>=sizeof g_pd_buf || (n<0 && errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR);
+        if(eof){
+            g_pd_buf[g_pd_used]=0;
+            fclose(*pd); *pd=NULL;
+            int st=0, exited=0;
+            if(g_pd_pid>0){ pid_t r=waitpid(g_pd_pid,&st,WNOHANG); if(r==g_pd_pid){ exited=1; g_pd_pid=-1; } else pd_forget_child(); }
+            if(strchr(g_pd_buf,'=')){ g_pd_state=PD_OK; paramdump_apply(g_pd_buf); }
+            else {
+                /* Refused (server booting, max_clients, access) prints one line and exits */
+                char line[160]=""; sscanf(g_pd_buf," %159[^\n]",line);
+                g_pd_state = (exited && WIFEXITED(st) && WEXITSTATUS(st)==127) ? PD_SKIPPED : PD_REFUSED;
+                snprintf(g_pd_why,sizeof g_pd_why,"paramdump: %s",line[0]?line:(g_ascii?"no output":"출력 없음"));
+                g_pd_applied=0; if(g_pagesize<=0) g_pagesize=16384;
+            }
+            return 1;
         }
-        if(errno==EINTR) continue;
-        break;
+        double now=now_ms();
+        if(now>=g_pd_deadline){
+            if(g_pd_pid>0) kill(-g_pd_pid,SIGKILL);
+            fclose(*pd); *pd=NULL; pd_forget_child();
+            g_pd_state=PD_HUNG; g_pd_applied=0; if(g_pagesize<=0) g_pagesize=16384;
+            snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"paramdump gave no answer in %ds - cubrid.conf values kept (p reads again)"
+                                                  :"paramdump %d초 무응답 — cubrid.conf 값 유지 (p 전환 시 다시 읽음)",PD_WAIT_MS/1000);
+            return 1;
+        }
+        if(now>=until) return 0;
+        struct pollfd pf={fd,POLLIN,0};
+        double left=(until<g_pd_deadline?until:g_pd_deadline)-now;
+        poll(&pf,1,(int)(left>1?left:1));
     }
-    buf[used]=0;
-    fclose(fp);
-    if(timed_out && g_pd_pid>0){ kill(-g_pd_pid,SIGKILL); }
-    paramdump_reap();
-
+}
+static void paramdump_apply(char *buf){
     long long dbp=-1;
     g_pd_applied = strchr(buf,'=')!=NULL;
     if(g_pd_applied) g_nprm=0;       /* The applied values replace any read from cubrid.conf */
@@ -923,7 +981,6 @@ static int paramdump_finish(FILE *fp){
     long long dbs=prm_get("data_buffer_size");
     if(dbs>0 && dbp>0) g_pagesize=dbs/dbp;
     if(g_pagesize<=0) g_pagesize=16384;
-    return g_nprm;
 }
 
 /* ---------------- Direct ELF .symtab parsing (no nm) ---------------- */
@@ -6836,14 +6893,6 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
     double w0=now_ms();
     P0->pid=P->pid;
     if(P->pid>=0){
-        /* A paramdump sent to a server still booting returns nothing: retry every 5s, up to 12 times */
-        { static unsigned seen=0; static int tries=0; static double next=0;
-          const char *cub=getenv("CUBRID");
-          if(seen!=g_inst_gen){ seen=g_inst_gen; tries=0; next=now_ms()+5000; }
-          if(!*pd && !g_pd_applied && cub && *cub && tries<12 && now_ms()>=next){
-              tries++; next=now_ms()+5000;
-              *pd=paramdump_start(cub,P->db);
-          } }
         parse_status_stat(P0); parse_procio(P0);
     }
     dstat_t d0[MAXDISK]; int nd0=parse_diskstats(d0,MAXDISK);
@@ -6862,7 +6911,7 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
       last_pid=P->pid; g_blk_baseline_slot=&last_blk; }
     double t0=now_ms();
     usleep((useconds_t)(interval*1000000));
-    if(*pd){ paramdump_finish(*pd); *pd=NULL; }
+    if(*pd) paramdump_poll(pd,g_pd_async?0:PD_WAIT_MS);
     if(P->pid>=0){ parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P); }
     dstat_t d1[MAXDISK]; int nd1=parse_diskstats(d1,MAXDISK);
     double dt=(now_ms()-t0)/1000.0; if(dt<0.001) dt=0.001;
@@ -6927,8 +6976,8 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                   g_pagesize=0;
                   if(cub && *cub) params_from_conf(cub,keep);
                   if(g_pagesize<=0) g_pagesize=16384;
-                  if(*pd){ paramdump_finish(*pd); *pd=NULL; }
-                  if(newpid>=0 && cub && *cub) *pd=paramdump_start(cub,keep); }
+                  paramdump_abort(pd);
+                  if(newpid>=0) *pd=paramdump_start(newpid,keep); }
             }
         }
     }
@@ -7485,10 +7534,12 @@ static void help_keys_dash(void){
 "\n"
 "  ※ 한글 입력 상태로 눌러도 된다 — ㅂ=q  ㅗ=h  ㅔ=p  ㅣ=l (자판 위치로 되돌림)\n"
 "\n"
-"── 환경변수 CUBRID (설정 축이 살아 있으려면) ──\n"
-"  CUBRID=<설치경로>  설정 시 시작할 때 한 번 '<경로>/bin/cubrid paramdump <db>' 를 실행해\n"
-"  서버가 실제로 적용 중인 파라미터를 읽는다(셸을 거치지 않고 execvp, 최대 5초).\n"
-"  없으면 <경로>/conf/cubrid.conf 를 직접 파싱하고, 그것도 없으면 아래가 모두 빠진다:\n"
+"── 파라미터 읽기 (설정 축이 살아 있으려면) ──\n"
+"  서버마다 시작할 때 한 번, 서버가 매핑한 설치본의 'bin/cubrid paramdump -C <db>' 를\n"
+"  서버와 같은 CUBRID_DATABASES 로 실행해 실제로 적용 중인 파라미터를 읽는다\n"
+"  (셸 없이 execvp, 라이브는 비동기라 화면이 멈추지 않음, 10초 무응답이면 종료).\n"
+"  못 읽으면 사유만 적고 스스로 다시 시도하지 않는다 — p 로 화면을 전환할 때 다시 읽는다.\n"
+"  읽지 못하면 $CUBRID/conf/cubrid.conf 를 직접 파싱하고, 그것도 없으면 아래가 모두 빠진다:\n"
 "    · data_buffer/log_buffer 의 '설정 대비 %' 판정 — 설정값이 없어 초과 여부를 알 수 없다\n"
 "    · 파라미터 귀속률 — 설정으로 설명되는 몫을 셀 수 없어 표시되지 않는다\n"
 "    · DB 페이지 크기 — data_buffer_size/pages 로 역산한다(실패 시 16KB 로 가정)\n"
@@ -7677,10 +7728,12 @@ static void help_keys_plot(void){
 "  ※ 히스토리는 대시보드를 보는 동안에도 계속 쌓인다 — p 로 오면 그동안의 창이 바로 그려진다.\n"
 "  ※ 대시보드 ⑤ \"메모리 추이\" 상자는 이 2번 패널의 축소판이다.\n"
 "\f\n"
-"── 환경변수 CUBRID (설정 축이 살아 있으려면) ──\n"
-"  CUBRID=<설치경로>  설정 시 시작할 때 한 번 '<경로>/bin/cubrid paramdump <db>' 를 실행해\n"
-"  서버가 실제로 적용 중인 파라미터를 읽는다(셸을 거치지 않고 execvp, 최대 5초).\n"
-"  없으면 <경로>/conf/cubrid.conf 를 직접 파싱하고, 그것도 없으면 아래가 모두 빠진다:\n"
+"── 파라미터 읽기 (설정 축이 살아 있으려면) ──\n"
+"  서버마다 시작할 때 한 번, 서버가 매핑한 설치본의 'bin/cubrid paramdump -C <db>' 를\n"
+"  서버와 같은 CUBRID_DATABASES 로 실행해 실제로 적용 중인 파라미터를 읽는다\n"
+"  (셸 없이 execvp, 라이브는 비동기라 화면이 멈추지 않음, 10초 무응답이면 종료).\n"
+"  못 읽으면 사유만 적고 스스로 다시 시도하지 않는다 — p 로 화면을 전환할 때 다시 읽는다.\n"
+"  읽지 못하면 $CUBRID/conf/cubrid.conf 를 직접 파싱하고, 그것도 없으면 아래가 모두 빠진다:\n"
 "    · data_buffer/log_buffer 의 '설정 대비 %' 판정 — 설정값이 없어 초과 여부를 알 수 없다\n"
 "    · 파라미터 귀속률 — 설정으로 설명되는 몫을 셀 수 없어 표시되지 않는다\n"
 "    · DB 페이지 크기 — data_buffer_size/pages 로 역산한다(실패 시 16KB 로 가정)\n"
@@ -7839,8 +7892,8 @@ int main(int argc,char **argv){
                  :"cub_server 미기동 — OS·브로커·장치만 관측");
     } else {
         cap_probe(P.pid);
-        if(cub && *cub) pd=paramdump_start(cub,P.db);   /* The child (about 0.3s) overlaps the sample window */
-        else g_pagesize=16384;
+        pd=paramdump_start(P.pid,P.db);   /* The child (about 0.03s) overlaps the sample window */
+        if(!pd && g_pagesize<=0) g_pagesize=16384;
     }
 
     g_interval=interval;
@@ -7850,6 +7903,7 @@ int main(int argc,char **argv){
     /* Live always measures method A once at startup: even with automatic mode, A must not
        be empty on the first screen (--heap gates only the one-shot output). */
     if(live) with_a=1;
+    g_pd_async=live;
     double m_a0=now_ms();
     double work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,with_a,&pd);
     if(with_a){ g_a_dur=(now_ms()-m_a0)/1000.0-interval; if(g_a_dur<0) g_a_dur=0;
@@ -7899,7 +7953,9 @@ int main(int argc,char **argv){
                 else if(k=='a'){ g_a_auto=!g_a_auto;                  /* Toggle automatic mode */
                                  if(g_a_auto){ with_a=1; a_pending=1; } }
                 else if(k=='l') g_ascii=!g_ascii;   /* Switch labels between Korean and English, for a tty without Hangul support */
-                else if(k=='p'||k=='g') view=!view;   /* Dashboard and time-series plots */
+                else if(k=='p'||k=='g'){ view=!view;   /* Dashboard and time-series plots */
+                    /* Never retried on its own: a view switch is the user's way to read it again */
+                    if(!pd && !g_pd_applied && P.pid>=0) pd=paramdump_start(P.pid,P.db); }
                 else if((k=='<'||k==','||k=='>'||k=='.') && g_ninst>1){
                     /* Switch instance.  The previous target's classification would make method_a
                        exclude the wrong region and double-count, so the globals are
@@ -7915,8 +7971,8 @@ int main(int argc,char **argv){
                     HN=0;                                     /* History is per database; mixing them falsifies it */
                     with_a=1; a_pending=1;                    /* Run method A once immediately for the new target */
                     g_pagesize=0;                             /* Configuration follows the new database too */
-                    if(pd){ paramdump_finish(pd); pd=NULL; }
-                    if(cub&&*cub) pd=paramdump_start(cub,P.db);
+                    paramdump_abort(&pd);
+                    pd=paramdump_start(P.pid,P.db);
                 }
                 else if(k=='h') help=1;
             }
@@ -8002,8 +8058,8 @@ int main(int argc,char **argv){
                 cap_probe(P.pid);
                 memset(&P0,0,sizeof P0); P0.pid=P.pid;
                 g_pagesize=0;
-                if(pd){ paramdump_finish(pd); pd=NULL; }
-                if(cub && *cub) pd=paramdump_start(cub,P.db);
+                paramdump_abort(&pd);
+                pd=paramdump_start(P.pid,P.db);
                 work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,with_a,&pd);
             }
             if(ii>0 || only<0) printf("[@%s]\n",P.db[0]?P.db:"-");
@@ -8017,7 +8073,7 @@ int main(int argc,char **argv){
             }
         }
     }
-    if(pd){ paramdump_finish(pd); pd=NULL; }   /* One a restart started during the run */
+    paramdump_abort(&pd);   /* One a restart started during the run */
     if(g_mem_fd>=0) close(g_mem_fd);
     return 0;
 }

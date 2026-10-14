@@ -1,0 +1,100 @@
+#!/bin/sh
+#
+# Copyright 2016 CUBRID Corporation
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+# paramdump is the one request cub_top makes of a server, and each attempt is a full DBA
+# login.  It must run from the install the server mapped (a client of another version
+# waits on the handshake with no answer), never block a live frame, never open a database
+# stand-alone (-C), and never be retried on its own (the user re-reads it by switching views).
+# A stand-in "server" maps <root>/lib/libcubrid.so.11.5 and carries CUBRID_DATABASES in its
+# environment; <root>/bin/cubrid is a script that answers, refuses or hangs.
+DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
+SRC="$ROOT/src/cub_top.c"
+TMP=${TMPDIR:-/tmp}/cub_top-paramdump.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
+R="$TMP/root"; mkdir -p "$R/lib" "$R/bin"
+head -c 8192 /dev/zero > "$R/lib/libcubrid.so.11.5"
+cat > "$R/bin/cubrid" <<'SH'
+#!/bin/sh
+echo "$*" > "$PD_LOG.args"; echo "$CUBRID_DATABASES" > "$PD_LOG.dbs"; echo x >> "$PD_LOG.count"
+case "$PD_MODE" in
+  ok)     echo "[S ] data_buffer_size=512M"; echo "data_buffer_pages=32768" ;;
+  refuse) echo "Failed to connect to database server, 'db', on the following host(s): localhost" >&2; exit 1 ;;
+  hang)   sleep 30 ;;
+esac
+SH
+chmod +x "$R/bin/cubrid"
+cat > "$TMP/srv.c" <<'C'
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+int main(int c,char**v){ int fd=open(v[1],O_RDONLY); void*p=mmap(0,8192,PROT_READ,MAP_PRIVATE,fd,0);
+    (void)p; if(c>2) unlink(v[1]); pause(); return 0; }
+C
+gcc -O1 -o "$TMP/srv" "$TMP/srv.c" || { echo "→ FAIL (stand-in)"; exit 1; }
+# Short deadline for the test
+sed -e 's/^#define PD_WAIT_MS 10000 /#define PD_WAIT_MS 1500 /' "$SRC" > "$TMP/src.c"
+grep -q '^#define PD_WAIT_MS 1500 ' "$TMP/src.c" || { echo "→ FAIL (constant not found)"; exit 1; }
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/src.c" > "$TMP/t.c"
+cat >> "$TMP/t.c" <<'C'
+static int run(const char *mode,int spid,int wait_ms,double *worst_ms,int *polls){
+    setenv("PD_MODE",mode,1);
+    FILE *pd=paramdump_start(spid,"db"); if(!pd) return g_pd_state;
+    *worst_ms=0; *polls=0;
+    while(pd){ double t=now_ms(); paramdump_poll(&pd,wait_ms); double d=now_ms()-t;
+               if(d>*worst_ms) *worst_ms=d; (*polls)++; if(pd) usleep(50000); }
+    return g_pd_state;
+}
+int main(int c,char**v){
+    int spid=atoi(v[1]), dpid=atoi(v[2]), bad=0; double w; int np; char b[256]; FILE*f;
+    const char *log=getenv("PD_LOG");
+    int st=run("ok",spid,0,&w,&np);
+    printf("  %s   answers: state %d (want %d), data_buffer_pages applied %lld, page %lld\n",
+           st==PD_OK&&prm_get("data_buffer_pages")==32768&&g_pagesize==16384?"ok  ":"FAIL",st,PD_OK,prm_get("data_buffer_pages"),g_pagesize);
+    bad|=!(st==PD_OK&&prm_get("data_buffer_pages")==32768);
+    snprintf(b,sizeof b,"%s.args",log); f=fopen(b,"r"); char args[128]=""; if(f){ if(!fgets(args,sizeof args,f)) args[0]=0; fclose(f); }
+    snprintf(b,sizeof b,"%s.dbs",log);  f=fopen(b,"r"); char dbs[128]=""; if(f){ if(!fgets(dbs,sizeof dbs,f)) dbs[0]=0; fclose(f); }
+    int ok=strstr(args,"paramdump -C db")&&strstr(dbs,"/srv/databases");
+    printf("  %s   run as the server: args \"%.*s\", CUBRID_DATABASES %.*s\n",ok?"ok  ":"FAIL",(int)strcspn(args,"\n"),args,(int)strcspn(dbs,"\n"),dbs);
+    bad|=!ok;
+    st=run("hang",spid,0,&w,&np);
+    ok = st==PD_HUNG && w<50;
+    printf("  %s   hangs: state %d (want %d), %d live polls, longest %.1fms (want < 50, never blocks)\n",ok?"ok  ":"FAIL",st,PD_HUNG,np,w);
+    bad|=!ok;
+    usleep(200000); pd_reap_zombies();
+    printf("  %s   hung child killed and reaped (%d left)\n",g_pd_nz==0?"ok  ":"FAIL",g_pd_nz); bad|=g_pd_nz!=0;
+    /* A refusal is reported with the server's own line and nothing is retried on a timer */
+    snprintf(b,sizeof b,"%s.count",log); unlink(b);
+    st=run("refuse",spid,0,&w,&np);
+    usleep(500000); pd_reap_zombies();
+    f=fopen(b,"r"); int n=0; char ln[8]; while(f && fgets(ln,sizeof ln,f)) n++; if(f) fclose(f);
+    ok = st==PD_REFUSED && strstr(g_pd_why,"Failed to connect") && n==1 && !g_pd_applied;
+    printf("  %s   refused: state %d (want %d), %d attempt(s), reason \"%s\"\n",ok?"ok  ":"FAIL",st,PD_REFUSED,n,g_pd_why);
+    bad|=!ok;
+    FILE *pd=paramdump_start(dpid,"db");
+    printf("  %s   library replaced on disk: not run, state %d (want %d) \"%s\"\n",!pd&&g_pd_state==PD_SKIPPED?"ok  ":"FAIL",g_pd_state,PD_SKIPPED,g_pd_why);
+    bad|=!(!pd&&g_pd_state==PD_SKIPPED);
+    st=run("ok",spid,PD_WAIT_MS,&w,&np);
+    printf("  %s   one-shot waits for the answer in one poll: %d poll(s), state %d\n",np==1&&st==PD_OK?"ok  ":"FAIL",np,st); bad|=!(np==1&&st==PD_OK);
+    return bad;
+}
+C
+gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/t" "$TMP/t.c" -lm -lpthread 2>"$TMP/cc.err" || { cat "$TMP/cc.err"; echo "→ FAIL (compile failed)"; exit 1; }
+cp "$R/lib/libcubrid.so.11.5" "$TMP/gone.so.11.5"; mkdir -p "$TMP/root2/lib"; mv "$TMP/gone.so.11.5" "$TMP/root2/lib/libcubrid.so.11.5"
+env CUBRID_DATABASES=/srv/databases "$TMP/srv" "$R/lib/libcubrid.so.11.5" & s1=$!
+"$TMP/srv" "$TMP/root2/lib/libcubrid.so.11.5" unlink & s2=$!
+sleep 0.3
+PD_LOG="$TMP/log" "$TMP/t" $s1 $s2; rc=$?
+kill $s1 $s2 2>/dev/null; wait $s1 $s2 2>/dev/null
+if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
