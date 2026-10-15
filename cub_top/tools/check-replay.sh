@@ -22,6 +22,10 @@
 # the frame (which options were passed, whether this is a replay) are excluded.
 #
 # Without this, "replay looks right" would be a judgement; here it is a diff.
+#
+# Frames with the server down (conf.* from cubrid.conf in place of param.*) are recorded
+# inside a new PID namespace, where no cub_server is visible, so that case runs with or
+# without a server.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/cub_top"
@@ -29,9 +33,57 @@ BIN="$ROOT/cub_top"
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 REC="$TMP/rec.jsonl"
+chmod 755 "$TMP"
+# Recorded frames against their replay, every key both ways
+cat > "$TMP/cmp.py" <<'PY'
+import json,sys
+rec=[json.loads(l) for l in open(sys.argv[1]) if l.strip().startswith('{')]
+rep=[json.loads(l) for l in open(sys.argv[2]) if l.strip().startswith('{')]
+if len(rep)!=len(rec):
+    print(f"  FAIL replay emitted {len(rep)} frame(s) for {len(rec)} recorded"); sys.exit(1)
+# Every frame, both ways: a key the replay drops, a key it invents (a 0 where the
+# recording had no measurement) and a changed value all fail.  Only how the run was
+# invoked is a property of the run rather than of the frame.
+SKIP={'opts.used'}
+diff=[]; n=0
+for fi,(a,b) in enumerate(zip(rec,rep)):
+    for k in sorted(set(a)|set(b)):
+        if k in SKIP: continue
+        n+=1
+        if k not in b: diff.append((fi,k,a[k],'<missing>')); continue
+        if k not in a: diff.append((fi,k,'<absent>',b[k])); continue
+        v,w=a[k],b[k]
+        if isinstance(v,(int,float)) and isinstance(w,(int,float)):
+            if abs(float(v)-float(w))>max(1e-6,abs(float(v))*1e-9): diff.append((fi,k,v,w))
+        elif v!=w: diff.append((fi,k,v,w))
+if diff:
+    print(f"  FAIL {len(diff)} key(s) differ after replay:")
+    for fi,k,a,b in diff[:8]: print(f"        frame {fi} {k}: recorded={a} replayed={b}")
+    sys.exit(1)
+print(f"  ok   replay reproduces every frame ({len(rec)} frames, {n} keys compared both ways, {len(SKIP)} run property skipped)")
+PY
 
-# A recording needs a live frame; without a server there is nothing to record.
-"$BIN" -d 2>/dev/null | grep -q '^server.up=1' || { echo "SKIP: cub_server not running"; exit 0; }
+bad=0
+# 0) the server down: recorded where no cub_server is visible, replayed key for key
+DREC="$TMP/down.jsonl"
+if [ "$(id -u)" = 0 ]; then NS="unshare -pf --mount-proc"; else NS="unshare -Urpf --mount-proc"; fi
+if $NS true 2>/dev/null && command -v python3 >/dev/null; then
+    $NS sh -c "'$BIN' -b --interval 0.5 --record '$DREC' >/dev/null 2>&1 & sleep 2.5; kill -TERM \$!; wait" 2>/dev/null
+    if [ -s "$DREC" ] && grep -q '"server.up": 0' "$DREC"; then
+        nc=$(head -1 "$DREC" | grep -o '"conf\.' | wc -l)
+        "$BIN" --replay "$DREC" --dump-json >"$TMP/down.out" 2>/dev/null
+        if python3 "$TMP/cmp.py" "$DREC" "$TMP/down.out" >"$TMP/down.res"; then
+            echo "  ok   server down: $(grep -c . "$DREC") frame(s) with $nc conf.* key(s) each replay key for key"
+            [ "$nc" -gt 0 ] || echo "  note no conf.* recorded (\$CUBRID/conf/cubrid.conf not readable)"
+        else sed 's/^/  /' "$TMP/down.res"; echo "  FAIL server-down frames"; bad=1; fi
+    else echo "  FAIL no server-down frame recorded in a PID namespace"; bad=1; fi
+else echo "  SKIP server-down frames (no PID namespace: unshare -p not permitted)"; fi
+
+# The rest needs a live server frame
+if ! "$BIN" -d 2>/dev/null | grep -q '^server.up=1'; then
+    echo "  SKIP live frames: cub_server not running"
+    [ $bad -eq 0 ] && { echo "-> PASS"; exit 0; } || { echo "-> FAIL"; exit 1; }
+fi
 
 # --record is live-only (-b/-p); a short live run records a few frames without a tty.
 "$BIN" -b --record "$REC" >/dev/null 2>&1 &
@@ -41,7 +93,6 @@ p=$!; sleep 3; kill -TERM $p 2>/dev/null; wait $p 2>/dev/null
 N=$(grep -c '^{' "$REC")
 echo "recorded $N frame(s)"
 
-bad=0
 # 1) every line is one self-contained JSON object
 if command -v python3 >/dev/null; then
     python3 - "$REC" <<'PY' || bad=1
@@ -75,33 +126,7 @@ if [ ! -s "$TMP/out" ]; then
     echo "  FAIL --replay --dump-json produced nothing"; bad=1
 else
     if command -v python3 >/dev/null; then
-        python3 - "$REC" "$TMP/out" <<'PY' || bad=1
-import json,sys
-rec=[json.loads(l) for l in open(sys.argv[1]) if l.strip().startswith('{')]
-rep=[json.loads(l) for l in open(sys.argv[2]) if l.strip().startswith('{')]
-if len(rep)!=len(rec):
-    print(f"  FAIL replay emitted {len(rep)} frame(s) for {len(rec)} recorded"); sys.exit(1)
-# Every frame, both ways: a key the replay drops, a key it invents (a 0 where the
-# recording had no measurement) and a changed value all fail.  Only how the run was
-# invoked is a property of the run rather than of the frame.
-SKIP={'opts.used'}
-diff=[]; n=0
-for fi,(a,b) in enumerate(zip(rec,rep)):
-    for k in sorted(set(a)|set(b)):
-        if k in SKIP: continue
-        n+=1
-        if k not in b: diff.append((fi,k,a[k],'<missing>')); continue
-        if k not in a: diff.append((fi,k,'<absent>',b[k])); continue
-        v,w=a[k],b[k]
-        if isinstance(v,(int,float)) and isinstance(w,(int,float)):
-            if abs(float(v)-float(w))>max(1e-6,abs(float(v))*1e-9): diff.append((fi,k,v,w))
-        elif v!=w: diff.append((fi,k,v,w))
-if diff:
-    print(f"  FAIL {len(diff)} key(s) differ after replay:")
-    for fi,k,a,b in diff[:8]: print(f"        frame {fi} {k}: recorded={a} replayed={b}")
-    sys.exit(1)
-print(f"  ok   replay reproduces every frame ({len(rec)} frames, {n} keys compared both ways, {len(SKIP)} run property skipped)")
-PY
+        python3 "$TMP/cmp.py" "$REC" "$TMP/out" || bad=1
     else
         echo "  skip round-trip comparison (no python3)"
     fi
@@ -124,6 +149,18 @@ if a['os.core_pct']!=b.get('os.core_pct') or a['os.core_pct_n']!=b.get('os.core_
     print(f"  FAIL 256-core list: replayed n={b.get('os.core_pct_n')} ({len(b.get('os.core_pct',''))}B of {len(a['os.core_pct'])}B)"); sys.exit(1)
 print(f"  ok   256-core list replays whole ({len(a['os.core_pct'])}B)")
 PY
+fi
+
+# 2a) a frame whose paramdump was skipped (the server is another account's) keeps the reason
+if command -v python3 >/dev/null; then
+    python3 - "$REC" "$TMP/skip.jsonl" <<'PY'
+import json,sys
+d=json.loads(open(sys.argv[1]).readline()); d['param.skipped_reason']='서버 설치 위치를 읽을 수 없음(다른 계정) — paramdump 생략'
+open(sys.argv[2],'w').write(json.dumps(d,ensure_ascii=False)+'\n')
+PY
+    "$BIN" --replay "$TMP/skip.jsonl" --dump-json >"$TMP/skip.out" 2>/dev/null
+    python3 "$TMP/cmp.py" "$TMP/skip.jsonl" "$TMP/skip.out" >"$TMP/skip.res" \
+        && echo "  ok   param.skipped_reason replays" || { sed 's/^/  /' "$TMP/skip.res"; bad=1; }
 fi
 
 # 2b') a profile cell at a rounding edge: read_ratio is printed to 0.01, so a recorded

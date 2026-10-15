@@ -7087,6 +7087,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* Run state of the recording host: permissions */
     g_perm_limited=(int)rp_num(t,"perm.limited",0);
     rp_str(t,"perm.reason",g_perm_why,sizeof g_perm_why);
+    rp_str(t,"param.skipped_reason",g_pd_why,sizeof g_pd_why);   /* why this frame has no paramdump values */
     g_disk_dropped=(int)rp_num(t,"limits.disks_dropped",0);
     /* Parameters: the verdicts compare usage against these, so a replay without them
        would judge against nothing.  Only the rows terse emits are looked for. */
@@ -7096,6 +7097,17 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
         if(!rp_find(t,k,b,sizeof b)) continue;
         snprintf(g_prm[g_nprm].name,sizeof g_prm[g_nprm].name,"%s",PRMROWS[i].name);
         g_prm[g_nprm].val=strtoll(b,NULL,10); g_nprm++;
+    }
+    /* A frame with the server down carries cubrid.conf as conf.<name> instead, every
+       parameter read, in their order */
+    for(const char *q=strstr(t,"\"conf."); q && g_nprm<MAXPARAM; q=strstr(q+1,"\"conf.")){
+        const char *nm=q+6, *e=strchr(nm,'"'); char k[96];
+        if(!e || (size_t)(e-nm)>=sizeof g_prm[0].name) continue;
+        snprintf(k,sizeof k,"conf.%.*s",(int)(e-nm),nm);
+        if(!rp_find(t,k,b,sizeof b)) continue;
+        int hit=-1; for(int j=0;j<g_nprm;j++) if(!strncmp(g_prm[j].name,nm,(size_t)(e-nm)) && !g_prm[j].name[e-nm]){ hit=j; break; }
+        if(hit<0){ hit=g_nprm++; snprintf(g_prm[hit].name,sizeof g_prm[hit].name,"%.*s",(int)(e-nm),nm); }
+        g_prm[hit].val=strtoll(b,NULL,10);
     }
     /* Instances: rebuilt from every "instance.<key>.pid".  The key becomes the name, so
        re-emitting the frame produces the same keys. */
