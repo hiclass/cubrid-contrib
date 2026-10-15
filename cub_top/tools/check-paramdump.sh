@@ -28,6 +28,7 @@ head -c 8192 /dev/zero > "$R/lib/libcubrid.so.11.5"
 cat > "$R/bin/cubrid" <<'SH'
 #!/bin/sh
 echo "$*" > "$PD_LOG.args"; echo "$CUBRID_DATABASES" > "$PD_LOG.dbs"; echo x >> "$PD_LOG.count"
+id -u > "$PD_LOG.uid"; ls -l /proc/self/fd > "$PD_LOG.fd" 2>&1
 case "$PD_MODE" in
   ok)     echo "[S ] data_buffer_size=512M"; echo "data_buffer_pages=32768" ;;
   refuse) echo "Failed to connect to database server, 'db', on the following host(s): localhost" >&2; exit 1 ;;
@@ -38,8 +39,13 @@ chmod +x "$R/bin/cubrid"
 cat > "$TMP/srv.c" <<'C'
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <stdlib.h>
+#include <grp.h>
 #include <unistd.h>
-int main(int c,char**v){ int fd=open(v[1],O_RDONLY); void*p=mmap(0,8192,PROT_READ,MAP_PRIVATE,fd,0);
+int main(int c,char**v){
+    const char *u=getenv("SRV_UID"), *g=getenv("SRV_GID");   /* a server owned by another account */
+    if(u && g){ setgroups(0,0); if(setgid(atoi(g)) || setuid(atoi(u))) return 1; }
+    int fd=open(v[1],O_RDONLY); void*p=mmap(0,8192,PROT_READ,MAP_PRIVATE,fd,0);
     (void)p; if(c>2) unlink(v[1]); pause(); return 0; }
 C
 gcc -O1 -o "$TMP/srv" "$TMP/srv.c" || { echo "→ FAIL (stand-in)"; exit 1; }
@@ -57,7 +63,11 @@ static int run(const char *mode,int spid,int wait_ms,double *worst_ms,int *polls
     return g_pd_state;
 }
 int main(int c,char**v){
-    int spid=atoi(v[1]), dpid=atoi(v[2]), bad=0; double w; int np; char b[256]; FILE*f;
+    int spid=atoi(v[1]), dpid=atoi(v[2]), xpid=atoi(v[3]), bad=0; double w; int np; char b[256]; FILE*f;
+    /* Hold the descriptors a live run keeps open: pagemap and /proc/<target>/mem */
+    { char z; unsigned long a=0; char mp[64],ln[512]; snprintf(mp,sizeof mp,"/proc/%d/maps",spid);
+      FILE*mf=fopen(mp,"r"); if(mf){ if(fgets(ln,sizeof ln,mf)) a=strtoul(ln,NULL,16); fclose(mf); }
+      (void)pm_present(spid,a); CAP.vm_readv=0; CAP.mem_pread=1; (void)vmread(spid,a,&z,1); }
     const char *log=getenv("PD_LOG");
     int st=run("ok",spid,0,&w,&np);
     printf("  %s   answers: state %d (want %d), data_buffer_pages applied %lld, page %lld\n",
@@ -68,6 +78,21 @@ int main(int c,char**v){
     int ok=strstr(args,"paramdump -C db")&&strstr(dbs,"/srv/databases");
     printf("  %s   run as the server: args \"%.*s\", CUBRID_DATABASES %.*s\n",ok?"ok  ":"FAIL",(int)strcspn(args,"\n"),args,(int)strcspn(dbs,"\n"),dbs);
     bad|=!ok;
+    snprintf(b,sizeof b,"%s.uid",log); f=fopen(b,"r"); int uid=-1; if(f){ if(fscanf(f,"%d",&uid)!=1) uid=-1; fclose(f); }
+    const char *wu=getenv("WANT_UID");
+    if(wu && *wu){ ok = uid==atoi(wu);
+        printf("  %s   run as the server's account: uid %d (want %s)\n",ok?"ok  ":"FAIL",uid,wu); bad|=!ok; }
+    else printf("  SKIP   account switch (needs root and a second account)\n");
+    snprintf(b,sizeof b,"%s.fd",log); f=fopen(b,"r"); int leak=0; char fl[512];
+    while(f && fgets(fl,sizeof fl,f)) if(strstr(fl,"/mem")||strstr(fl,"pagemap")) leak++;
+    if(f) fclose(f);
+    printf("  %s   no descriptor of ours in the child (%d of /proc/<pid>/mem or pagemap; g_mem_fd %d open here)\n",leak==0&&g_mem_fd>=0?"ok  ":"FAIL",leak,g_mem_fd);
+    bad|=!(leak==0&&g_mem_fd>=0);
+    snprintf(b,sizeof b,"%s.count",log); unlink(b);
+    { FILE *xp=paramdump_start(xpid,"db"); f=fopen(b,"r");
+      ok = !xp && g_pd_state==PD_SKIPPED && !f;
+      printf("  %s   install not found: not run with our own $CUBRID (state %d, \"%s\")\n",ok?"ok  ":"FAIL",g_pd_state,g_pd_why);
+      if(f) fclose(f); bad|=!ok; }
     st=run("hang",spid,0,&w,&np);
     ok = st==PD_HUNG && w<50;
     printf("  %s   hangs: state %d (want %d), %d live polls, longest %.1fms (want < 50, never blocks)\n",ok?"ok  ":"FAIL",st,PD_HUNG,np,w);
@@ -92,9 +117,12 @@ int main(int c,char**v){
 C
 gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/t" "$TMP/t.c" -lm -lpthread 2>"$TMP/cc.err" || { cat "$TMP/cc.err"; echo "→ FAIL (compile failed)"; exit 1; }
 cp "$R/lib/libcubrid.so.11.5" "$TMP/gone.so.11.5"; mkdir -p "$TMP/root2/lib"; mv "$TMP/gone.so.11.5" "$TMP/root2/lib/libcubrid.so.11.5"
-env CUBRID_DATABASES=/srv/databases "$TMP/srv" "$R/lib/libcubrid.so.11.5" & s1=$!
+mkdir -p "$TMP/logs"; chmod 777 "$TMP/logs"; chmod 755 "$TMP" "$R" "$R/bin" "$R/lib"
+SU=""; if [ "$(id -u)" = 0 ] && id hiclass >/dev/null 2>&1; then SU="SRV_UID=$(id -u hiclass) SRV_GID=$(id -g hiclass)"; fi
+env CUBRID_DATABASES=/srv/databases $SU "$TMP/srv" "$R/lib/libcubrid.so.11.5" & s1=$!
+sleep 600 & s3=$!
 "$TMP/srv" "$TMP/root2/lib/libcubrid.so.11.5" unlink & s2=$!
 sleep 0.3
-PD_LOG="$TMP/log" "$TMP/t" $s1 $s2; rc=$?
-kill $s1 $s2 2>/dev/null; wait $s1 $s2 2>/dev/null
+CUBRID="$R" PD_LOG="$TMP/logs/log" WANT_UID="$(echo $SU | sed -n 's/SRV_UID=\([0-9]*\).*/\1/p')" "$TMP/t" $s1 $s2 $s3; rc=$?
+kill $s1 $s2 $s3 2>/dev/null; wait $s1 $s2 $s3 2>/dev/null
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi

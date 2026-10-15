@@ -39,6 +39,7 @@
 #include <poll.h>
 #include <errno.h>
 #include <dirent.h>
+#include <grp.h>
 #include <elf.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -158,7 +159,7 @@ static ssize_t vmread(int pid,unsigned long addr,void *buf,size_t len){
         if(g_mem_fd>=0 && g_mem_pid!=pid){ close(g_mem_fd); g_mem_fd=-1; }
         if(g_mem_fd<0){
             char p[64]; snprintf(p,sizeof p,"/proc/%d/mem",pid);
-            g_mem_fd=open(p,O_RDONLY);
+            g_mem_fd=open(p,O_RDONLY|O_CLOEXEC);
             if(g_mem_fd<0){ CAP.mem_pread=0; return 0; }
             g_mem_pid=pid;
         }
@@ -820,7 +821,7 @@ static int pids_headroom_ok(char *why,size_t wn){
 /* The server's own environment value (same owner only); 1 if found */
 static int srv_env(int pid,const char *name,char *out,size_t on){
     char p[64]; snprintf(p,sizeof p,"/proc/%d/environ",pid);
-    int fd=open(p,O_RDONLY); if(fd<0) return 0;
+    int fd=open(p,O_RDONLY|O_CLOEXEC); if(fd<0) return 0;
     static char e[65536]; ssize_t n=read(fd,e,sizeof e-1); close(fd);
     if(n<=0) return 0;
     e[n]=0;
@@ -828,6 +829,29 @@ static int srv_env(int pid,const char *name,char *out,size_t on){
     for(char *q=e;q<e+n;q+=strlen(q)+1)
         if(!strncmp(q,name,nl) && q[nl]=='='){ snprintf(out,on,"%s",q+nl+1); return 1; }
     return 0;
+}
+/* The server's install root: <root>/lib/libcubrid.so.N from its mapping, else <root>/bin/cub_server
+   from /proc/<pid>/exe.  1 found, 0 unreadable, -1 the mapped library was replaced on disk. */
+static int srv_root(int pid,char *root,size_t rn){
+    char mp[64], ln[1024]; root[0]=0;
+    snprintf(mp,sizeof mp,"/proc/%d/maps",pid);
+    FILE *mf=fopen(mp,"re");
+    if(mf){ while(fgets(ln,sizeof ln,mf)){
+                char *q=strstr(ln,"/libcubrid.so."); if(!q) continue;
+                if(strstr(ln,"(deleted)")){ fclose(mf); return -1; }
+                char *b=strchr(ln,'/'); *q=0;
+                char *sl=strrchr(b,'/'); if(sl && sl>b) *sl=0;      /* drop "/lib" */
+                snprintf(root,rn,"%s",b); break; }
+            fclose(mf); }
+    if(!root[0]){
+        char ep[64], ex[512]; snprintf(ep,sizeof ep,"/proc/%d/exe",pid);
+        ssize_t n=readlink(ep,ex,sizeof ex-1);
+        size_t el=n>0?(size_t)n:0; if(n>0) ex[n]=0;
+        if(n>0 && strstr(ex,"(deleted)")) return -1;
+        if(el>15 && !strcmp(ex+el-15,"/bin/cub_server")){ ex[el-15]=0; snprintf(root,rn,"%s",ex); }
+    }
+    if(root[0]){ char b[600]; snprintf(b,sizeof b,"%s/bin/cubrid",root); if(access(b,X_OK)!=0) root[0]=0; }
+    return root[0]?1:0;
 }
 /* paramdump runs from the install the server itself mapped libcubrid.so from, so the
    client and the server are the same build: a client of another version waits on the
@@ -857,23 +881,26 @@ static FILE *paramdump_start(int spid,const char *db){
     char bin[512], envc[600], envd[600], envl[1100], root[512]="", dbs[512]="", cub[512]="";
     g_pd_why[0]=0; g_pd_applied=0; pd_reap_zombies();   /* this instance's values are unread until it answers */
     if(!pids_headroom_ok(g_pd_why,sizeof g_pd_why)){ g_pd_state=PD_SKIPPED; return NULL; }
-    /* Install root from the server's mapping of libcubrid.so: <root>/lib/libcubrid.so.N */
-    { char mp[64], ln[1024]; snprintf(mp,sizeof mp,"/proc/%d/maps",spid);
-      FILE *mf=fopen(mp,"r");
-      if(mf){ while(fgets(ln,sizeof ln,mf)){
-                  char *q=strstr(ln,"/libcubrid.so."); if(!q) continue;
-                  if(strstr(ln,"(deleted)")){ fclose(mf);
-                      snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"server library replaced on disk - paramdump skipped":"서버 라이브러리가 디스크에서 교체됨 — paramdump 생략");
-                      g_pd_state=PD_SKIPPED; return NULL; }
-                  char *b=strchr(ln,'/'); *q=0;
-                  char *sl=strrchr(b,'/'); if(sl && sl>b) *sl=0;      /* drop "/lib" */
-                  snprintf(root,sizeof root,"%s",b); break; }
-              fclose(mf); } }
-    if(!root[0]){ const char *c=getenv("CUBRID"); if(c&&*c) snprintf(root,sizeof root,"%s",c); }
-    if(!root[0]){ snprintf(g_pd_why,sizeof g_pd_why,"%s",g_ascii?"no CUBRID install found - paramdump skipped":"CUBRID 설치 위치 미상 — paramdump 생략");
-                  g_pd_state=PD_SKIPPED; return NULL; }
+    int r=srv_root(spid,root,sizeof root);
+    if(r<=0){ snprintf(g_pd_why,sizeof g_pd_why,"%s",r<0
+                  ?(g_ascii?"server library replaced on disk - paramdump skipped":"서버 라이브러리가 디스크에서 교체됨 — paramdump 생략")
+                  :(g_ascii?"server install not readable (another account) - paramdump skipped":"서버 설치 위치를 읽을 수 없음(다른 계정) — paramdump 생략"));
+              g_pd_state=PD_SKIPPED; return NULL; }
     if(!srv_env(spid,"CUBRID",cub,sizeof cub)) snprintf(cub,sizeof cub,"%s",root);
-    if(!srv_env(spid,"CUBRID_DATABASES",dbs,sizeof dbs)){ const char *d=getenv("CUBRID_DATABASES"); if(d) snprintf(dbs,sizeof dbs,"%s",d); }
+    if(!srv_env(spid,"CUBRID_DATABASES",dbs,sizeof dbs)){
+        snprintf(g_pd_why,sizeof g_pd_why,"%s",g_ascii?"server environment not readable - paramdump skipped":"서버 환경을 읽을 수 없음 — paramdump 생략");
+        g_pd_state=PD_SKIPPED; return NULL; }
+    /* Run as the server's account: root running the install's own binary would execute
+       whatever that account can write, and leave root-owned logs in $CUBRID/log */
+    uid_t suid=(uid_t)-1; gid_t sgid=(gid_t)-1;
+    { char sp[64], ln[256]; snprintf(sp,sizeof sp,"/proc/%d/status",spid);
+      FILE *sf=fopen(sp,"re");
+      if(sf){ while(fgets(ln,sizeof ln,sf)){ unsigned a;
+                  if(sscanf(ln,"Uid: %u",&a)==1) suid=(uid_t)a; else if(sscanf(ln,"Gid: %u",&a)==1) sgid=(gid_t)a; }
+              fclose(sf); } }
+    if(suid==(uid_t)-1 || sgid==(gid_t)-1){
+        snprintf(g_pd_why,sizeof g_pd_why,"%s",g_ascii?"server account unknown - paramdump skipped":"서버 계정 미상 — paramdump 생략");
+        g_pd_state=PD_SKIPPED; return NULL; }
     snprintf(bin,sizeof bin,"%s/bin/cubrid",root);
     snprintf(envc,sizeof envc,"CUBRID=%s",cub);
     snprintf(envd,sizeof envd,"CUBRID_DATABASES=%s",dbs);
@@ -892,6 +919,13 @@ static FILE *paramdump_start(int spid,const char *db){
         setpgid(0,0);                            /* Own pgid, so killing takes the grandchildren too */
         close(fd[0]);
         dup2(fd[1],STDOUT_FILENO); dup2(fd[1],STDERR_FILENO); close(fd[1]);   /* the error line is the reason */
+        { int nul=open("/dev/null",O_RDONLY); if(nul>=0){ dup2(nul,STDIN_FILENO); close(nul); } }
+        /* Nothing of ours reaches the child: /proc/<target>/mem, pagemap, recordings */
+        { DIR *dd=opendir("/proc/self/fd"); struct dirent *de; int keep=dd?dirfd(dd):-1;
+          if(dd){ while((de=readdir(dd))){ int f=atoi(de->d_name); if(f>2 && f!=keep) close(f); } closedir(dd); } }
+        if(geteuid()==0 && suid!=0){
+            if(setgroups(0,NULL)!=0 || setgid(sgid)!=0 || setuid(suid)!=0 || getuid()!=suid) _exit(126);
+        }
         putenv(envc); if(dbs[0]) putenv(envd); putenv(envl);
         /* -C: client-server only, never opening a stopped database stand-alone */
         char *av[5]; av[0]=bin; av[1]=(char*)"paramdump"; av[2]=(char*)"-C"; av[3]=(char*)db; av[4]=NULL;
@@ -900,7 +934,8 @@ static FILE *paramdump_start(int spid,const char *db){
     }
     close(fd[1]);
     setpgid(pid,pid);                            /* Race guard: the parent sets it once too */
-    { int fl=fcntl(fd[0],F_GETFL,0); if(fl>=0) fcntl(fd[0],F_SETFL,fl|O_NONBLOCK); }
+    { int fl=fcntl(fd[0],F_GETFL,0); if(fl>=0) fcntl(fd[0],F_SETFL,fl|O_NONBLOCK);
+      fcntl(fd[0],F_SETFD,FD_CLOEXEC); }
     g_pd_pid=pid; g_pd_used=0; g_pd_state=PD_RUNNING; g_pd_deadline=now_ms()+PD_WAIT_MS;
     return fdopen(fd[0],"r");
 }
@@ -2515,7 +2550,7 @@ static void pg_recount(void){
 static int pm_present(int pid,unsigned long addr){
     static int fd=-1, fpid=-1; static uint64_t blk[512]; static long bno=-1;
     if(fpid!=pid){ if(fd>=0) close(fd); char p[64]; snprintf(p,sizeof p,"/proc/%d/pagemap",pid);
-                   fd=open(p,O_RDONLY); fpid=pid; bno=-1; }
+                   fd=open(p,O_RDONLY|O_CLOEXEC); fpid=pid; bno=-1; }
     if(fd<0) return -1;
     unsigned long pg=addr/4096; long b=(long)(pg/512);
     if(b!=bno){ if(pread(fd,blk,sizeof blk,(off_t)b*(off_t)sizeof blk)!=(ssize_t)sizeof blk) return -1; bno=b; }
@@ -6972,9 +7007,10 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                 P0->pid=P->pid;
                 /* Configuration is per instance too: cubrid.conf now so this frame has it, then
                    the new server's applied values (harvested next frame) */
-                { const char *cub=getenv("CUBRID");
+                { char cub[512]="";
                   g_pagesize=0;
-                  if(cub && *cub) params_from_conf(cub,keep);
+                  if(newpid>=0 && !srv_env(newpid,"CUBRID",cub,sizeof cub)) (void)srv_root(newpid,cub,sizeof cub);
+                  if(cub[0]) params_from_conf(cub,keep);
                   if(g_pagesize<=0) g_pagesize=16384;
                   paramdump_abort(pd);
                   if(newpid>=0) *pd=paramdump_start(newpid,keep); }
