@@ -810,7 +810,7 @@ static int pids_headroom_ok(char *why,size_t wn){
         if(read_file(CURP[i],b,sizeof b)<=0) continue;
         long cu=strtol(b,NULL,10); if(cu<0) continue;
         if(mx-cu < PD_PIDS_MARGIN){
-            snprintf(why,wn,"pids 여유 %ld (한도 %ld) — paramdump 생략",mx-cu,mx);
+            snprintf(why,wn,g_ascii?"pids headroom %ld (limit %ld) - paramdump skipped":"pids 여유 %ld (한도 %ld) — paramdump 생략",mx-cu,mx);
             return 0;
         }
         return 1;
@@ -908,12 +908,12 @@ static FILE *paramdump_start(int spid,const char *db){
       snprintf(envl,sizeof envl,"LD_LIBRARY_PATH=%s/lib%s%s",
                root, (old&&*old)?":":"", (old&&*old)?old:""); }
     int fd[2];
-    if(pipe(fd)<0){ snprintf(g_pd_why,sizeof g_pd_why,"pipe 실패: %s",strerror(errno));
+    if(pipe(fd)<0){ snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"pipe failed: %s":"pipe 실패: %s",strerror(errno));
                     g_pd_state=PD_SKIPPED; return NULL; }
     pid_t pid=fork();
     if(pid<0){ /* EAGAIN means the host process limit; passing over it silently would leave no way
                   to tell why the parameters are empty. */
-               snprintf(g_pd_why,sizeof g_pd_why,"fork 실패: %s",strerror(errno));
+               snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"fork failed: %s":"fork 실패: %s",strerror(errno));
                close(fd[0]); close(fd[1]); g_pd_state=PD_SKIPPED; return NULL; }
     if(pid==0){                                  /* Child */
         setpgid(0,0);                            /* Own pgid, so killing takes the grandchildren too */
@@ -2497,13 +2497,38 @@ static void vm_gather(int pid,const uint64_t*addr,int n,size_t each,unsigned cha
 }
 
 static int cap_turnover_from_dump(void);   /* Must be read as the baseline before the dump is overwritten */
+/* Output files a user names.  Never through a symlink, never into someone else's file: run as
+   root, following one would let any account that can plant a name truncate or write a file. */
+static int g_rec_overwrite=0;      /* --record-overwrite: replace an existing recording of ours */
+static FILE *out_open(const char *path,int overwrite,char *why,size_t wn){
+    int fd=open(path,O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC|(overwrite?0:O_EXCL),0600);
+    if(fd<0){
+        if(errno==EEXIST) snprintf(why,wn,"%s",g_ascii?"already exists (--record-overwrite replaces it)":"이미 있음 (덮어쓰려면 --record-overwrite)");
+        else if(errno==ELOOP) snprintf(why,wn,"%s",g_ascii?"is a symbolic link - not followed":"심볼릭 링크 — 따라가지 않음");
+        else snprintf(why,wn,"%s",strerror(errno));
+        return NULL; }
+    struct stat st;
+    if(fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_uid!=geteuid()){
+        snprintf(why,wn,"%s",g_ascii?"not a regular file of this account - not replaced":"이 계정의 일반 파일이 아님 — 덮어쓰지 않음");
+        close(fd); return NULL; }
+    if(ftruncate(fd,0)!=0){ snprintf(why,wn,"%s",strerror(errno)); close(fd); return NULL; }
+    FILE *f=fdopen(fd,"w"); if(!f){ snprintf(why,wn,"%s",strerror(errno)); close(fd); }
+    return f;
+}
+/* A fresh temporary beside path for write-then-rename: unique, created exclusively, no symlink */
+static FILE *tmp_create(const char *path,char *tmp,size_t tn){
+    snprintf(tmp,tn,"%s.%d.tmp",path,(int)getpid());
+    int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(fd<0) return NULL;
+    FILE *f=fdopen(fd,"w"); if(!f){ close(fd); unlink(tmp); }
+    return f;
+}
 /* Whether this frame replaced the --bcb-dump file, and why not: --bcb-dump alone must not
    report a snapshot it did not write */
 static int g_bcb_saved=0; static char g_bcb_why[200]="";
 static void pgbuf_dump(const char*db){
     if(!g_bcb_dump[0]||!PG.ok) return;
-    char tmp[300]; snprintf(tmp,sizeof tmp,"%s.tmp",g_bcb_dump);
-    FILE*f=fopen(tmp,"wb");
+    char tmp[320]; FILE*f=tmp_create(g_bcb_dump,tmp,sizeof tmp);
     if(!f){ snprintf(g_bcb_why,sizeof g_bcb_why,"%s %s",g_ascii?"cannot create the temporary file:":"임시 파일 생성 실패:",strerror(errno)); return; }
     struct { char magic[8]; uint32_t version, reclen; int64_t ts_sec, ts_nsec;
              int32_t nbuf, nrec, dirty, pagesize;
@@ -4061,8 +4086,7 @@ static void cap_ceiling(void){
     }
     if(sat && cur_iops>0){
         if(g_cap_state[0]){    /* Writes only to our own file; the target process and DB are untouched */
-            char tmp[300]; snprintf(tmp,sizeof tmp,"%s.tmp",g_cap_state);
-            FILE*f=fopen(tmp,"w");
+            char tmp[320]; FILE*f=tmp_create(g_cap_state,tmp,sizeof tmp);
             if(f){ fprintf(f,"# cub_top capacity ceilings by device and profile (block size x read ratio)\n");
                    for(int i=0;i<g_capdev_n;i++) for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
                        cap_cell_t*c=&g_capdev[i].m[b][r];
@@ -6426,8 +6450,8 @@ static double rp_time(const char *txt){
    cannot drift from those outputs. */
 static void rp_record(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int with_a,const char*ts,long tsec){
     if(!RPR.f){
-        RPR.f=fopen(g_rec_path,"we");
-        if(!RPR.f){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,strerror(errno));
+        char why[160]; RPR.f=out_open(g_rec_path,g_rec_overwrite,why,sizeof why);
+        if(!RPR.f){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,why);
                     g_rec_path=NULL; return; }
     }
     FILE *tf=tmpfile(); if(!tf) return;
@@ -7152,7 +7176,8 @@ static const opt_t OPTS[]={
  {"--capacity-state","F","용량 상한(포화 시 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정"},
  {"-p, --plot",  "", "시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)"},
  {"--interval",  "S","샘플 창(초, 0.05~3600, 기본 0.5)"},
- {"--record", "F", "라이브(-b/-p) 프레임을 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가)"},
+ {"--record", "F", "라이브(-b/-p) 프레임을 새 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가). 이미 있거나 심볼릭 링크면 거부"},
+ {"--record-overwrite","","--record 의 기존 파일을 덮어씀 (이 계정 소유의 일반 파일일 때만)"},
  {"--replay", "F", "기록 파일 F 를 재생 (서버·/proc 불필요, -b/-p 키 그대로)"},
  {"--replay-speed", "N", "재생 배속 (1=실측 간격, 0=최대속도, 기본 1)"},
  {"--dump-hist", "", "히스토리 1샘플을 stderr 로 덤프 (수치 대조·진단용)"},
@@ -7827,6 +7852,7 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"-b")||!strcmp(argv[i],"-i")||!strcmp(argv[i],"--live")) live=1;
         else if(!strcmp(argv[i],"-p")||!strcmp(argv[i],"--plot")){ live=1; view0=1; }
         else if(!strcmp(argv[i],"--record")&&i+1<argc) g_rec_path=argv[++i];
+        else if(!strcmp(argv[i],"--record-overwrite")) g_rec_overwrite=1;
         else if(!strcmp(argv[i],"--replay")&&i+1<argc) g_rep_path=argv[++i];
         else if(!strcmp(argv[i],"--replay-speed")&&i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_rep_speed)) return 2; i++; }
         else if(!strcmp(argv[i],"--dump-hist")) dump_hist=1;
@@ -7912,8 +7938,8 @@ int main(int argc,char **argv){
        first frame, so a path that cannot be written fails the run instead of a capture
        that reports success with nothing written. */
     if(g_rec_path){
-        FILE *rf=fopen(g_rec_path,"we");
-        if(!rf){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,strerror(errno)); return 2; }
+        char why[160]; FILE *rf=out_open(g_rec_path,g_rec_overwrite,why,sizeof why);
+        if(!rf){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,why); return 2; }
         RPR.f=rf;
     }
     const char *cub=getenv("CUBRID");
