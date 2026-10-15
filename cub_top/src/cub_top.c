@@ -3946,6 +3946,7 @@ static int  g_rp_have_a=0;            /* Replay: the frame carries method A (mea
 /* v as printf("%.*f") prints it: a key derived from printed keys then replays exactly */
 static double rnd_as_printed(double v,int dec){ char b[64]; snprintf(b,sizeof b,"%.*f",dec,v); return strtod(b,NULL); }
 static const char *g_rec_path=NULL;   /* --record FILE  */
+static char g_rec_err[160]="";        /* Why --record stopped: shown on screen, exit status 1 */
 static const char *g_rep_path=NULL;   /* --replay FILE  */
 static double g_rep_speed=1.0;        /* --replay-speed (0 = as fast as possible) */
 /* --capacity-state FILE, for remembering ceilings */
@@ -5203,6 +5204,8 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                                  g_ascii?"REPLAY":"재생", g_rep_i+1, g_rep_n);
         else            snprintf(lt,sizeof lt,"%s %.0fms",g_ascii?"collect":"수집",work_ms);
         cv_put(1,y,lt,g_replaying?"1;38;5;214":"38;5;244");
+        if(g_rec_err[0]){ char rw[200]; snprintf(rw,sizeof rw,"%s %s",g_ascii?"! --record stopped:":"⚠ --record 중단:",g_rec_err);
+                          cv_put(3+disp_w(lt),y,cutf(rw,W-6-disp_w(lt)-disp_w(t1)),"1;38;5;203"); }
         cv_put(W-1-disp_w(t1),y,t1,"38;5;250");
         y+=1;
     }
@@ -6342,6 +6345,10 @@ static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
         if(rts){ struct tm tmv; rep_localtime(rts,&tmv); strftime(when,sizeof when,"%Y-%m-%d %H:%M:%S",&tmv); }
         snprintf(t2,sizeof t2,"%s %s",g_ascii?"recorded":"기록",when);
     }
+    if(g_rec_err[0]){   /* the recording stopped: said where the eye is, not only at exit */
+        char rw[200]; snprintf(rw,sizeof rw,"%s %s",g_ascii?"! --record stopped:":"⚠ --record 중단:",g_rec_err);
+        snprintf(t2,sizeof t2,"%.*s",(int)sizeof t2-1,rw);
+    }
 
     if(P->pid<0){
         cv_put(2,y,g_ascii?"cub_server is not running — no server timeseries":
@@ -6776,33 +6783,49 @@ static double rp_time(const char *txt){
 /* Append one frame to the recording.  The frame is produced by render_terse() and
    converted by json_from_terse(), the same pair -t and --json use, so a recording
    cannot drift from those outputs. */
+/* Recording stops at the first failure and says so: a capture that ends with status 0
+   but a short or empty file would be trusted. */
+static void rec_fail(const char *what,int e){
+    if(!g_rec_err[0]) snprintf(g_rec_err,sizeof g_rec_err,"%s: %s",what,strerror(e?e:EIO));
+    if(RPR.f){ fclose(RPR.f); RPR.f=NULL; }
+    g_rec_path=NULL;
+}
+/* The frame is rendered in memory (memfd, else a temporary file) - not on a /tmp that may be full */
+static FILE *mem_file(void){
+#ifdef __NR_memfd_create
+    int fd=(int)syscall(__NR_memfd_create,"cub_top",1u /* MFD_CLOEXEC */);
+    if(fd>=0){ FILE *f=fdopen(fd,"w+"); if(f) return f; close(fd); }
+#endif
+    return tmpfile();
+}
 static void rp_record(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int with_a,const char*ts,long tsec){
     if(!RPR.f){
         char why[160]; RPR.f=out_open(g_rec_path,g_rec_overwrite,why,sizeof why);
         if(!RPR.f){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,why);
                     g_rec_path=NULL; return; }
     }
-    FILE *tf=tmpfile(); if(!tf) return;
+    FILE *tf=mem_file(); if(!tf){ rec_fail(g_ascii?"no buffer for the frame":"프레임 버퍼 없음",errno); return; }
     fflush(stdout);
-    int save=dup(1); if(save<0){ fclose(tf); return; }
-    if(dup2(fileno(tf),1)<0){ close(save); fclose(tf); return; }
+    int save=dup(1); if(save<0){ int e=errno; fclose(tf); rec_fail("dup",e); return; }
+    if(dup2(fileno(tf),1)<0){ int e=errno; close(save); fclose(tf); rec_fail("dup2",e); return; }
     render_terse(P,M,T,with_a,IO->rb,IO->wb,IO->ri,IO->wi,
                  IO->absorb_ok?IO->absorb:-1.0,IO->blkpct,IO->devnm,IO->devutil,IO->devr,
                  ts,tsec,IO->rchar,IO->minflt,IO->majflt,IO->cpu_pct,IO->ncpu,
                  IO->d_thr,IO->n_thr);
-    fflush(stdout); dup2(save,1); close(save);
+    int werr = fflush(stdout)!=0 || ferror(stdout); int e=errno;
+    clearerr(stdout); dup2(save,1); close(save);
+    if(werr){ fclose(tf); rec_fail(g_ascii?"rendering the frame":"프레임 렌더링",e); return; }
     /* One object per line: json_from_terse writes it multi-line, so newlines are folded. */
-    FILE *lf=tmpfile();
-    if(lf){
-        json_from_terse(tf,lf);
-        long n=ftell(lf); fseek(lf,0,SEEK_SET);
-        char *b=(n>0)?malloc((size_t)n+1):NULL;   /* ftell -1 would make this malloc(0) */
-        if(b){ size_t rd=fread(b,1,(size_t)n,lf); b[rd]=0;
-               for(size_t i=0;i<rd;i++) if(b[i]=='\n') b[i]=' ';
-               fprintf(RPR.f,"%s\n",b); fflush(RPR.f); RPR.n++; free(b); }
-        fclose(lf);
-    }
-    fclose(tf);
+    char *b=NULL; size_t bn=0; FILE *lf=open_memstream(&b,&bn);
+    if(!lf){ e=errno; fclose(tf); rec_fail("open_memstream",e); return; }
+    json_from_terse(tf,lf); fclose(tf);
+    if(fclose(lf)!=0 || !b || !bn){ e=errno; free(b); rec_fail(g_ascii?"converting the frame":"프레임 변환",e); return; }
+    for(size_t i=0;i<bn;i++) if(b[i]=='\n') b[i]=' ';
+    errno=0;
+    int bad = fputs(b,RPR.f)<0 || fputc('\n',RPR.f)==EOF || fflush(RPR.f)!=0 || ferror(RPR.f);
+    e=errno; free(b);
+    if(bad){ rec_fail(g_ascii?"writing":"쓰기",e); return; }
+    RPR.n++;
 }
 
 static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
@@ -8423,6 +8446,14 @@ int main(int argc,char **argv){
         }
         tui_leave();
         if(g_mem_fd>=0) close(g_mem_fd);
+        if(RPR.f){ FILE *rf=RPR.f; int e=0; RPR.f=NULL;
+                   if(fflush(rf)!=0 || ferror(rf)) e=errno?errno:EIO;
+                   if(fclose(rf)!=0 && !e) e=errno?errno:EIO;
+                   if(e) rec_fail(g_ascii?"closing":"닫기",e); }
+        if(g_rec_err[0]){
+            fprintf(stderr,g_ascii?"cub_top: --record stopped after %d frame(s) - %s\n"
+                                  :"cub_top: --record 가 %d 프레임 뒤 중단됨 — %s\n",RPR.n,g_rec_err);
+            return 1; }
         return 0;
     }
 

@@ -18,6 +18,8 @@
 # unasked: a recording is created new (0600), an existing one is replaced only with
 # --record-overwrite and only when it is this account's regular file.  Run as root,
 # following a planted link would truncate whatever it points at.
+# A recording that cannot be written (ENOSPC, EIO, a file size limit) stops with a reason on
+# screen and on stderr and exit status 1 - never a status 0 over a short or empty file.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR"); BIN="$ROOT/cub_top"
 TMP=${TMPDIR:-/tmp}/cub_top-outfile.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
 bad=0
@@ -63,5 +65,17 @@ if "$BIN" -d 2>/dev/null | grep -q '^pgbuf.enabled=1'; then
     left=$(ls "$TMP" | grep -c '\.tmp$')
     if [ "$left" = 0 ]; then ok "no temporary left behind"; else no "$left temporary file(s) left"; fi
 else echo "  SKIP --bcb-dump (no buffer pool readable)"; fi
+
+# A write that fails: a file size limit with SIGXFSZ ignored makes write() return EFBIG
+lim="$TMP/limited.jsonl"
+sh -c "trap '' XFSZ; ulimit -f 40; exec '$BIN' -b --interval 0.3 --record '$lim'" </dev/null >/dev/null 2>"$TMP/lerr" & p=$!
+sleep 3; kill $p 2>/dev/null; wait $p; rc=$?
+nl=$(grep -c . "$lim" 2>/dev/null)
+if [ "$rc" = 1 ] && grep -q -- '--record' "$TMP/lerr"; then ok "write failure: exit 1, \"$(tail -1 "$TMP/lerr" | sed 's/^cub_top: //')\""
+else no "write failure: exit $rc, stderr '$(tail -1 "$TMP/lerr")'"; fi
+"$BIN" --replay "$lim" -d --replay-speed 0 >"$TMP/lrp" 2>"$TMP/lrperr"
+nf=$(grep -c '^ts=' "$TMP/lrp")
+if [ "$nf" -ge 1 ] && ! grep -q '^ts="1970' "$TMP/lrp"; then ok "the frames written before it replay ($nf), a cut last line is skipped"
+else no "replaying the stopped recording: $nf frame(s)"; fi
 
 if [ $bad = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
