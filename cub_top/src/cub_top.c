@@ -3887,7 +3887,12 @@ typedef struct {
 static hsam_t HS[HIST_MAX]; static int HN=0, HCAP=HIST_MAX;
 
 /* One place for the value sources.  Region values go through the sr_*() name lookups without exception; never by index. */
+static int g_hist_pid=-2; static unsigned g_hist_gen=0;   /* The process the history belongs to */
 static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const iod_t*IO){
+    /* History is one process's: after a switch, a restart or the server going down, the old
+       samples would be compared with the new process (a "server -X GB" drop that is only a
+       restart, a flush minimum and plots mixing two processes).  Live and in a replay alike. */
+    if(P->pid!=g_hist_pid || g_inst_gen!=g_hist_gen){ HN=0; g_hist_pid=P->pid; g_hist_gen=g_inst_gen; }
     if(HN>=HCAP){ memmove(HS,HS+1,sizeof(hsam_t)*(HCAP-1)); HN=HCAP-1; }
     hsam_t*s=&HS[HN++];
     memset(s,0,sizeof *s);
