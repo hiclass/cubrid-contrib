@@ -182,7 +182,7 @@ CUBRID 판마다 구조체 레이아웃이 달라(실측: `pgbuf_bcb` 11.5=144B 
 |---|---|---|
 | 수요 | 장치 IOPS(`diskstats` 델타) · 인스턴스 IOPS(`/proc/<pid>/io`) · 읽기/쓰기 B/s | 장치는 호스트 전체 값 |
 | 지연 | `await = (rd_ticks+wr_ticks)/(rd_ios+wr_ios)` · 읽기/쓰기 분리 · 큐 깊이 | iostat와 같은 정의 |
-| 상한 | **포화 순간**(사용률 90%↑ 또는 큐≥1 & await≥1ms)의 IOPS를 기억 | `--capacity-state`로 보존 |
+| 상한 | **큐가 실제로 쌓인 순간**(평균 큐 깊이 ≥ 4)의 IOPS를 장치 고유 ID(wwid·serial·dm uuid + 크기)별로 기억. 큐 ≈1 의 직렬 스트림은 사용률 100%여도 지연을 잰 것이라 기록하지 않고, 대기가 길면 헤드룸보다 먼저 "지연 병목"으로 판정 | `--capacity-state`로 보존 |
 | 헤드룸 | 현재 IOPS ÷ 상한 | 상한 미관측이면 그 사실을 표기 |
 | 버퍼 효율 | 엔진 카운터가 돌면 `1 − ioreads/fetches`, 아니면 **BCB 회전율·재적재율** | 출처를 항상 병기 |
 

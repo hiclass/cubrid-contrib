@@ -3859,10 +3859,37 @@ typedef struct { double iops,bps,util,qd,await_ms; time_t when; int valid; } cap
 /* Ceilings are per device: the busiest device can change between frames, and a fast
    device's ceiling says nothing about a slow one.  g_cap_mtx is the frame's device. */
 #define CAPDEV_N 16
-typedef struct { char name[32]; cap_cell_t m[CAP_BS_N][CAP_RW_N]; } cap_dev_t;
+typedef struct { char name[160]; cap_cell_t m[CAP_BS_N][CAP_RW_N]; } cap_dev_t;   /* name: dev_key() */
 static cap_dev_t g_capdev[CAPDEV_N]; static int g_capdev_n=0;
 static cap_cell_t g_cap_none[CAP_BS_N][CAP_RW_N];   /* No device (or table full): stays empty */
 static cap_cell_t (*g_cap_mtx)[CAP_RW_N]=g_cap_none;
+/* A device's stable identity for remembered ceilings: kernel names (sdX, nvme0n1, dm-N) move
+   between boots and LVM activations.  dm uuid, wwid or serial, then "@<sectors>"; a partition
+   is its disk's identity plus ":p<n>".  With no identity the kernel name stands, sized. */
+static const char *dev_key(const char *nm){
+    static char last[64]="", key[160]="";
+    if(!nm||!nm[0]) return nm;
+    if(!strcmp(last,nm)) return key;
+    static char sp[PATH_MAX+64], rp[PATH_MAX]; char id[128]="", part[16]=""; long long sz=0;   /* realpath writes up to PATH_MAX */
+    snprintf(sp,sizeof sp,"/sys/class/block/%s",nm);
+    if(!realpath(sp,rp)) snprintf(rp,sizeof rp,"%.4000s",sp);
+    { char b[64]; snprintf(sp,sizeof sp,"%s/size",rp); if(read_file(sp,b,sizeof b)>0) sz=atoll(b);
+      snprintf(sp,sizeof sp,"%s/partition",rp); if(read_file(sp,b,sizeof b)>0){
+          snprintf(part,sizeof part,":p%d",atoi(b)); char *sl=strrchr(rp,'/'); if(sl) *sl=0; } }
+    static const char *ID[]={"dm/uuid","wwid","device/wwid","device/serial"};
+    for(int i=0;i<4 && !id[0];i++){
+        char b[128]; snprintf(sp,sizeof sp,"%s/%s",rp,ID[i]);
+        if(read_file(sp,b,sizeof b)<=0) continue;
+        int k=0, gap=0;
+        for(char *q=b;*q && k<(int)sizeof id-1;q++){
+            if(*q==' '||*q=='\t'||*q=='\n'){ gap=1; continue; }
+            if(gap && k){ id[k++]='_'; } gap=0; id[k++]=*q; }
+        id[k]=0; }
+    snprintf(key,sizeof key,"%s%s@%lld",id[0]?id:nm,part,sz);
+    snprintf(last,sizeof last,"%s",nm);
+    return key;
+}
+static char g_cap_devid[160]="";   /* dev_key of the frame's device, as recorded */
 static cap_dev_t *cap_dev_get(const char *nm){
     if(!nm||!nm[0]) return NULL;
     for(int i=0;i<g_capdev_n;i++) if(!strcmp(g_capdev[i].name,nm)) return &g_capdev[i];
@@ -4042,11 +4069,11 @@ static void cap_ceiling(void){
         FILE*f=fopen(g_cap_state,"r");
         if(f){ char ln[256];
                while(fgets(ln,sizeof ln,f)){
-                   int b=0,r=0; double io=0,bp=0,ut=0,qd=0,aw=0; long long w=0; char dn[32];
+                   int b=0,r=0; double io=0,bp=0,ut=0,qd=0,aw=0; long long w=0; char dn[160];
                    cap_dev_t *d;
                    if(ln[0]=='#') continue;
                    /* A line without a device name cannot be attributed and is not read */
-                   if(sscanf(ln,"cell %31s %d %d iops=%lf bps=%lf util=%lf qd=%lf await=%lf when=%lld",
+                   if(sscanf(ln,"cell %159s %d %d iops=%lf bps=%lf util=%lf qd=%lf await=%lf when=%lld",
                              dn,&b,&r,&io,&bp,&ut,&qd,&aw,&w)>=7
                       && b>=0 && b<CAP_BS_N && r>=0 && r<CAP_RW_N && (d=cap_dev_get(dn))){
                        cap_cell_t*c=&d->m[b][r];
@@ -4057,21 +4084,21 @@ static void cap_ceiling(void){
                fclose(f); }
         loaded=1;
     }
-    { cap_dev_t *d=cap_dev_get(CAP2.dev); g_cap_mtx = d ? d->m : g_cap_none; }
+    { const char *k=dev_key(CAP2.dev); snprintf(g_cap_devid,sizeof g_cap_devid,"%s",k?k:"");
+      cap_dev_t *d=cap_dev_get(k); g_cap_mtx = d ? d->m : g_cap_none; }
     /* This frame's I/O profile: mean request size and read share */
     { double ios=CAP2.dev_iops, byt=CAP2.dev_rbps+CAP2.dev_wbps;
       CAP2.req_kb = (ios>0) ? byt/ios/1024.0 : 0;
       CAP2.read_ratio = (byt>0) ? CAP2.dev_rbps/byt : 0.5;
       CAP2.prof_bs = cap_bs_idx(CAP2.req_kb);
       CAP2.prof_rw = cap_rw_idx(CAP2.read_ratio); }
-    /* Update the observed ceiling from either: a saturated frame (utilization >= 90%),
-         closest to the true ceiling; or a frame where the queue began to build
-         (depth >= 1), which approximates it on storage that never reaches 90%
-         (network, multi-queue NVMe).  Only the current profile cell is updated -
-         a ceiling measured at 128KB sequential would make the 4KB random cell
-         report false headroom. */
+    /* The observed ceiling is updated only where a queue really built (depth >= 4): one I/O kept
+       outstanding already shows util ~100% and depth ~1, and that serial stream measures the
+       latency, not what the device can do in parallel.  Only the current profile cell is
+       updated - a ceiling measured at 128KB sequential would make the 4KB random cell
+       report false headroom. */
     double cur_iops=CAP2.dev_iops;
-    int sat = (CAP2.dev_util>=90.0) || (CAP2.qdepth>=1.0 && CAP2.await_ms>=1.0);
+    int sat = CAP2.qdepth>=4.0;
     { cap_cell_t*c=&g_cap_mtx[CAP2.prof_bs][CAP2.prof_rw];
       if(sat && cur_iops>c->iops && g_cap_mtx!=g_cap_none){
           c->iops=cur_iops; c->bps=CAP2.dev_rbps+CAP2.dev_wbps; c->util=CAP2.dev_util;
@@ -4590,6 +4617,12 @@ static void vd_capacity(char*o,size_t n,const char**col){
         snprintf(o,n,g_ascii?"! capacity aggregation skipped this frame (%.0fms > %.0fms) - values withheld"
                             :"⚠ 이 프레임 용량 취합 생략 (%.0fms > %.0fms) — 값 보류",c->ms,(double)CAP_BUDGET_MS);
         return; }
+    /* A serial stream (depth < 2) waiting long is latency-bound whatever the headroom says:
+       more IOPS do not shorten each wait, faster storage or more parallel requests do */
+    if(c->qdepth>=0 && c->qdepth<2.0 && c->await_ms>=20.0 && c->dev_iops>=10){ *col=VD_WARN;
+        snprintf(o,n,g_ascii?"! await %.1fms at %.0f IOPS with queue %.1f (serial) - latency-bound: faster storage or more parallel requests, not more IOPS"
+                            :"⚠ 대기 %.1fms·IOPS %.0f·큐 %.1f(직렬) — 지연 병목: IOPS 증설이 아니라 더 빠른 스토리지 또는 병렬 요청",
+                 c->await_ms,c->dev_iops,c->qdepth); return; }
     /* Headroom against the ceiling is the strongest conclusion, but headroom alone
        does not establish a limit - the ceiling is an observation from some other
        moment.  A real limit comes with the device falling behind: await >= 20ms or
@@ -6284,6 +6317,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                CAP2.req_kb,CAP2.read_ratio,CAP_BS_NAME[CAP2.prof_bs],CAP_RW_NAME[CAP2.prof_rw]);
         { int nc=0; for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++) if(g_cap_mtx[b][r].valid) nc++;
           printf("cap.ceiling_cells=%d\n",nc);
+          if(g_cap_devid[0]) printf("cap.ceiling_device_id=\"%s\"\n",g_cap_devid);
           for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
               const cap_cell_t*cc=&g_cap_mtx[b][r]; if(!cc->valid) continue;
               printf("cap.cell%d%d.profile=\"%s/%s\" cap.cell%d%d.iops=%.0f cap.cell%d%d.util_pct=%.1f"
@@ -6725,6 +6759,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
        a verdict compares against the cell in force, not a single number. */
     /* The cells are the recorded device's, restored into that device's matrix */
     snprintf(CAP2.dev,sizeof CAP2.dev,"%s",IO->devnm);
+    rp_str(t,"cap.ceiling_device_id",g_cap_devid,sizeof g_cap_devid);
     { cap_dev_t *d=cap_dev_get(IO->devnm); g_cap_mtx = d ? d->m : g_cap_none; }
     if(g_cap_mtx!=g_cap_none) memset(g_cap_mtx,0,sizeof(cap_cell_t)*CAP_BS_N*CAP_RW_N);
     for(int bs=0;bs<CAP_BS_N && g_cap_mtx!=g_cap_none;bs++) for(int rw=0;rw<CAP_RW_N;rw++){
