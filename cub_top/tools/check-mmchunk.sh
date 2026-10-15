@@ -22,6 +22,8 @@
 # merged into the same VMA in front or behind; zeroed anonymous memory stays 0.
 # Size labels say what the size is: lea (db_private_alloc) grows by malloc(32K x n) and its
 # base is malloc(64K), in an arena or mmapped (page-rounded); a 96B chunk is any 73-88B request.
+# A walk stopped by the per-region chunk bound reports the rest as unwalked (not as unexplained),
+# and thread stacks are not probed.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC=${1:-"$ROOT/src/cub_top.c"}
 TMP=${TMPDIR:-/tmp}/cub_top-mmchunk.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
@@ -83,4 +85,29 @@ int main(void){
 }
 C
 gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -I "$ROOT/src" -o "$TMP/t" "$TMP/t.c" -lm -lpthread 2>"$TMP/cc.err" || { cat "$TMP/cc.err"; echo "→ FAIL (compile failed)"; exit 1; }
-if "$TMP/t"; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
+rc=0; "$TMP/t" || rc=1
+# Bounds: a region of 32B chunks walked with the chunk bound lowered to 1000; a stack is skipped
+sed -e 's/^#define WALK_MAX_CHUNKS 5000000L /#define WALK_MAX_CHUNKS 1000L /' "$SRC" > "$TMP/src2.c"
+grep -q '^#define WALK_MAX_CHUNKS 1000L ' "$TMP/src2.c" || { echo "→ FAIL (constant not found)"; exit 1; }
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/src2.c" > "$TMP/b.c"
+cat >> "$TMP/b.c" <<'C'
+int main(void){
+    int bad=0; CAP.vm_readv=1;
+    size_t n=1u<<20; unsigned long *r=mmap(NULL,n,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+    for(size_t o=0;o<n/8;o+=4){ r[o]=0; r[o+1]=32|1; }          /* 32768 chunks of 32B */
+    unsigned long s0=(unsigned long)(uintptr_t)r, e0=s0+n;
+    memset(&A,0,sizeof A); walk_region(getpid(),s0,e0);
+    int ok = A.chunks==1000 && A.trunc==1 && A.unwalked==(double)(n-1000*32);
+    printf("  %s   chunk bound hit (1000 of 32768): walked %ld, truncated %ld, unwalked %.0f (want %zu)\n",ok?"ok  ":"FAIL",A.chunks,A.trunc,A.unwalked,n-1000*32); bad|=!ok;
+    static proc_t P; P.pid=getpid(); P.nreg=1;
+    P.reg[0].start=s0; P.reg[0].end=e0; snprintf(P.reg[0].perm,sizeof P.reg[0].perm,"rw-p");
+    P.reg[0].is_stack=1; method_a(&P);
+    ok = A.chunks==0; printf("  %s   a thread stack is not probed: %ld chunk(s)\n",ok?"ok  ":"FAIL",A.chunks); bad|=!ok;
+    P.reg[0].is_stack=0; method_a(&P);
+    ok = A.chunks==1000; printf("  %s   the same region not a stack: %ld chunk(s) walked\n",ok?"ok  ":"FAIL",A.chunks); bad|=!ok;
+    return bad;
+}
+C
+gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/b" "$TMP/b.c" -lm -lpthread 2>"$TMP/cc2.err" || { cat "$TMP/cc2.err"; echo "→ FAIL (compile failed)"; exit 1; }
+"$TMP/b" || rc=1
+if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi

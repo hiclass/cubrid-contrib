@@ -169,6 +169,8 @@ LSA 는 `struct log_lsa { int64 pageid:48; int64 offset:16; }` 8바이트다(리
 
 ```
 1. /proc/<pid>/maps 에서 [heap] + 익명 rw 영역 수집
+   - 스레드 스택(가드 페이지 뒤 8MB 익명 영역)은 제외 — malloc 청크가 없고, 수백 개를 탐사하면 읽기만 늘고
+     스택 값을 청크 체인으로 오인할 수 있음
    - 단, data/log 버퍼로 매칭된 매핑은 제외 — pgbuf 풀도 내부적으로 malloc 청크라
      걷히기 때문에, 제외하지 않으면 region 귀속과 이중 계상됨
 2. 각 영역의 앞 128K 만 읽어 유효한 청크 체인의 시작점 탐색(휴리스틱 lock-on)

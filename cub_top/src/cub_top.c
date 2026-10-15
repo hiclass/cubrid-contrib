@@ -2408,6 +2408,7 @@ adopted:;
 #define CHUNK_MASK  (~(unsigned long)7)
 #define CHUNK_ALIGN (2*sizeof(size_t)-1)   /* 15 on x86_64, 7 on i386; generalizes the alignment check */
 #define ACAT_N 6
+#define WALK_MAX_CHUNKS 5000000L   /* per region, bounds the walk's time */
 static struct {
     long chunks; double total;
     double cat[ACAT_N];          /* Category total */
@@ -2478,7 +2479,7 @@ static void walk_region(int pid,unsigned long s,unsigned long e){
     const unsigned char *buf=head;
     long w=0;
     unsigned long prev_z=0;
-    while(o+16<=span && w<5000000){
+    while(o+16<=span && w<WALK_MAX_CHUNKS){
         if(o+16>boff+blen){
             /* If the previous chunk is larger than the window, fetch just the next 16B header.
                On a heap with many large chunks the windowed walk copies the whole heap
@@ -2496,6 +2497,8 @@ static void walk_region(int pid,unsigned long s,unsigned long e){
         A.cat[classify((long)z,(int)((*(const unsigned long*)(buf+o-boff+8)>>1)&1))]+=z;
         o+=z; w++;
     }
+    /* Stopped by the chunk bound, not by the region's end: the rest is unwalked, not unexplained */
+    if(w>=WALK_MAX_CHUNKS && o+16<=span){ A.trunc++; A.unwalked+=(double)(span-o); }
 }
 static const region_t *g_reg_db=NULL,*g_reg_lg=NULL;   /* Filled by classify_regions */
 
@@ -2970,6 +2973,9 @@ static void method_a(proc_t *P){
         if(!strchr(r->perm,'r')||!strchr(r->perm,'w')) continue;
         /* The data and log buffer mappings are already attributed as regions; counting them as heap would double-count */
         if(r==g_reg_db||r==g_reg_lg) continue;
+        /* Thread stacks hold no malloc chunks; probing each (hundreds of 8MB) costs reads and
+           can mistake stack words for a chunk chain */
+        if(r->is_stack) continue;
         walk_region(P->pid,r->start,r->end);
     }
 }
