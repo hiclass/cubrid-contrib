@@ -242,7 +242,9 @@ CUBRID의 내장 메모리 모니터(`cubrid memmon`)는 할당을 **소스 `파
 | 코어 분포 막대 | 칸<코어면 구간 최댓값 표시(포화 은폐 방지) — 칸 수에 코어 수를 곱해 읽지 말 것, 정확한 수는 `포화 N` |
 | pids 안전장치 | cgroup pids 여유 <64 면 paramdump 생략(`param.skipped_reason`) — 그 프레임은 설정 대비 판정 축이 빠진다 |
 | 재시작 재바인딩 | 같은 DB 이름의 새 pid 로만 재접속 — DB 이름이 바뀌면 수동 재실행 |
-| 버전 사다리 | ⓑ DWARF 는 심볼 있는 빌드에서만(스트립이면 ⓒ로). ⓒ 앵커 탐사는 **앵커가 있는 항목만**(pgbuf 게이트, lock num_trans, conn max) 개수로 — xcache/session/catalog 카운터는 앵커가 없어 탐사 불가. **10.0 은 xcache/fpcache 구조 자체가 부재**(10.2+ 도입, 소스 태그로 확인)라 해당 항목은 어떤 방법으로도 없음 — "정보 최대 동일"의 자연 상한 |
+| 심볼 이름 | 정확히 같은 이름, 또는 `이름.접미사`(`-flto` 의 `.lto_priv.N`)가 **하나뿐일 때**만 쓴다. 같은 이름의 접미사 객체가 둘 이상이면 서로 다른 객체라 어느 것도 쓰지 않는다. 함수·미정의 참조(`SHN_UNDEF`)는 제외 |
+| DWARF 형식 | 읽는 것: 압축되지 않은 `.debug_info`/`.debug_abbrev`/`.debug_str`(DWARF 2~5, `strp`·인라인 문자열). 읽지 않고 사유를 그렇게 내는 것: 압축 섹션(`-gz`, `SHF_COMPRESSED`)·구형 `.zdebug`, 별도 파일의 디버그 정보(`.gnu_debuglink`), split DWARF(`.dwo`), dwz 공유 파일(`.gnu_debugaltlink`), DWARF5 문자열 색인(`strx`). 압축이면 `objcopy --decompress-debug-sections` 로 풀어 `tools/dwoff` 로 표를 만들어 `--offsets` 로 주면 된다 |
+| 버전 사다리 | ⓑ DWARF 는 디버그 정보가 있는 빌드에서만(`--strip-debug` 면 ⓒ로). **`strip -s`(`.symtab` 제거)면 ⓒ도 불가** — `pgbuf_Pool`·`sessions`·`catalog_Hashmap`·`css_Num_*` 는 LOCAL 심볼이라 `.symtab` 에만 있고 `.dynsym` 에는 없다(`heapB.reason` 이 그렇게 말한다). ⓒ 앵커 탐사는 **앵커가 있는 항목만**(pgbuf 게이트, lock num_trans, conn max) 개수로 — xcache/session/catalog 카운터는 앵커가 없어 탐사 불가. **10.0 은 xcache/fpcache 구조 자체가 부재**(10.2+ 도입, 소스 태그로 확인)라 해당 항목은 어떤 방법으로도 없음 — "정보 최대 동일"의 자연 상한 |
 | 정적 바이너리 | 빌드 glibc 의 NT_GNU_ABI_TAG 커널 하한 상속(본 산출물 3.2.0) — CentOS 6 배포는 el6 환경 빌드 필요 |
 
 ## 10.0 힙 B 항목 한계 (offsets 표 사용 시)

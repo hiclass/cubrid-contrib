@@ -199,7 +199,8 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 L3 는 게이트를 통과해야 채택된다 — ① 심볼 존재 ② 루트 심볼 크기(ELF `st_size`) ③ 오프셋 정렬 ④ `paramdump` 교차검증
 (`pgbuf num_buffers == data_buffer_pages`) ⑤ `max_clients` 앵커. 하나라도 어긋나면 그 기능만 끄고 사유를 남긴다.
 오프셋은 `offsets/*.tbl`(10.0~11.5, 13종)에서 **같은 빌드**의 것을 쓰고, 없으면 그 환경의 DWARF 에서
-직접 추출하며(결과는 `/var/tmp/cub_top.dw-<uid>-<크기>-<수정시각>.tbl` 에 캐시 — 실행 사용자 소유이고
+직접 추출하며(100~200MB `.so` 에서 1~3초, 라이브에서는 낮은 우선순위의 자식 프로세스가 돌려 화면이 멈추지 않는다.
+결과는 `/var/tmp/cub_top.dw-<uid>-<build-id>.tbl` 에 캐시 — build-id 가 없으면 크기·수정시각, 실행 사용자 소유이고
 남이 쓸 수 없는 파일만 믿는다), 그것도 없으면 루트 심볼 크기가 모두 맞는 다른 빌드의 표, 마지막으로 앵커 탐사로 **개수만** 낸다(크기는 지어내지 않는다).
 
 표는 바이너리에 내장되므로 **`cub_top` 파일 하나만 옮기면 된다**(`offsets/` 동반 불필요).
@@ -236,6 +237,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-mmchunk.sh` | 방법 A 가 단독 mmapped 청크를 셈: malloc(100MB)·20MB×3(병합 VMA)·20MB×5·900MB(순회 상한 초과), 앞뒤로 익명 이웃이 합쳐진 VMA, 0 으로 찬 익명 영역은 0 |
 | `check-escape.sh` | `-d`·`--json`·`--record` 의 따옴표 값: 고정 버퍼에서 잘린 한글은 `?` 로 바뀌어 유효한 UTF-8, `"` `\` 탭이 든 값(라이브러리 경로)은 기록→재생에서 그대로 돌아오고 가짜 키로 쪼개지지 않음 |
 | `check-flushing.sh` | flush 중(flushing) 페이지는 clean 이 아님: dirty·flushing 을 한 번씩 센 `pgbuf.unflushed`, 가장 오래된 dirty LSA 가 놓치는 flush 중 페이지 수, DWB 가 담을 수 있는 "clean 이지만 볼륨 미반영" 페이지 상한 |
+| `check-dwarf.sh` | `-flto` 의 `.lto_priv.N` 루트 심볼(실제 LTO 빌드 포함)을 찾고 모호한 둘·함수는 거절 · `strip -s` 는 사유로 · 압축(-gz/.zdebug)·`.gnu_debuglink`·split DWARF·dwz 는 정확한 사유 · build-id 캐시 키 · 라이브 추출은 백그라운드 |
 | `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 일반 계정으로 열린 파일·`databases.txt` 에서 찾고, 일반 블록 마운트는 st_dev 로·overlay 는 fsid 로, 호스트의 더 바쁜 장치를 고르지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |
 | `check-ceiling.sh` | 관측 상한을 장치 고유 ID 별로 기억·보존: 빠른 장치의 상한으로 느린 장치를 판정하지 않음 · 큐 ≈1 직렬 스트림은 상한으로 학습하지 않고 "지연 병목(직렬)" · 커널 이름으로 저장된 줄은 다른 디스크에 붙지 않음 |
 | `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴. degraded 모드에서는 검증된 레코드만 집계하고 덤프를 덮어쓰지 않음. 인스턴스 전환·BCB 크기 변화에 안전, `--bcb-dump` 종료 코드 |

@@ -68,8 +68,23 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
   SO=$(printf '%s' "$raw" | grep -m1 -oE 'heapB\.lib="[^"]+"' | sed 's/heapB.lib="//;s/"$//')
   [ -n "$SO" ] && [ "$SO" != "-" ] || SO=$(grep -m1 -oE '/[^ ]*libcubrid\.so\.[0-9.]+' /proc/$(pgrep -f 'cub_server ' | head -1)/maps 2>/dev/null)
   if [ -n "$SO" ] && stat -L "$SO" >/dev/null 2>&1; then
-    SZ=$(stat -L -c%s "$SO"); MT=$(stat -L -c%Y "$SO")
-    CACHE="$TMP/cub_top.dw-$(id -u)-$SZ-$MT.tbl"   # the test binary's cache (uid-scoped name)
+    # The cache is named by the .so's GNU build-id (size and mtime only without one)
+    BID=$(python3 - "$SO" <<'PY' 2>/dev/null
+import struct,sys
+d=open(sys.argv[1],'rb').read()
+shoff,=struct.unpack_from('<Q',d,0x28); shes,shn=struct.unpack_from('<HH',d,0x3a)
+for i in range(shn):
+    t,=struct.unpack_from('<I',d,shoff+i*shes+4)
+    if t!=7: continue
+    off,sz=struct.unpack_from('<QQ',d,shoff+i*shes+0x18); o=off
+    while o+12<=off+sz:
+        nz,dz,ty=struct.unpack_from('<III',d,o); no=o+12; do=no+((nz+3)&~3)
+        if ty==3 and d[no:no+4]==b'GNU\0': print(d[do:do+dz].hex()); sys.exit()
+        o=do+((dz+3)&~3)
+PY
+)
+    if [ -n "$BID" ]; then CACHE="$TMP/cub_top.dw-$(id -u)-$BID.tbl"
+    else SZ=$(stat -L -c%s "$SO"); MT=$(stat -L -c%Y "$SO"); CACHE="$TMP/cub_top.dw-$(id -u)-$SZ-$MT.tbl"; fi
     # Every key present (a cache missing one is re-extracted), all of them wrong
     grep -oE '^  \{"(OFF|SZ)_[A-Z0-9_]+",' "$SRC" | sed 's/^  {"//;s/",$/ 4/' > "$CACHE"
     raw=$("$TMP/bad1" -d 2>/dev/null)

@@ -34,16 +34,24 @@ OFF_PSTAT_INIT               44       44 match   pstat_global(56) . initialized
 SZ_PSTAT_METADATA            56       56 match   struct pstat_metadata
 OFF_PSTATMD_PSID              0        0 match   struct pstat_metadata . psid
 OFF_PSTATMD_START            20       20 match   struct pstat_metadata . start_offset
-OFF_PGBUF_LRULIST            56       -1 differ  pgbuf_buffer_pool(592) . buf_LRU_list
-OFF_PGBUF_NLRU               40       -1 differ  pgbuf_buffer_pool(592) . num_LRU_list
-OFF_PGBUF_QUOTA             328       -1 differ  pgbuf_buffer_pool(592) . quota
-OFF_QUOTA_NPRIV               0       -1 differ  struct pgbuf_page_quota . num_private_LRU_list
-OFF_PGBUF_MONITOR           280       -1 differ  pgbuf_buffer_pool(592) . monitor
-OFF_MON_DIRTIES               0       -1 differ  struct pgbuf_page_monitor . dirties_cnt
-SZ_PGBUF_LRU                128       -1 differ  struct pgbuf_lru_list
-OFF_LRU_C1                   80       -1 differ  struct pgbuf_lru_list . count_lru1
-OFF_LRU_C2                   84       -1 differ  struct pgbuf_lru_list . count_lru2
-OFF_LRU_C3                   88       -1 differ  struct pgbuf_lru_list . count_lru3
-OFF_LRU_VICT                 92       -1 differ  struct pgbuf_lru_list . count_vict_cand
+OFF_PGBUF_LRULIST            56       56 match   pgbuf_buffer_pool(592) . buf_LRU_list
+OFF_PGBUF_NLRU               40       40 match   pgbuf_buffer_pool(592) . num_LRU_list
+OFF_PGBUF_QUOTA             328      328 match   pgbuf_buffer_pool(592) . quota
+OFF_QUOTA_NPRIV               0        0 match   struct pgbuf_page_quota . num_private_LRU_list
+OFF_PGBUF_MONITOR           280      280 match   pgbuf_buffer_pool(592) . monitor
+OFF_MON_DIRTIES               0        0 match   struct pgbuf_page_monitor . dirties_cnt
+SZ_PGBUF_LRU                128      128 match   struct pgbuf_lru_list
+OFF_LRU_C1                   80       80 match   struct pgbuf_lru_list . count_lru1
+OFF_LRU_C2                   84       84 match   struct pgbuf_lru_list . count_lru2
+OFF_LRU_C3                   88       88 match   struct pgbuf_lru_list . count_lru3
+OFF_LRU_VICT                 92       92 match   struct pgbuf_lru_list . count_vict_cand
+OFF_SESS_HTYPE              400      400 match   active_sessions(416) . states_hashmap.m_type
+OFF_CAT_HTYPE               400      400 match   lockfree_hashmap<catalog_key, catalog_entry>(408) . m_type
+OFF_LK_HTYPE                472      472 match   lk_global_data(640) . m_obj_hash_table.m_type
+OFF_LK_RES_ALLOC             84       84 match   lk_global_data(640) . m_obj_hash_table.m_old_hash.m_freelist.alloc_cnt
+OFF_LK_ENTFL                480      480 match   lk_global_data(640) . obj_free_entry_list
+OFF_LFFL_ALLOC               12       12 match   struct lf_freelist . alloc_cnt
+SZ_LK_ENTRY                 128      128 match   struct lk_entry
+SZ_LK_RES                   120      120 match   struct lk_res
 
-match 30, differ 12, fail 0  |  0 discarded on desync  |  36751ms
+match 49, differ 1, fail 0  |  0 discarded on desync  |  1989ms

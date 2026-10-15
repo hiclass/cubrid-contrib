@@ -49,6 +49,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <time.h>
 
@@ -1172,6 +1173,38 @@ static int form_skip(const unsigned char**p,const unsigned char*lim,uint64_t for
     *p=q;
     return 0;
 }
+/* The debug sections, and what about them this engine cannot read: compressed sections
+   (-gz: SHF_COMPRESSED; old .zdebug_*), debug info moved to another file (.gnu_debuglink),
+   dwz's shared file (.gnu_debugaltlink), DWARF5 string indices (.debug_str_offsets, strx).
+   Sets DI/AB/DS.  0 = read, -1 = section table outside the file, -2 = names outside it. */
+enum { DWF_COMPRESSED=1, DWF_ZDEBUG=2, DWF_DEBUGLINK=4, DWF_ALTLINK=8, DWF_STROFFS=16 };
+static int G_split=0;                /* DWARF5 skeleton/split units: the DIEs are in .dwo files */
+static int dw_sections(const unsigned char*m,size_t fsz,int*flags){
+    #define DS_IN(off_,len_) ((uint64_t)(off_) <= (uint64_t)fsz && (uint64_t)(len_) <= (uint64_t)fsz - (uint64_t)(off_))
+    const Elf64_Ehdr*eh=(const Elf64_Ehdr*)m; *flags=0;
+    if(eh->e_shentsize!=sizeof(Elf64_Shdr) || eh->e_shnum==0 || eh->e_shstrndx>=eh->e_shnum ||
+       !DS_IN(eh->e_shoff,(uint64_t)eh->e_shnum*sizeof(Elf64_Shdr))) return -1;
+    const Elf64_Shdr*sh=(const Elf64_Shdr*)(m+eh->e_shoff);
+    const Elf64_Shdr*ssh=&sh[eh->e_shstrndx];
+    if(!DS_IN(ssh->sh_offset,ssh->sh_size)) return -2;
+    const char*ss=(const char*)(m+ssh->sh_offset);
+    for(int i=0;i<eh->e_shnum;i++){
+        if(sh[i].sh_name>=ssh->sh_size || !memchr(ss+sh[i].sh_name,0,ssh->sh_size-sh[i].sh_name)) continue;
+        const char*n=ss+sh[i].sh_name;
+        if(!strncmp(n,".zdebug_",8)) *flags|=DWF_ZDEBUG;
+        if(!strcmp(n,".gnu_debuglink")) *flags|=DWF_DEBUGLINK;
+        if(!strcmp(n,".gnu_debugaltlink")) *flags|=DWF_ALTLINK;
+        if(!strcmp(n,".debug_str_offsets")) *flags|=DWF_STROFFS;
+        if(!DS_IN(sh[i].sh_offset,sh[i].sh_size)) continue;   /* a section outside the file is not used */
+        int dbg = !strcmp(n,".debug_info")||!strcmp(n,".debug_abbrev")||!strcmp(n,".debug_str");
+        if(dbg && (sh[i].sh_flags&SHF_COMPRESSED)){ *flags|=DWF_COMPRESSED; continue; }
+        if(!strcmp(n,".debug_info")){ DI=m+sh[i].sh_offset; DI_SZ=sh[i].sh_size; }
+        else if(!strcmp(n,".debug_abbrev")){ AB=m+sh[i].sh_offset; AB_SZ=sh[i].sh_size; }
+        else if(!strcmp(n,".debug_str")){    DS=m+sh[i].sh_offset; DS_SZ=sh[i].sh_size; }
+    }
+    #undef DS_IN
+    return 0;
+}
 static int build_index(void){
     int cap=4096; CU=malloc(sizeof(cu_t)*cap); NCU=0;
     if(!CU) return 0;
@@ -1185,7 +1218,10 @@ static int build_index(void){
         if((size_t)(ce-p) < (size_t)(2+2+osz)) break;    /* version, unit type/addr size, abbrev offset */
         uint16_t ver=*(uint16_t*)p; p+=2;
         uint64_t ao; int asz;
-        if(ver>=5){ p++; asz=*p++; ao=osz==8?*(uint64_t*)p:*(uint32_t*)p; p+=osz; }
+        if(ver>=5){ int ut=*p++; asz=*p++; ao=osz==8?*(uint64_t*)p:*(uint32_t*)p; p+=osz;
+                    if(ut==4||ut==5){ p+=8; G_split++; }                   /* skeleton/split: dwo_id */
+                    else if(ut==2||ut==6) p+=8+(size_t)osz;                 /* type unit: signature, type offset */
+                    if(p>ce) break; }
         else { ao=osz==8?*(uint64_t*)p:*(uint32_t*)p; p+=osz; asz=*p++; }
         if(asz!=4 && asz!=8) break;                        /* form_skip reads addresses of this size */
         if(NCU==cap){ cu_t *t=realloc(CU,sizeof(cu_t)*(size_t)cap*2);
@@ -1218,7 +1254,29 @@ typedef struct {
     unsigned long want;             /* DIE offset to resolve */
     die_t out; int found;
     const char*type_name;           /* Find a struct by name */
+    int pre;                        /* The one-pass index of every wanted name (prescan) */
 } job_t;
+/* One pass over .debug_info collects, for every name the table wants, the variable candidates
+   and the first struct definition in each CU.  The per-key lookups below then read only the
+   CUs that matter; a full pass per key (~55 of them over 100-200MB) took 26-46s. */
+#define PRE_MAX 128
+#define PRE_PER 256
+typedef struct { const char*name; int is_type, next, last_cu;
+                 int ncand; unsigned long cand[32]; int cand_def[32];
+                 int ntd; unsigned long td[PRE_PER]; long tdsz[PRE_PER]; } pre_t;
+static pre_t *PRE=NULL; static int NPRE=0, PRE_HEAD[256];
+static unsigned pre_hash(const char*s){ unsigned h=2166136261u; while(*s){ h^=(unsigned char)*s++; h*=16777619u; } return h&255; }
+static pre_t *pre_find(const char*nm,int is_type){
+    if(!PRE||!nm) return NULL;
+    for(int i=PRE_HEAD[pre_hash(nm)];i>=0;i=PRE[i].next)
+        if(PRE[i].is_type==is_type && !strcmp(PRE[i].name,nm)) return &PRE[i];
+    return NULL;
+}
+static void pre_add(const char*nm,int is_type){
+    if(!nm||!PRE||NPRE>=PRE_MAX||pre_find(nm,is_type)) return;
+    pre_t*e=&PRE[NPRE]; memset(e,0,sizeof *e); e->name=nm; e->is_type=is_type; e->last_cu=-1;
+    unsigned h=pre_hash(nm); e->next=PRE_HEAD[h]; PRE_HEAD[h]=NPRE++;
+}
 
 static int scan_cu(cu_t*cu, job_t*J){
     if(load_abbrev(cu->ab_off)<0){ G_desync++; return -1; }
@@ -1246,6 +1304,17 @@ static int scan_cu(cu_t*cu, job_t*J){
             case A_decl: is_decl=(v!=0); break;
             default: break; }
         }
+        if(J->pre){
+            if(t->tag==T_var && ty!=(uint64_t)-1){
+                pre_t*e=pre_find(nm,0); if(!e) e=pre_find(lnk,0);
+                if(e && e->ncand<32){ e->cand[e->ncand]=(unsigned long)ty; e->cand_def[e->ncand]=(has_loc&&!is_decl); e->ncand++; }
+            } else if((t->tag==T_struct||t->tag==T_class||t->tag==T_union) && nm && bsz>0){
+                pre_t*e=pre_find(nm,1); int ci=(int)(cu-CU);
+                if(e && e->last_cu!=ci && e->ntd<PRE_PER){ e->td[e->ntd]=doff; e->tdsz[e->ntd]=(long)bsz; e->ntd++; e->last_cu=ci; }
+            }
+            if(t->kids) depth++;
+            continue;
+        }
         if(J->var && t->tag==T_var && ty!=(uint64_t)-1 &&
            ((nm&&!strcmp(nm,J->var))||(lnk&&!strcmp(lnk,J->var)))){
             if(J->ncand<32){ J->cand[J->ncand]=(unsigned long)ty;
@@ -1272,13 +1341,48 @@ static int scan_cu(cu_t*cu, job_t*J){
     return 0;
 }
 
+/* Build the index for these names (vars: variable roots, types: struct names) */
+static void prescan(const char*const*vars,int nv,const char*const*types,int nt){
+    if(!PRE) PRE=(pre_t*)calloc(PRE_MAX,sizeof(pre_t));
+    if(!PRE) return;
+    NPRE=0; for(int i=0;i<256;i++) PRE_HEAD[i]=-1;
+    for(int i=0;i<nv;i++) pre_add(vars[i],0);
+    for(int i=0;i<nt;i++) pre_add(types[i],1);
+    job_t J; memset(&J,0,sizeof J); J.pre=1;
+    for(int c=0;c<NCU;c++) scan_cu(&CU[c],&J);
+}
+/* The DIE at an offset, read once: type chains and nested members revisit the same DIEs
+   for every key, each visit a scan of a whole CU */
+#define MEMO_N 4096
+typedef struct { unsigned long off; int rc; die_t d; } memo_t;
+static memo_t **MEMO=NULL;
+static int die_at(unsigned long off,die_t*out){
+    unsigned h=(unsigned)((off*2654435761u)>>4)&(MEMO_N-1);
+    if(!MEMO) MEMO=(memo_t**)calloc(MEMO_N,sizeof *MEMO);
+    for(unsigned k=0;MEMO && k<MEMO_N;k++){
+        memo_t*m=MEMO[(h+k)&(MEMO_N-1)];
+        if(!m) break;
+        if(m->off==off){ if(m->rc==0) *out=m->d; return m->rc; }
+    }
+    cu_t*c=cu_of(off); int rc=-1;
+    job_t*J=(job_t*)calloc(1,sizeof *J);
+    if(c && J){ J->want=off; if(scan_cu(c,J)==0 && J->found){ *out=J->out; rc=0; } }
+    if(MEMO){ memo_t*m=(memo_t*)malloc(sizeof *m);
+        if(m){ m->off=off; m->rc=rc; if(rc==0) m->d=J->out;
+            for(unsigned k=0;k<MEMO_N;k++){ unsigned i=(h+k)&(MEMO_N-1); if(!MEMO[i]){ MEMO[i]=m; m=NULL; break; } }
+            free(m); } }
+    free(J);
+    return rc;
+}
+static void prescan_free(void){
+    free(PRE); PRE=NULL; NPRE=0;
+    if(MEMO){ for(int i=0;i<MEMO_N;i++) free(MEMO[i]); free(MEMO); MEMO=NULL; }
+}
 /* Resolve the type chain through typedef/const/volatile to a struct or base DIE */
 static int resolve_type(unsigned long off, die_t*out){
     for(int g=0; g<16; g++){
-        cu_t*c=cu_of(off); if(!c) return -1;
-        job_t J; memset(&J,0,sizeof J); J.want=off;
-        if(scan_cu(c,&J)<0) return -1;
-        if(!J.found) return -1;
+        job_t J; memset(&J,0,sizeof J);
+        if(die_at(off,&J.out)<0) return -1;
         if(J.out.tag==T_struct||J.out.tag==T_class||J.out.tag==T_union||J.out.tag==T_base){
             *out=J.out; return 0;
         }
@@ -1297,7 +1401,9 @@ static int sane_struct(const die_t*d){
 /* Symbol to type DIE; with several candidates, prefer the definition and discard those that fail */
 static int resolve_symbol(const char*sym, die_t*out, unsigned long*type_off){
     job_t J; memset(&J,0,sizeof J); J.var=sym;
-    for(int c=0;c<NCU;c++){ scan_cu(&CU[c],&J); }        /* Collect candidates from every CU */
+    pre_t*e=pre_find(sym,0);
+    if(e){ J.ncand=e->ncand; memcpy(J.cand,e->cand,sizeof J.cand); memcpy(J.cand_def,e->cand_def,sizeof J.cand_def); }
+    else for(int c=0;c<NCU;c++){ scan_cu(&CU[c],&J); }   /* Collect candidates from every CU */
     if(!J.ncand) return -1;
     /* Do not adopt when several DIEs share the name: a DIE picked by name alone is
        not guaranteed to be the symtab symbol (static variables repeat per CU).
@@ -1356,6 +1462,9 @@ static int find_member(const die_t*d,const char*want,long base,int depth,long*re
 }
 /* sizeof a struct by name */
 static int sizeof_type(const char*name,long*sz,const char**real){
+    pre_t*e=pre_find(name,1);
+    if(e){ for(int i=0;i<e->ntd;i++) if(e->tdsz[i]>0 && e->tdsz[i]<=(1<<20)){ *sz=e->tdsz[i]; if(real)*real=name; return 0; }
+           if(e->ntd<PRE_PER) return -1; }
     job_t J; memset(&J,0,sizeof J); J.type_name=name;
     for(int c=0;c<NCU;c++){
         memset(&J.out,0,sizeof J.out); J.found=0; J.type_name=name;
@@ -1369,6 +1478,14 @@ static int sizeof_type(const char*name,long*sz,const char**real){
 /* Member offset within a struct named directly (nested included), for types with no
    variable root - a BCB array element beyond a pointer.  Definitions only (bsize>0). */
 static int member_of_type(const char*name,const char*member,long*off){
+    pre_t*e=pre_find(name,1);
+    if(e){ for(int i=0;i<e->ntd;i++){
+               job_t K; memset(&K,0,sizeof K);
+               if(die_at(e->td[i],&K.out)<0) continue;
+               if(K.out.bsize>0 && K.out.nmem>0){
+                   char path[320];
+                   if(find_member(&K.out,member,0,0,off,path,sizeof path)==0) return 0; } }
+           if(e->ntd<PRE_PER) return -1; }
     job_t J; memset(&J,0,sizeof J);
     for(int c=0;c<NCU;c++){
         memset(&J.out,0,sizeof J.out); J.found=0; J.type_name=name;
@@ -1459,9 +1576,10 @@ static const char *u8n(const char *s,size_t n){
     if(l>n){ l=n; while(l>0 && ((unsigned char)s[l]&0xC0)==0x80) l--; }
     memcpy(o,s,l); o[l]=0; return o;
 }
+static int g_dw_flags=0;
 static int dwoff_extract(const char*so_path,long out[],char*why,size_t wn){
     /* Reset globals in case of re-entry */
-    DI=AB=DS=NULL; DI_SZ=AB_SZ=DS_SZ=0; NCU=0; NTAB=0; G_desync=0;
+    DI=AB=DS=NULL; DI_SZ=AB_SZ=DS_SZ=0; NCU=0; NTAB=0; G_desync=0; g_dw_flags=0;
     int fd=open(so_path,O_RDONLY);
     if(fd<0){ snprintf(why,wn,"%s",g_ascii?"open failed":"open 실패"); return 0; }
     struct stat st;
@@ -1477,23 +1595,21 @@ static int dwoff_extract(const char*so_path,long out[],char*why,size_t wn){
     Elf64_Ehdr*eh=(Elf64_Ehdr*)m;
     if(memcmp(eh->e_ident,ELFMAG,SELFMAG)||eh->e_ident[EI_CLASS]!=ELFCLASS64){
         snprintf(why,wn,"%s",g_ascii?"not ELF64":"ELF64 아님"); goto done; }
-    if(eh->e_shentsize!=sizeof(Elf64_Shdr) || eh->e_shnum==0 || eh->e_shstrndx>=eh->e_shnum ||
-       !DW_IN_FILE(eh->e_shoff,(uint64_t)eh->e_shnum*sizeof(Elf64_Shdr))){
-        snprintf(why,wn,"%s",g_ascii?"section table outside the file":"섹션 표가 파일 밖"); goto done; }
-    { Elf64_Shdr*sh=(Elf64_Shdr*)(m+eh->e_shoff);
-      Elf64_Shdr*ssh=&sh[eh->e_shstrndx];
-      if(!DW_IN_FILE(ssh->sh_offset,ssh->sh_size)){ snprintf(why,wn,"%s",g_ascii?"section name table outside the file":"섹션 이름 표가 파일 밖"); goto done; }
-      const char*ss=(const char*)(m+ssh->sh_offset);
-      for(int i=0;i<eh->e_shnum;i++){
-          if(sh[i].sh_name>=ssh->sh_size || !memchr(ss+sh[i].sh_name,0,ssh->sh_size-sh[i].sh_name)) continue;
-          if(!DW_IN_FILE(sh[i].sh_offset,sh[i].sh_size)) continue;   /* a section outside the file is not used */
-          const char*nm2=ss+sh[i].sh_name;
-          if(!strcmp(nm2,".debug_info")){ DI=m+sh[i].sh_offset; DI_SZ=sh[i].sh_size; }
-          else if(!strcmp(nm2,".debug_abbrev")){ AB=m+sh[i].sh_offset; AB_SZ=sh[i].sh_size; }
-          else if(!strcmp(nm2,".debug_str")){    DS=m+sh[i].sh_offset; DS_SZ=sh[i].sh_size; }
-      } }
-    if(!DI||!AB){ snprintf(why,wn,"%s",g_ascii?"no debug sections (stripped)":"디버그 섹션 없음(strip)"); goto done; }
+    G_split=0;
+    { int fl=0, r=dw_sections(m,fsz,&fl);
+      if(r==-1){ snprintf(why,wn,"%s",g_ascii?"section table outside the file":"섹션 표가 파일 밖"); goto done; }
+      if(r==-2){ snprintf(why,wn,"%s",g_ascii?"section name table outside the file":"섹션 이름 표가 파일 밖"); goto done; }
+      if(fl&DWF_COMPRESSED){ snprintf(why,wn,"%s",g_ascii?"compressed debug sections (-gz, SHF_COMPRESSED) - not supported":"압축된 디버그 섹션(-gz, SHF_COMPRESSED) — 미지원"); goto done; }
+      if(!DI||!AB){
+          snprintf(why,wn,"%s",(fl&DWF_ZDEBUG)?(g_ascii?"old-style compressed debug sections (.zdebug) - not supported":"구형 압축 디버그 섹션(.zdebug) — 미지원")
+                              :(fl&DWF_DEBUGLINK)?(g_ascii?"debug info is in a separate file (.gnu_debuglink) - not read":"디버그 정보가 별도 파일(.gnu_debuglink) — 읽지 않음")
+                              :(g_ascii?"no debug sections (stripped)":"디버그 섹션 없음(strip)"));
+          goto done; }
+      g_dw_flags=fl; }
     build_index();
+    { const char *vs[PRE_MAX], *ts[PRE_MAX]; int nv=0, nt=0;
+      for(int i=0;i<NTG;i++){ if(TG[i].sym && nv<PRE_MAX) vs[nv++]=TG[i].sym; if(TG[i].type && nt<PRE_MAX) ts[nt++]=TG[i].type; }
+      prescan(vs,nv,ts,nt); }
     for(int i=0;i<NTG;i++){
         out[i]=-1;
         if(TG[i].type && TG[i].member){
@@ -1508,9 +1624,13 @@ static int dwoff_extract(const char*so_path,long out[],char*why,size_t wn){
             }
         }
     }
-    if(got==0) snprintf(why,wn,"%s",g_ascii?"no key resolved":"키 0개 해소");
+    if(got==0) snprintf(why,wn,"%s",
+        G_split?(g_ascii?"split DWARF (skeleton units, DIEs in .dwo) - not supported":"split DWARF(스켈레톤 유닛, DIE 는 .dwo) — 미지원")
+        :(g_dw_flags&DWF_ALTLINK)?(g_ascii?"dwz-shared debug info (.gnu_debugaltlink) - not supported":"dwz 공유 디버그 정보(.gnu_debugaltlink) — 미지원")
+        :(g_dw_flags&DWF_STROFFS)?(g_ascii?"DWARF5 string indices (strx, .debug_str_offsets) - not supported":"DWARF5 문자열 색인(strx, .debug_str_offsets) — 미지원")
+        :(g_ascii?"no key resolved":"키 0개 해소"));
 done:
-    free(TAB); TAB=NULL; NTAB=0;
+    free(TAB); TAB=NULL; NTAB=0; prescan_free();
     if(CU){ free(CU); CU=NULL; NCU=0; }   /* The CU index has the same lifetime */
     #undef DW_IN_FILE
     munmap(m,st.st_size);
@@ -1528,9 +1648,9 @@ enum { DW_PGBUF=0, DW_XC_ENT, DW_XC_USE, DW_XC_CLN, DW_QLIST, DW_QPOOL,
        DW_AG_SZLRU, DW_AG_C1, DW_AG_C2, DW_AG_C3, DW_AG_VICT,
        DW_HX_SESS, DW_HX_CAT, DW_HX_LK, DW_LK_RES, DW_LK_ENTFL, DW_LFFL, DW_SZ_LKE, DW_SZ_LKR, DW_N };
 
-/* Extraction takes about 8 seconds over 125MB of .debug_info, so its result is cached
-   as text in /var/tmp/cub_top.dw-<uid>-<size>-<mtime>.tbl, keyed by the .so's size and
-   mtime.  /var/tmp is writable by every user.  A table read from there
+/* Extraction takes 1-3 seconds over 100-200MB of .debug_info (one pass for every key, then
+   the CUs that matter), and its result is cached as text in
+   /var/tmp/cub_top.dw-<uid>-<build-id>.tbl (size and mtime when the .so has no build-id).  /var/tmp is writable by every user.  A table read from there
    decides which addresses of the server are read, so only a regular file this user
    owns, and nobody else can write, is trusted; and it is written to a fresh 0600 file
    that is renamed into place, so a planted name - a symlink to some other file, or a
@@ -1556,24 +1676,93 @@ static void dw_cache_write(const char *path,const long out[]){
     if(fclose(f)==0) { if(rename(tmp,path)!=0) unlink(tmp); }
     else unlink(tmp);
 }
-static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
-    struct stat st;
-    if(stat(so,&st)!=0){ snprintf(why,wn,"%s",g_ascii?"stat failed":"stat 실패"); return 2; }
-    char cpath[256];
-    snprintf(cpath,sizeof cpath,"/var/tmp/cub_top.dw-%d-%lld-%lld.tbl",
-             (int)geteuid(),(long long)st.st_size,(long long)st.st_mtime);
-    FILE*cf=dw_cache_open_trusted(cpath);
-    if(cf){
-        int got=0, seen=0; char k[64]; long v;
-        for(int i=0;i<DW_N;i++) out[i]=-1;
-        while(fscanf(cf,"%63s %ld",k,&v)==2)
-            for(int i=0;i<NTG;i++)
-                if(!strcmp(k,TG[i].key)){ out[i]=v; seen++; if(v>=0) got++; break; }
-        fclose(cf);
-        if(got>0 && seen>=NTG) return 1;     /* Written before keys were added: extract again once */
+/* The .so's GNU build-id as hex ("" without one).  size+mtime collides across cp -p, tar and
+   SOURCE_DATE_EPOCH builds; the build-id names the build itself. */
+static void elf_build_id(const char *so,char *hex,size_t hn){
+    hex[0]=0;
+    int fd=open(so,O_RDONLY|O_CLOEXEC); if(fd<0) return;
+    Elf64_Ehdr eh; struct stat st;
+    if(fstat(fd,&st)!=0 || pread(fd,&eh,sizeof eh,0)!=(ssize_t)sizeof eh || memcmp(eh.e_ident,ELFMAG,SELFMAG)
+       || eh.e_ident[EI_CLASS]!=ELFCLASS64 || eh.e_shentsize!=sizeof(Elf64_Shdr) || eh.e_shnum==0 || eh.e_shnum>4096
+       || eh.e_shoff>(uint64_t)st.st_size){ close(fd); return; }
+    Elf64_Shdr *sh=malloc((size_t)eh.e_shnum*sizeof *sh);
+    if(sh && pread(fd,sh,(size_t)eh.e_shnum*sizeof *sh,(off_t)eh.e_shoff)==(ssize_t)(eh.e_shnum*sizeof *sh)){
+        for(int i=0;i<eh.e_shnum && !hex[0];i++){
+            if(sh[i].sh_type!=SHT_NOTE || sh[i].sh_size<16 || sh[i].sh_size>4096) continue;
+            unsigned char nb[4096];
+            if(pread(fd,nb,(size_t)sh[i].sh_size,(off_t)sh[i].sh_offset)!=(ssize_t)sh[i].sh_size) continue;
+            size_t o=0;
+            while(o+12<=sh[i].sh_size){
+                uint32_t nsz,dsz,typ; memcpy(&nsz,nb+o,4); memcpy(&dsz,nb+o+4,4); memcpy(&typ,nb+o+8,4);
+                size_t no=o+12, doff=no+((nsz+3u)&~3u);
+                if(doff>sh[i].sh_size || dsz>sh[i].sh_size-doff) break;
+                if(typ==3 && nsz==4 && !memcmp(nb+no,"GNU",4) && dsz>0 && dsz*2<hn){   /* NT_GNU_BUILD_ID */
+                    for(uint32_t k=0;k<dsz;k++) snprintf(hex+2*k,3,"%02x",nb[doff+k]);
+                    break; }
+                o=doff+((dsz+3u)&~3u);
+            }
+        }
     }
-    fprintf(stderr,"cub_top: 오프셋 표가 이 환경과 안 맞아 %s 의 DWARF 에서 직접 추출합니다"
-                   " (1회, 수 초 — 결과는 %s 에 캐시)\n",so,cpath);
+    free(sh); close(fd);
+}
+static void dw_cache_path(const char*so,char*cpath,size_t cn){
+    char bid[132]; elf_build_id(so,bid,sizeof bid);
+    if(bid[0]) snprintf(cpath,cn,"/var/tmp/cub_top.dw-%d-%s.tbl",(int)geteuid(),bid);
+    else { struct stat st; if(stat(so,&st)!=0){ cpath[0]=0; return; }
+           snprintf(cpath,cn,"/var/tmp/cub_top.dw-%d-%lld-%lld.tbl",(int)geteuid(),(long long)st.st_size,(long long)st.st_mtime); }
+}
+static int dw_cache_load(const char*cpath,long out[]){
+    FILE*cf=dw_cache_open_trusted(cpath);
+    if(!cf) return 0;
+    int got=0, seen=0; char k[64]; long v;
+    for(int i=0;i<DW_N;i++) out[i]=-1;
+    while(fscanf(cf,"%63s %ld",k,&v)==2)
+        for(int i=0;i<NTG;i++)
+            if(!strcmp(k,TG[i].key)){ out[i]=v; seen++; if(v>=0) got++; break; }
+    fclose(cf);
+    return got>0 && seen>=NTG;     /* Written before keys were added: extract again once */
+}
+/* Live, the extraction (a few seconds of CPU on a 100-200MB .so) runs in a niced child that
+   writes the cache; frames go on meanwhile and pick the cache up when the child is done.
+   One-shot modes wait, as they report this very frame. */
+static pid_t g_dw_kid=0; static int g_dw_kfd=-1; static char g_dw_kso[PATH_MAX];
+static void dw_kid_stop(void){ if(g_dw_kid>0){ kill(g_dw_kid,SIGKILL); waitpid(g_dw_kid,NULL,0); g_dw_kid=0; } }
+/* 1 = offsets in out, 2 = failed (why), 0 = extracting in the background */
+static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
+    char cpath[256]; dw_cache_path(so,cpath,sizeof cpath);
+    if(!cpath[0]){ snprintf(why,wn,"%s",g_ascii?"stat failed":"stat 실패"); return 2; }
+    if(dw_cache_load(cpath,out)) return 1;
+    if(g_pd_async){
+        if(g_dw_kid>0){
+            int stt=0; pid_t r=waitpid(g_dw_kid,&stt,WNOHANG);
+            if(r==0){
+                if(strcmp(g_dw_kso,so)){ dw_kid_stop(); }   /* another instance's library now: start over */
+                else { snprintf(why,wn,"%s",g_ascii?"extracting offsets from DWARF in the background":"DWARF 에서 오프셋 추출 중(백그라운드)"); return 0; }
+            } else {
+                char kw[160]=""; ssize_t n=read(g_dw_kfd,kw,sizeof kw-1); if(n>0) kw[n]=0; else kw[0]=0;
+                close(g_dw_kfd); g_dw_kfd=-1; g_dw_kid=0;
+                if(!strcmp(g_dw_kso,so)){
+                    if(dw_cache_load(cpath,out)) return 1;
+                    snprintf(why,wn,"%s",kw[0]?kw:(g_ascii?"extraction failed":"추출 실패")); return 2; }
+            }
+        }
+        int pf[2]; if(pipe2(pf,O_CLOEXEC)!=0){ snprintf(why,wn,"pipe: %s",strerror(errno)); return 2; }
+        pid_t k=fork();
+        if(k<0){ close(pf[0]); close(pf[1]); snprintf(why,wn,"fork: %s",strerror(errno)); return 2; }
+        if(k==0){
+            close(pf[0]); if(setpriority(PRIO_PROCESS,0,10)){}
+            long o[DW_N]; char w[160]="";
+            if(dwoff_extract(so,o,w,sizeof w)>0){ dw_cache_write(cpath,o); _exit(0); }
+            if(write(pf[1],w,strlen(w))<0){}
+            _exit(2);
+        }
+        close(pf[1]); g_dw_kfd=pf[0]; g_dw_kid=k; snprintf(g_dw_kso,sizeof g_dw_kso,"%s",so);
+        { static int reg=0; if(!reg){ atexit(dw_kid_stop); reg=1; } }
+        snprintf(why,wn,"%s",g_ascii?"extracting offsets from DWARF in the background":"DWARF 에서 오프셋 추출 중(백그라운드)");
+        return 0;
+    }
+    fprintf(stderr,g_ascii?"cub_top: no offset table fits; extracting from the DWARF of %s (once, a few seconds - cached in %s)\n"
+                          :"cub_top: 오프셋 표가 이 환경과 안 맞아 %s 의 DWARF 에서 직접 추출합니다 (1회, 수 초 — 결과는 %s 에 캐시)\n",so,cpath);
     if(dwoff_extract(so,out,why,wn)<=0) return 2;
     dw_cache_write(cpath,out);
     return 1;
@@ -1693,6 +1882,7 @@ static unsigned long lib_base(int pid,const char *needle,char *path,size_t plen)
     }
     return base;
 }
+static int g_sym_symtab=-1;  /* -1 not looked, 0 none, 1 found: the last lookup found a .symtab (strip -s removes it, and the LOCAL roots with it) */
 /* ELF symbol lookup.  The input file is not trusted: comm can be faked with
    prctl, so any process could map a crafted ELF.  Every pointer derived from
    header offset/count/size fields is checked against [m, m+size) before it is
@@ -1718,6 +1908,11 @@ static int sym_lookup(const char *so,const char **names,unsigned long *out,int n
         munmap(m,sz); return -1;                       /* Section header table outside the file */
     }
     Elf64_Shdr *sh=(Elf64_Shdr*)(m+eh->e_shoff);
+    /* An exact name wins; "name.suffix" (-flto's .lto_priv.N, a clone's .constprop.N) is taken
+       only when it is the one such object - two of them are two objects and neither is used */
+    int exact[MAXSYM]={0}, nsuf[MAXSYM]={0}; unsigned long sufv[MAXSYM]={0}, sufs[MAXSYM]={0};
+    g_sym_symtab=0;
+    for(int i=0;i<eh->e_shnum;i++) if(sh[i].sh_type==SHT_SYMTAB) g_sym_symtab=1;
     for(int i=0;i<eh->e_shnum && found<n;i++){
         if(sh[i].sh_type!=SHT_SYMTAB && sh[i].sh_type!=SHT_DYNSYM) continue;
         if(sh[i].sh_entsize!=sizeof(Elf64_Sym)) continue;          /* Guard against division by zero and misreading */
@@ -1740,12 +1935,18 @@ static int sym_lookup(const char *so,const char **names,unsigned long *out,int n
             /* Confirm the string is NUL-terminated, so strcmp cannot run past the section */
             if(!memchr(nm,0,(size_t)(strend-nm))) continue;
             uint32_t nm4; memcpy(&nm4,nm,4);
-            for(int j=0;j<n;j++)
-                if(!out[j] && nm4==want[j] && !strcmp(nm,names[j])){
-                    out[j]=sy[k].st_value; if(osz) osz[j]=sy[k].st_size; found++; break; }
+            if(sy[k].st_shndx==SHN_UNDEF || ELF64_ST_TYPE(sy[k].st_info)!=STT_OBJECT) continue;   /* a reference, a function */
+            for(int j=0;j<n;j++){
+                if(exact[j] || nm4!=want[j]) continue;
+                size_t L=strlen(names[j]);
+                if(strncmp(nm,names[j],L)) continue;
+                if(!nm[L]){ out[j]=sy[k].st_value; if(osz) osz[j]=sy[k].st_size; exact[j]=1; found++; break; }
+                if(nm[L]=='.' && (nsuf[j]==0 || sufv[j]!=sy[k].st_value)){ nsuf[j]++; sufv[j]=sy[k].st_value; sufs[j]=sy[k].st_size; break; }
+            }
         }
     }
     #undef IN_FILE
+    for(int j=0;j<n;j++) if(!exact[j] && nsuf[j]==1 && !out[j]){ out[j]=sufv[j]; if(osz) osz[j]=sufs[j]; found++; }
     munmap(m,sz); return found;
 }
 
@@ -2215,7 +2416,7 @@ static void method_b(proc_t *P){
        A table of another build without recorded sizes is never adopted. */
     long long want=prm_get("data_buffer_pages");
     long mxc=prm_get("max_clients");
-    int32_t nbuf=0; int tried=0; char lastwhy[96]; snprintf(lastwhy,sizeof lastwhy,g_ascii?"no candidate":"후보 없음");
+    int32_t nbuf=0; int tried=0; char lastwhy[128]; snprintf(lastwhy,sizeof lastwhy,g_ascii?"no candidate":"후보 없음");
     /* One candidate through the gates; exact_ = the table is of this very build.  Macro-
        internal names use tb_/tm_ so they cannot collide with the caller's argument. */
     #define TRY_BTAB(bt_,exact_) do{ const btab_t*tb_=(bt_); int tm_=(exact_); tried++; \
@@ -2267,7 +2468,7 @@ static void method_b(proc_t *P){
         g_bt=tb_; B.ok=1; }while(0)
     /* A file or DWARF table: symbol names differ by release family (11.2+ mangled vs 10.x
        C symbols), so both sets are tried; the first set's rejection reason is kept. */
-    #define TRY_BOTH(bt_,exact_) do{ char why1_[96]=""; \
+    #define TRY_BOTH(bt_,exact_) do{ char why1_[128]=""; \
         for(int si_=0; si_<2 && !B.ok; si_++){ \
             (bt_)->syms = si_ ? (const char**)SYMN10 : (const char**)SYMN; \
             TRY_BTAB((bt_),(exact_)); \
@@ -2347,7 +2548,7 @@ static void method_b(proc_t *P){
 
     /* 2. This .so's own DWARF */
     if(!B.ok){
-        static long dwv[DW_N]; static int dwst=0; static char dwwhy[64]; static unsigned dgen=0;
+        static long dwv[DW_N]; static int dwst=0; static char dwwhy[160]; static unsigned dgen=0;
         if(dgen!=g_lib_gen){ dgen=g_lib_gen; dwst=0; dwwhy[0]=0; }
         static btab_t dwbt;
         if(dwst==0) dwst=dw_load_or_extract(so,dwv,dwwhy,sizeof dwwhy);
@@ -2367,8 +2568,8 @@ static void method_b(proc_t *P){
             pg_from_dw(&dwbt,dwv); ps_from_dw(&dwbt,dwv); ag_from_dw(&dwbt,dwv); hx_from_dw(&dwbt,dwv);
             memset(dwbt.ssz,0,sizeof dwbt.ssz);   /* From this very .so: nothing to compare */
             TRY_BOTH(&dwbt,1);
-        } else if(dwst==2 && dwwhy[0])
-            snprintf(lastwhy,sizeof lastwhy,"DWARF: %s",u8n(dwwhy,56));
+        } else if(dwwhy[0])                  /* failed, or still extracting in the background */
+            snprintf(lastwhy,sizeof lastwhy,"DWARF: %s",u8n(dwwhy,80));
     }
 
     /* 3. Tables of another build, on recorded symbol sizes and paramdump */
@@ -2399,6 +2600,13 @@ static void method_b(proc_t *P){
             }
         }
         }
+    }
+    if(!B.ok && g_sym_symtab==0){
+        /* strip -s: pgbuf_Pool, sessions, catalog_Hashmap, css_Num_* are LOCAL, in .symtab only -
+           not even the anchor probe has an address (--strip-debug keeps .symtab) */
+        snprintf(B.why,sizeof B.why,"%s",g_ascii?"no .symtab (strip -s): the root symbols are local and only there - method B unavailable"
+                                                :".symtab 없음(strip -s) — 루트 심볼이 LOCAL 이라 거기에만 있음: 방법 B 불가");
+        return;
     }
     if(!B.ok){
         snprintf(B.why,sizeof B.why,

@@ -189,6 +189,38 @@ static int form_skip(const unsigned char**p,const unsigned char*lim,uint64_t for
     *p=q;
     return 0;
 }
+/* The debug sections, and what about them this engine cannot read: compressed sections
+   (-gz: SHF_COMPRESSED; old .zdebug_*), debug info moved to another file (.gnu_debuglink),
+   dwz's shared file (.gnu_debugaltlink), DWARF5 string indices (.debug_str_offsets, strx).
+   Sets DI/AB/DS.  0 = read, -1 = section table outside the file, -2 = names outside it. */
+enum { DWF_COMPRESSED=1, DWF_ZDEBUG=2, DWF_DEBUGLINK=4, DWF_ALTLINK=8, DWF_STROFFS=16 };
+static int G_split=0;                /* DWARF5 skeleton/split units: the DIEs are in .dwo files */
+static int dw_sections(const unsigned char*m,size_t fsz,int*flags){
+    #define DS_IN(off_,len_) ((uint64_t)(off_) <= (uint64_t)fsz && (uint64_t)(len_) <= (uint64_t)fsz - (uint64_t)(off_))
+    const Elf64_Ehdr*eh=(const Elf64_Ehdr*)m; *flags=0;
+    if(eh->e_shentsize!=sizeof(Elf64_Shdr) || eh->e_shnum==0 || eh->e_shstrndx>=eh->e_shnum ||
+       !DS_IN(eh->e_shoff,(uint64_t)eh->e_shnum*sizeof(Elf64_Shdr))) return -1;
+    const Elf64_Shdr*sh=(const Elf64_Shdr*)(m+eh->e_shoff);
+    const Elf64_Shdr*ssh=&sh[eh->e_shstrndx];
+    if(!DS_IN(ssh->sh_offset,ssh->sh_size)) return -2;
+    const char*ss=(const char*)(m+ssh->sh_offset);
+    for(int i=0;i<eh->e_shnum;i++){
+        if(sh[i].sh_name>=ssh->sh_size || !memchr(ss+sh[i].sh_name,0,ssh->sh_size-sh[i].sh_name)) continue;
+        const char*n=ss+sh[i].sh_name;
+        if(!strncmp(n,".zdebug_",8)) *flags|=DWF_ZDEBUG;
+        if(!strcmp(n,".gnu_debuglink")) *flags|=DWF_DEBUGLINK;
+        if(!strcmp(n,".gnu_debugaltlink")) *flags|=DWF_ALTLINK;
+        if(!strcmp(n,".debug_str_offsets")) *flags|=DWF_STROFFS;
+        if(!DS_IN(sh[i].sh_offset,sh[i].sh_size)) continue;   /* a section outside the file is not used */
+        int dbg = !strcmp(n,".debug_info")||!strcmp(n,".debug_abbrev")||!strcmp(n,".debug_str");
+        if(dbg && (sh[i].sh_flags&SHF_COMPRESSED)){ *flags|=DWF_COMPRESSED; continue; }
+        if(!strcmp(n,".debug_info")){ DI=m+sh[i].sh_offset; DI_SZ=sh[i].sh_size; }
+        else if(!strcmp(n,".debug_abbrev")){ AB=m+sh[i].sh_offset; AB_SZ=sh[i].sh_size; }
+        else if(!strcmp(n,".debug_str")){    DS=m+sh[i].sh_offset; DS_SZ=sh[i].sh_size; }
+    }
+    #undef DS_IN
+    return 0;
+}
 static int build_index(void){
     int cap=4096; CU=malloc(sizeof(cu_t)*cap); NCU=0;
     if(!CU) return 0;
@@ -202,7 +234,10 @@ static int build_index(void){
         if((size_t)(ce-p) < (size_t)(2+2+osz)) break;    /* version, unit type/addr size, abbrev offset */
         uint16_t ver=*(uint16_t*)p; p+=2;
         uint64_t ao; int asz;
-        if(ver>=5){ p++; asz=*p++; ao=osz==8?*(uint64_t*)p:*(uint32_t*)p; p+=osz; }
+        if(ver>=5){ int ut=*p++; asz=*p++; ao=osz==8?*(uint64_t*)p:*(uint32_t*)p; p+=osz;
+                    if(ut==4||ut==5){ p+=8; G_split++; }                   /* skeleton/split: dwo_id */
+                    else if(ut==2||ut==6) p+=8+(size_t)osz;                 /* type unit: signature, type offset */
+                    if(p>ce) break; }
         else { ao=osz==8?*(uint64_t*)p:*(uint32_t*)p; p+=osz; asz=*p++; }
         if(asz!=4 && asz!=8) break;                        /* form_skip reads addresses of this size */
         if(NCU==cap){ cu_t *t=realloc(CU,sizeof(cu_t)*(size_t)cap*2);
@@ -235,7 +270,29 @@ typedef struct {
     unsigned long want;             /* DIE offset to resolve */
     die_t out; int found;
     const char*type_name;           /* Find a struct by name */
+    int pre;                        /* The one-pass index of every wanted name (prescan) */
 } job_t;
+/* One pass over .debug_info collects, for every name the table wants, the variable candidates
+   and the first struct definition in each CU.  The per-key lookups below then read only the
+   CUs that matter; a full pass per key (~55 of them over 100-200MB) took 26-46s. */
+#define PRE_MAX 128
+#define PRE_PER 256
+typedef struct { const char*name; int is_type, next, last_cu;
+                 int ncand; unsigned long cand[32]; int cand_def[32];
+                 int ntd; unsigned long td[PRE_PER]; long tdsz[PRE_PER]; } pre_t;
+static pre_t *PRE=NULL; static int NPRE=0, PRE_HEAD[256];
+static unsigned pre_hash(const char*s){ unsigned h=2166136261u; while(*s){ h^=(unsigned char)*s++; h*=16777619u; } return h&255; }
+static pre_t *pre_find(const char*nm,int is_type){
+    if(!PRE||!nm) return NULL;
+    for(int i=PRE_HEAD[pre_hash(nm)];i>=0;i=PRE[i].next)
+        if(PRE[i].is_type==is_type && !strcmp(PRE[i].name,nm)) return &PRE[i];
+    return NULL;
+}
+static void pre_add(const char*nm,int is_type){
+    if(!nm||!PRE||NPRE>=PRE_MAX||pre_find(nm,is_type)) return;
+    pre_t*e=&PRE[NPRE]; memset(e,0,sizeof *e); e->name=nm; e->is_type=is_type; e->last_cu=-1;
+    unsigned h=pre_hash(nm); e->next=PRE_HEAD[h]; PRE_HEAD[h]=NPRE++;
+}
 
 static int scan_cu(cu_t*cu, job_t*J){
     if(load_abbrev(cu->ab_off)<0){ G_desync++; return -1; }
@@ -263,6 +320,17 @@ static int scan_cu(cu_t*cu, job_t*J){
             case A_decl: is_decl=(v!=0); break;
             default: break; }
         }
+        if(J->pre){
+            if(t->tag==T_var && ty!=(uint64_t)-1){
+                pre_t*e=pre_find(nm,0); if(!e) e=pre_find(lnk,0);
+                if(e && e->ncand<32){ e->cand[e->ncand]=(unsigned long)ty; e->cand_def[e->ncand]=(has_loc&&!is_decl); e->ncand++; }
+            } else if((t->tag==T_struct||t->tag==T_class||t->tag==T_union) && nm && bsz>0){
+                pre_t*e=pre_find(nm,1); int ci=(int)(cu-CU);
+                if(e && e->last_cu!=ci && e->ntd<PRE_PER){ e->td[e->ntd]=doff; e->tdsz[e->ntd]=(long)bsz; e->ntd++; e->last_cu=ci; }
+            }
+            if(t->kids) depth++;
+            continue;
+        }
         if(J->var && t->tag==T_var && ty!=(uint64_t)-1 &&
            ((nm&&!strcmp(nm,J->var))||(lnk&&!strcmp(lnk,J->var)))){
             if(J->ncand<32){ J->cand[J->ncand]=(unsigned long)ty;
@@ -289,13 +357,48 @@ static int scan_cu(cu_t*cu, job_t*J){
     return 0;
 }
 
+/* Build the index for these names (vars: variable roots, types: struct names) */
+static void prescan(const char*const*vars,int nv,const char*const*types,int nt){
+    if(!PRE) PRE=(pre_t*)calloc(PRE_MAX,sizeof(pre_t));
+    if(!PRE) return;
+    NPRE=0; for(int i=0;i<256;i++) PRE_HEAD[i]=-1;
+    for(int i=0;i<nv;i++) pre_add(vars[i],0);
+    for(int i=0;i<nt;i++) pre_add(types[i],1);
+    job_t J; memset(&J,0,sizeof J); J.pre=1;
+    for(int c=0;c<NCU;c++) scan_cu(&CU[c],&J);
+}
+/* The DIE at an offset, read once: type chains and nested members revisit the same DIEs
+   for every key, each visit a scan of a whole CU */
+#define MEMO_N 4096
+typedef struct { unsigned long off; int rc; die_t d; } memo_t;
+static memo_t **MEMO=NULL;
+static int die_at(unsigned long off,die_t*out){
+    unsigned h=(unsigned)((off*2654435761u)>>4)&(MEMO_N-1);
+    if(!MEMO) MEMO=(memo_t**)calloc(MEMO_N,sizeof *MEMO);
+    for(unsigned k=0;MEMO && k<MEMO_N;k++){
+        memo_t*m=MEMO[(h+k)&(MEMO_N-1)];
+        if(!m) break;
+        if(m->off==off){ if(m->rc==0) *out=m->d; return m->rc; }
+    }
+    cu_t*c=cu_of(off); int rc=-1;
+    job_t*J=(job_t*)calloc(1,sizeof *J);
+    if(c && J){ J->want=off; if(scan_cu(c,J)==0 && J->found){ *out=J->out; rc=0; } }
+    if(MEMO){ memo_t*m=(memo_t*)malloc(sizeof *m);
+        if(m){ m->off=off; m->rc=rc; if(rc==0) m->d=J->out;
+            for(unsigned k=0;k<MEMO_N;k++){ unsigned i=(h+k)&(MEMO_N-1); if(!MEMO[i]){ MEMO[i]=m; m=NULL; break; } }
+            free(m); } }
+    free(J);
+    return rc;
+}
+static void prescan_free(void){
+    free(PRE); PRE=NULL; NPRE=0;
+    if(MEMO){ for(int i=0;i<MEMO_N;i++) free(MEMO[i]); free(MEMO); MEMO=NULL; }
+}
 /* Resolve the type chain through typedef/const/volatile to a struct or base DIE */
 static int resolve_type(unsigned long off, die_t*out){
     for(int g=0; g<16; g++){
-        cu_t*c=cu_of(off); if(!c) return -1;
-        job_t J; memset(&J,0,sizeof J); J.want=off;
-        if(scan_cu(c,&J)<0) return -1;
-        if(!J.found) return -1;
+        job_t J; memset(&J,0,sizeof J);
+        if(die_at(off,&J.out)<0) return -1;
         if(J.out.tag==T_struct||J.out.tag==T_class||J.out.tag==T_union||J.out.tag==T_base){
             *out=J.out; return 0;
         }
@@ -304,7 +407,7 @@ static int resolve_type(unsigned long off, die_t*out){
     }
     return -1;
 }
-/* L2 sanity check */
+/* L2 value check */
 static int sane_struct(const die_t*d){
     if(d->bsize<=0||d->bsize>(1<<20)) return 0;
     for(int i=0;i<d->nmem;i++)
@@ -314,7 +417,9 @@ static int sane_struct(const die_t*d){
 /* Symbol to type DIE; with several candidates, prefer the definition and discard those that fail */
 static int resolve_symbol(const char*sym, die_t*out, unsigned long*type_off){
     job_t J; memset(&J,0,sizeof J); J.var=sym;
-    for(int c=0;c<NCU;c++){ scan_cu(&CU[c],&J); }        /* Collect candidates from every CU */
+    pre_t*e=pre_find(sym,0);
+    if(e){ J.ncand=e->ncand; memcpy(J.cand,e->cand,sizeof J.cand); memcpy(J.cand_def,e->cand_def,sizeof J.cand_def); }
+    else for(int c=0;c<NCU;c++){ scan_cu(&CU[c],&J); }   /* Collect candidates from every CU */
     if(!J.ncand) return -1;
     /* Do not adopt when several DIEs share the name: a DIE picked by name alone is
        not guaranteed to be the symtab symbol (static variables repeat per CU).
@@ -373,6 +478,9 @@ static int find_member(const die_t*d,const char*want,long base,int depth,long*re
 }
 /* sizeof a struct by name */
 static int sizeof_type(const char*name,long*sz,const char**real){
+    pre_t*e=pre_find(name,1);
+    if(e){ for(int i=0;i<e->ntd;i++) if(e->tdsz[i]>0 && e->tdsz[i]<=(1<<20)){ *sz=e->tdsz[i]; if(real)*real=name; return 0; }
+           if(e->ntd<PRE_PER) return -1; }
     job_t J; memset(&J,0,sizeof J); J.type_name=name;
     for(int c=0;c<NCU;c++){
         memset(&J.out,0,sizeof J.out); J.found=0; J.type_name=name;
@@ -386,6 +494,14 @@ static int sizeof_type(const char*name,long*sz,const char**real){
 /* Member offset within a struct named directly (nested included), for types with no
    variable root - a BCB array element beyond a pointer.  Definitions only (bsize>0). */
 static int member_of_type(const char*name,const char*member,long*off){
+    pre_t*e=pre_find(name,1);
+    if(e){ for(int i=0;i<e->ntd;i++){
+               job_t K; memset(&K,0,sizeof K);
+               if(die_at(e->td[i],&K.out)<0) continue;
+               if(K.out.bsize>0 && K.out.nmem>0){
+                   char path[320];
+                   if(find_member(&K.out,member,0,0,off,path,sizeof path)==0) return 0; } }
+           if(e->ntd<PRE_PER) return -1; }
     job_t J; memset(&J,0,sizeof J);
     for(int c=0;c<NCU;c++){
         memset(&J.out,0,sizeof J.out); J.found=0; J.type_name=name;
@@ -488,24 +604,21 @@ int main(int argc,char**argv){
     Elf64_Ehdr*eh=(Elf64_Ehdr*)m;
     if(memcmp(eh->e_ident,ELFMAG,SELFMAG)||eh->e_ident[EI_CLASS]!=ELFCLASS64){
         fprintf(stderr,"not ELF64\n"); return 2; }
-    if(eh->e_shentsize!=sizeof(Elf64_Shdr) || eh->e_shnum==0 || eh->e_shstrndx>=eh->e_shnum ||
-       !DW_IN_FILE(eh->e_shoff,(uint64_t)eh->e_shnum*sizeof(Elf64_Shdr))){
-        fprintf(stderr,"section header table outside the file\n"); return 2; }
-    Elf64_Shdr*sh=(Elf64_Shdr*)(m+eh->e_shoff);
-    Elf64_Shdr*ssh=&sh[eh->e_shstrndx];
-    if(!DW_IN_FILE(ssh->sh_offset,ssh->sh_size)){ fprintf(stderr,"section name table outside the file\n"); return 2; }
-    const char*ss=(const char*)(m+ssh->sh_offset);
-    for(int i=0;i<eh->e_shnum;i++){
-        if(sh[i].sh_name>=ssh->sh_size || !memchr(ss+sh[i].sh_name,0,ssh->sh_size-sh[i].sh_name)) continue;
-        if(!DW_IN_FILE(sh[i].sh_offset,sh[i].sh_size)) continue;
-        const char*n=ss+sh[i].sh_name;
-        if(!strcmp(n,".debug_info")){ DI=m+sh[i].sh_offset; DI_SZ=sh[i].sh_size; }
-        else if(!strcmp(n,".debug_abbrev")){ AB=m+sh[i].sh_offset; AB_SZ=sh[i].sh_size; }
-        else if(!strcmp(n,".debug_str")){    DS=m+sh[i].sh_offset; DS_SZ=sh[i].sh_size; }
-    }
     #undef DW_IN_FILE
-    if(!DI||!AB){ fprintf(stderr,"no debug sections - stripped binary\n"); return 3; }
+    int fl=0, r=dw_sections(m,fsz,&fl);
+    if(r==-1){ fprintf(stderr,"section header table outside the file\n"); return 2; }
+    if(r==-2){ fprintf(stderr,"section name table outside the file\n"); return 2; }
+    if(fl&DWF_COMPRESSED){ fprintf(stderr,"compressed debug sections (-gz, SHF_COMPRESSED) - not supported; decompress with objcopy --decompress-debug-sections\n"); return 3; }
+    if(!DI||!AB){
+        fprintf(stderr,"%s\n",(fl&DWF_ZDEBUG)?"old-style compressed debug sections (.zdebug) - not supported"
+                             :(fl&DWF_DEBUGLINK)?"debug info is in a separate file (.gnu_debuglink) - run dwoff on that file"
+                             :"no debug sections - stripped binary");
+        return 3; }
+    Elf64_Shdr*sh=(Elf64_Shdr*)(m+eh->e_shoff);
     build_index();
+    { const char *vs[PRE_MAX], *ts[PRE_MAX]; int nv=0, nt=0;
+      for(int i=0;i<NTG;i++){ if(TG[i].sym && nv<PRE_MAX) vs[nv++]=TG[i].sym; if(TG[i].type && nt<PRE_MAX) ts[nt++]=TG[i].type; }
+      prescan(vs,nv,ts,nt); atexit(prescan_free); }
     if(!emit_c&&!emit_py&&!emit_tbl)
         printf("dwoff - DWARF offset extraction\n  target: %s\n  .debug_info %.1fMB, %d CUs, DWARF v%d\n\n",
                argv[1],DI_SZ/1048576.0,NCU,CU[0].ver);
@@ -566,10 +679,14 @@ int main(int argc,char**argv){
               long cnt=(long)(sh[i].sh_size/sizeof(Elf64_Sym));
               for(long k=0;k<cnt;k++){
                   if(sy[k].st_name>=st_->sh_size || sy[k].st_shndx==SHN_UNDEF) continue;
+                  if(ELF64_ST_TYPE(sy[k].st_info)!=STT_OBJECT) continue;
                   const char *nm=str+sy[k].st_name;
                   if(!memchr(nm,0,st_->sh_size-sy[k].st_name)) continue;
-                  for(int j=0;j<NR;j++)
-                      if(!sz[j] && (!strcmp(nm,mangled[j]) || !strcmp(nm,plain[j]))){ sz[j]=sy[k].st_size; break; }
+                  /* as cub_top's lookup: exact, or "name." (-flto .lto_priv.N) */
+                  for(int j=0;j<NR;j++){
+                      size_t a=strlen(mangled[j]), b=strlen(plain[j]);
+                      if(!sz[j] && ((!strncmp(nm,mangled[j],a) && (!nm[a]||nm[a]=='.')) ||
+                                    (!strncmp(nm,plain[j],b) && (!nm[b]||nm[b]=='.')))){ sz[j]=sy[k].st_size; break; } }
               }
           }
           for(int j=0;j<NR;j++) if(sz[j]) printf("SYMSZ_%s %lu\n",plain[j],sz[j]); }
