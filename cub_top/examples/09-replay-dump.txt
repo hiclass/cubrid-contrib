@@ -1,26 +1,26 @@
-ts="2026-10-15 08:19:26" ts_epoch=1792052366 ts_epoch_ms=1792052366206
+ts="2026-10-15 13:21:58" ts_epoch=1792070518 ts_epoch_ms=1792070518236
 caps.vm_readv=1 caps.mem_pread=1 caps.rollup=1 caps.proc_io=1
 perm.limited=0
-os.ram_total_kb=197179440 os.ram_avail_kb=19244224 os.cached_kb=98072228 os.swap_total_kb=0 os.swap_free_kb=0
-os.cpu_us_pct=10.0 os.cpu_sy_pct=6.2 os.cpu_wa_pct=0.1 os.cpu_busy_cores=10.41 os.cores_logical=64 os.cores_physical=32
-os.load1=21.71 os.load5=21.52 os.load15=23.13
-os.cores_saturated=5 os.cores_high=1 os.core_max_pct=100.0
-os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,53.9,48.0,30.0,21.0,20.8,19.8,19.8,18.3,16.8,16.7,14.9,13.0,12.9,11.9,11.9,11.1,11.1,10.8,9.0,8.9,8.9,8.0,7.9,7.8,7.1,7.0,7.0,6.9,6.0,6.0,6.0,5.9,5.1,5.0,4.9,4.0,4.0,4.0,4.0,4.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,2.9,2.9,2.0,2.0,2.0,1.0,1.0,0.0,0.0,0.0,0.0,0.0"
+os.ram_total_kb=197179440 os.ram_avail_kb=19903724 os.cached_kb=98146040 os.swap_total_kb=0 os.swap_free_kb=0
+os.cpu_us_pct=8.8 os.cpu_sy_pct=4.8 os.cpu_wa_pct=0.1 os.cpu_busy_cores=8.72 os.cores_logical=64 os.cores_physical=32
+os.load1=22.83 os.load5=23.79 os.load15=23.99
+os.cores_saturated=4 os.cores_high=0 os.core_max_pct=100.0
+os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,42.6,38.4,31.0,29.1,19.8,19.4,18.6,17.0,17.0,16.0,15.0,14.9,14.0,13.0,11.8,11.0,8.9,8.0,7.9,7.9,7.9,7.8,7.1,6.9,6.9,6.1,5.8,5.0,4.9,4.9,4.9,4.0,4.0,4.0,3.0,3.0,3.0,3.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0"
 cubrid.version="11.5.0.2543" heapB.table="offsets-file" heapB.lib="/proc/1177276/map_files/7f8b46c0a000-7f8b478ca000"
 server.up=1
 instance.count=4 instance.current="cbench"
-instance.cbench.pid=1177276 instance.cbench.rss_bytes=1005539328 instance.cbench.file_bytes=3497984 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=208302080 instance.cbench.pl_count=1 instance.cbench.tracked=1
-instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=988143616 instance.chkdb.file_bytes=1986560 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60805120 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
-instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025929216 instance.demodb.file_bytes=3379200 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202915840 instance.demodb.pl_count=1 instance.demodb.tracked=0
-instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=988110848 instance.jiradb.file_bytes=2969600 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=199409664 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
-server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=981972 server.pss_kb=978642 server.swap_kb=0 server.workers=117 server.minflt_per_s=1 server.majflt_per_s=0 server.cpu_pct=1.0 server.host_cores=64
+instance.cbench.pid=1177276 instance.cbench.rss_bytes=1007869952 instance.cbench.file_bytes=4894720 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=207482880 instance.cbench.pl_count=1 instance.cbench.tracked=1
+instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=988893184 instance.chkdb.file_bytes=2682880 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60715008 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
+instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025323008 instance.demodb.file_bytes=2772992 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202915840 instance.demodb.pl_count=1 instance.demodb.tracked=0
+instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=987910144 instance.jiradb.file_bytes=2744320 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=199421952 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
+server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=984248 server.pss_kb=981769 server.swap_kb=0 server.workers=117 server.minflt_per_s=7 server.majflt_per_s=0 server.cpu_pct=0.0 server.host_cores=64
 region.data_buffer.mapped_bytes=603860992 region.data_buffer.rss_bytes=603729920 region.data_buffer.cfg_bytes=536870912 region.data_buffer.over_pct=112.5
 region.log_buffer.mapped_bytes=276963328 region.log_buffer.rss_bytes=270536704 region.log_buffer.cfg_bytes=268435456 region.log_buffer.over_pct=103.2
-region.dynamic_heap.mapped_bytes=427036672 region.dynamic_heap.rss_bytes=124411904
+region.dynamic_heap.mapped_bytes=427102208 region.dynamic_heap.rss_bytes=124411904
 region.thread_stacks.mapped_bytes=939659264 region.thread_stacks.rss_bytes=1638400
-region.code_so.mapped_bytes=28827648 region.code_so.rss_bytes=5099520
-region.bin_shm_etc.mapped_bytes=7622656 region.bin_shm_etc.rss_bytes=122880
-region.glibc_arena.mapped_bytes=4620816384 region.glibc_arena.rss_bytes=0
+region.code_so.mapped_bytes=28827648 region.code_so.rss_bytes=7426048
+region.bin_shm_etc.mapped_bytes=7622656 region.bin_shm_etc.rss_bytes=126976
+region.glibc_arena.mapped_bytes=4620750848 region.glibc_arena.rss_bytes=0
 heapB.enabled=1 heapB.reason="자기검증 통과(num_buffers=32768, offsets-file)" heapB.total_bytes=663036 heapB.excluded=0
 heapB.plan_cache_xcache_bytes=27556 heapB.plan_cache_xcache_grade=M
 heapB.plan_clones_est_bytes=194184 heapB.plan_clones_est_grade=E
@@ -32,20 +32,20 @@ heapB.lock_entries_obj_bytes=128000 heapB.lock_entries_obj_grade=M
 heapB.session_table_bytes=68640 heapB.session_table_grade=M
 heapB.catalog_cache_bytes=9600 heapB.catalog_cache_grade=M
 heapB.conn_entries_css_bytes=99552 heapB.conn_entries_css_grade=M
-cap.aggregate_ms=4.8 cap.over_budget=0 cap.budget_ms=500
+cap.aggregate_ms=3.2 cap.over_budget=0 cap.budget_ms=500
 cap.perfmon_counters_running=1 cap.hit_source="perfmon-cum" cap.reason="카운터 동작 중(watcher 있음) — 누적 히트율, 초당값은 라이브에서"
 cap.buffer_hit_pct=0.01
-cap.await_ms=0.64 cap.read_await_ms=0.73 cap.write_await_ms=0.23
-cap.queue_depth=0.49
+cap.await_ms=0.92 cap.read_await_ms=0.82 cap.write_await_ms=0.97
+cap.queue_depth=0.26
 cap.device="sda" cap.device_via="statfs_fsid" cap.device_reason=""
-cap.dev_iops=763 cap.proc_iops=171
-cap.req_kb=56.1 cap.read_ratio=0.98 cap.profile="8-64KB/read-heavy"
+cap.dev_iops=277 cap.proc_iops=172
+cap.req_kb=107.1 cap.read_ratio=0.34 cap.profile=">64KB/mixed"
 cap.ceiling_cells=0
 cap.ceiling_device_id="t10.ATA_SAMSUNG_MZ7L33T8HBLT-00A07_S6ERNE0T410626@7501476528"
 cap.pb_fetch_per_s=0 cap.pb_ioread_per_s=0 cap.pb_iowrite_per_s=0 cap.log_iowrite_per_s=0 cap.commit_per_s=0
-cap.verdict="· sda: IOPS 763, 대기 0.6ms, 장치 19% — 상한 미관측(큐 4 이상 순간이 필요)"
+cap.verdict="· sda: IOPS 277, 대기 0.9ms, 장치 16% — 상한 미관측(큐 4 이상 순간이 필요)"
 pgbuf.enabled=1 pgbuf.reason="페이지 슬롯 32768개 확인 (헤더 256개 표본)"
-pgbuf.num_buffers=32768 pgbuf.resident=32768 pgbuf.dirty=0 pgbuf.flushing=0 pgbuf.zone1_hot=13088 pgbuf.zone2_warm=1632 pgbuf.zone3_cold=18048 pgbuf.zone_void=0 pgbuf.zone_free=0 pgbuf.hdr_mismatch=0 pgbuf.hdr_unread=0 pgbuf.scan_ms=23.0
+pgbuf.num_buffers=32768 pgbuf.resident=32768 pgbuf.dirty=0 pgbuf.flushing=0 pgbuf.zone1_hot=13088 pgbuf.zone2_warm=1632 pgbuf.zone3_cold=18048 pgbuf.zone_void=0 pgbuf.zone_free=0 pgbuf.hdr_mismatch=0 pgbuf.hdr_unread=0 pgbuf.scan_ms=13.9
 pgbuf.hdr_mismatch_raw=0 pgbuf.rechecked=0 pgbuf.degraded=0
 pgbuf.hdr_read=256 pgbuf.hdr_nonresident=0 pgbuf.hdr_pagemap_unchecked=0
 pgbuf.vol0.resident=39 pgbuf.vol0.dirty=0
@@ -57,19 +57,21 @@ pgbuf.vol5.resident=2 pgbuf.vol5.dirty=0
 pgbuf.vol6.resident=9994 pgbuf.vol6.dirty=0
 pgbuf.vol7.resident=3 pgbuf.vol7.dirty=0
 pgbuf.vol8.resident=1 pgbuf.vol8.dirty=0
-log.append_pageid=4059221 log.append_offset=208 log.nxio_pageid=4059221 log.nxio_offset=208 log.eof_pageid=4059221 log.eof_offset=208 log.flush_lag_pages=0
+pgbuf.unflushed=0 pgbuf.oldest_dirty_excludes_flushing=0
+pgbuf.dwb_enabled=1 pgbuf.dwb_pages_max=128
+log.append_pageid=4059221 log.append_offset=4288 log.nxio_pageid=4059221 log.nxio_offset=4288 log.eof_pageid=4059221 log.eof_offset=4288 log.flush_lag_pages=0
 pgbuf.engine.enabled=1 pgbuf.engine.reason="엔진 집계"
 pgbuf.engine.num_buffers=32768 pgbuf.engine.lists=184 pgbuf.engine.lists_shared=32 pgbuf.engine.lru_pages=32768 pgbuf.engine.zone1=13088 pgbuf.engine.zone2=1632 pgbuf.engine.zone3=18048 pgbuf.engine.victim_candidates=18048 pgbuf.engine.dirty=0 pgbuf.engine.read_ms=0.02
-heapA.chunks=62525 heapA.total_bytes=343482368
+heapA.chunks=62466 heapA.total_bytes=343502848
 heapA.lea_segment_32k_x_n_bytes=290418432
-heapA.96b_chunk_73_88b_req_bytes=1040256
+heapA.96b_chunk_73_88b_req_bytes=1037856
 heapA.other_1m_bytes=1691648
-heapA.other_64k_1m_bytes=21807776
-heapA.other_8k_64k_bytes=11454096
-heapA.other_under_8k_bytes=17070160
-io.read_bps=0 io.write_bps=8134 io.read_iops=101 io.write_iops=70 io.cache_absorb_ok=0 io.rchar_bps=7144 io.blkio_wait_pct=0.00 io.total_read_bytes=164522487808 io.total_write_bytes=6752604160
+heapA.other_64k_1m_bytes=21823504
+heapA.other_8k_64k_bytes=11456272
+heapA.other_under_8k_bytes=17075136
+io.read_bps=0 io.write_bps=8140 io.read_iops=101 io.write_iops=71 io.cache_absorb_ok=0 io.rchar_bps=7150 io.blkio_wait_pct=0.00 io.total_read_bytes=164558036992 io.total_write_bytes=7197872128
 server.d_threads=0 server.threads_total=117
-hostdev.name="sda" hostdev.util_pct=19.0 hostdev.read_bps=42792868
+hostdev.name="sda" hostdev.util_pct=15.8 hostdev.read_bps=10297695
 param.data_buffer_size=536870912 param.data_buffer_size.observed=1
 param.log_buffer_size=268435456 param.log_buffer_size.observed=1
 param.double_write_buffer_size=2097152 param.double_write_buffer_size.observed=0
@@ -82,32 +84,32 @@ param.index_scan_oid_buffer_size=65536 param.index_scan_oid_buffer_size.observed
 param.index_scan_key_buffer_size=327680 param.index_scan_key_buffer_size.observed=0
 param.thread_stacksize=1048576 param.thread_stacksize.observed=0
 param.max_clients=100 param.max_clients.observed=0
-tier.server_rss_bytes=1005539328 tier.master_rss_bytes=2510848 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=208302080 tier.pl_count=1
-tier.server_cores=0.01 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
-total.cubrid_rss_bytes=1216352256 total.cubrid_pct_ram=0.60
-ts="2026-10-15 08:19:27" ts_epoch=1792052367 ts_epoch_ms=1792052367225
+tier.server_rss_bytes=1007869952 tier.master_rss_bytes=1847296 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=207482880 tier.pl_count=1
+tier.server_cores=0.00 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
+total.cubrid_rss_bytes=1217200128 total.cubrid_pct_ram=0.60
+ts="2026-10-15 13:21:59" ts_epoch=1792070519 ts_epoch_ms=1792070519254
 caps.vm_readv=1 caps.mem_pread=1 caps.rollup=1 caps.proc_io=1
 perm.limited=0
-os.ram_total_kb=197179440 os.ram_avail_kb=19081500 os.cached_kb=97672216 os.swap_total_kb=0 os.swap_free_kb=0
-os.cpu_us_pct=9.0 os.cpu_sy_pct=6.0 os.cpu_wa_pct=0.1 os.cpu_busy_cores=9.58 os.cores_logical=64 os.cores_physical=32
-os.load1=21.71 os.load5=21.52 os.load15=23.13
+os.ram_total_kb=197179440 os.ram_avail_kb=19922920 os.cached_kb=98144724 os.swap_total_kb=0 os.swap_free_kb=0
+os.cpu_us_pct=10.4 os.cpu_sy_pct=4.5 os.cpu_wa_pct=0.2 os.cpu_busy_cores=9.57 os.cores_logical=64 os.cores_physical=32
+os.load1=22.83 os.load5=23.79 os.load15=23.99
 os.cores_saturated=5 os.cores_high=0 os.core_max_pct=100.0
-os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,48.0,29.7,23.3,21.8,21.6,21.0,19.0,16.8,16.7,16.0,14.7,14.7,14.0,10.9,10.0,9.9,8.9,8.9,8.9,8.1,7.9,7.0,6.9,6.1,5.9,5.9,5.0,4.9,4.0,4.0,4.0,4.0,4.0,4.0,4.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,2.9,2.9,2.0,2.0,2.0,2.0,2.0,2.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0"
+os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,43.0,40.0,29.7,28.0,25.0,20.6,19.2,17.8,16.2,16.2,14.9,11.9,11.0,10.0,9.0,9.0,8.1,7.9,7.1,6.9,6.0,6.0,5.9,5.9,5.9,5.0,5.0,5.0,4.0,4.0,4.0,3.0,3.0,3.0,3.0,2.9,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,1.0,1.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0"
 cubrid.version="11.5.0.2543" heapB.table="offsets-file" heapB.lib="/proc/1177276/map_files/7f8b46c0a000-7f8b478ca000"
 server.up=1
 instance.count=4 instance.current="cbench"
-instance.cbench.pid=1177276 instance.cbench.rss_bytes=1005539328 instance.cbench.file_bytes=3497984 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=208302080 instance.cbench.pl_count=1 instance.cbench.tracked=1
-instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=988143616 instance.chkdb.file_bytes=1986560 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60805120 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
-instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025929216 instance.demodb.file_bytes=3379200 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202915840 instance.demodb.pl_count=1 instance.demodb.tracked=0
-instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=988110848 instance.jiradb.file_bytes=2969600 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=199409664 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
-server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=981972 server.pss_kb=978642 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=0.0 server.host_cores=64
+instance.cbench.pid=1177276 instance.cbench.rss_bytes=1007869952 instance.cbench.file_bytes=4894720 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=207482880 instance.cbench.pl_count=1 instance.cbench.tracked=1
+instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=988893184 instance.chkdb.file_bytes=2682880 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60715008 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
+instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025323008 instance.demodb.file_bytes=2772992 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202915840 instance.demodb.pl_count=1 instance.demodb.tracked=0
+instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=987910144 instance.jiradb.file_bytes=2744320 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=199421952 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
+server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=984248 server.pss_kb=981769 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=1.0 server.host_cores=64
 region.data_buffer.mapped_bytes=603860992 region.data_buffer.rss_bytes=603729920 region.data_buffer.cfg_bytes=536870912 region.data_buffer.over_pct=112.5
 region.log_buffer.mapped_bytes=276963328 region.log_buffer.rss_bytes=270536704 region.log_buffer.cfg_bytes=268435456 region.log_buffer.over_pct=103.2
-region.dynamic_heap.mapped_bytes=427036672 region.dynamic_heap.rss_bytes=124411904
+region.dynamic_heap.mapped_bytes=427102208 region.dynamic_heap.rss_bytes=124411904
 region.thread_stacks.mapped_bytes=939659264 region.thread_stacks.rss_bytes=1638400
-region.code_so.mapped_bytes=28827648 region.code_so.rss_bytes=5099520
-region.bin_shm_etc.mapped_bytes=7622656 region.bin_shm_etc.rss_bytes=122880
-region.glibc_arena.mapped_bytes=4620816384 region.glibc_arena.rss_bytes=0
+region.code_so.mapped_bytes=28827648 region.code_so.rss_bytes=7426048
+region.bin_shm_etc.mapped_bytes=7622656 region.bin_shm_etc.rss_bytes=126976
+region.glibc_arena.mapped_bytes=4620750848 region.glibc_arena.rss_bytes=0
 heapB.enabled=1 heapB.reason="자기검증 통과(num_buffers=32768, offsets-file)" heapB.total_bytes=663036 heapB.excluded=0
 heapB.plan_cache_xcache_bytes=27556 heapB.plan_cache_xcache_grade=M
 heapB.plan_clones_est_bytes=194184 heapB.plan_clones_est_grade=E
@@ -124,16 +126,16 @@ cap.perfmon_counters_running=0 cap.hit_source="turnover" cap.reason="이번 구�
 cap.buffer_hit_pct=100.00
 cap.turnover_pct=0.00 cap.miss_pages_per_s=0
 cap.readmit_pct=0.00
-cap.await_ms=0.43 cap.read_await_ms=0.57 cap.write_await_ms=0.14
-cap.queue_depth=0.27
+cap.await_ms=0.92 cap.read_await_ms=1.00 cap.write_await_ms=0.86
+cap.queue_depth=0.34
 cap.device="sda" cap.device_via="statfs_fsid" cap.device_reason=""
-cap.dev_iops=618 cap.proc_iops=33
-cap.req_kb=40.3 cap.read_ratio=0.93 cap.profile="8-64KB/read-heavy"
+cap.dev_iops=369 cap.proc_iops=33
+cap.req_kb=104.8 cap.read_ratio=0.46 cap.profile=">64KB/mixed"
 cap.ceiling_cells=0
 cap.ceiling_device_id="t10.ATA_SAMSUNG_MZ7L33T8HBLT-00A07_S6ERNE0T410626@7501476528"
-cap.verdict="· sda: IOPS 618, 대기 0.4ms, 장치 16% — 상한 미관측(큐 4 이상 순간이 필요)"
+cap.verdict="· sda: IOPS 369, 대기 0.9ms, 장치 19% — 상한 미관측(큐 4 이상 순간이 필요)"
 pgbuf.enabled=1 pgbuf.reason="페이지 슬롯 32768개 확인 (헤더 256개 표본)"
-pgbuf.num_buffers=32768 pgbuf.resident=32768 pgbuf.dirty=0 pgbuf.flushing=0 pgbuf.zone1_hot=13088 pgbuf.zone2_warm=1632 pgbuf.zone3_cold=18048 pgbuf.zone_void=0 pgbuf.zone_free=0 pgbuf.hdr_mismatch=0 pgbuf.hdr_unread=0 pgbuf.scan_ms=3.5
+pgbuf.num_buffers=32768 pgbuf.resident=32768 pgbuf.dirty=0 pgbuf.flushing=0 pgbuf.zone1_hot=13088 pgbuf.zone2_warm=1632 pgbuf.zone3_cold=18048 pgbuf.zone_void=0 pgbuf.zone_free=0 pgbuf.hdr_mismatch=0 pgbuf.hdr_unread=0 pgbuf.scan_ms=3.3
 pgbuf.hdr_mismatch_raw=0 pgbuf.rechecked=0 pgbuf.degraded=0
 pgbuf.hdr_read=256 pgbuf.hdr_nonresident=0 pgbuf.hdr_pagemap_unchecked=0
 pgbuf.vol0.resident=39 pgbuf.vol0.dirty=0
@@ -145,19 +147,21 @@ pgbuf.vol5.resident=2 pgbuf.vol5.dirty=0
 pgbuf.vol6.resident=9994 pgbuf.vol6.dirty=0
 pgbuf.vol7.resident=3 pgbuf.vol7.dirty=0
 pgbuf.vol8.resident=1 pgbuf.vol8.dirty=0
-log.append_pageid=4059221 log.append_offset=208 log.nxio_pageid=4059221 log.nxio_offset=208 log.eof_pageid=4059221 log.eof_offset=208 log.flush_lag_pages=0
+pgbuf.unflushed=0 pgbuf.oldest_dirty_excludes_flushing=0
+pgbuf.dwb_enabled=1 pgbuf.dwb_pages_max=128
+log.append_pageid=4059221 log.append_offset=4288 log.nxio_pageid=4059221 log.nxio_offset=4288 log.eof_pageid=4059221 log.eof_offset=4288 log.flush_lag_pages=0
 pgbuf.engine.enabled=1 pgbuf.engine.reason="엔진 집계"
 pgbuf.engine.num_buffers=32768 pgbuf.engine.lists=184 pgbuf.engine.lists_shared=32 pgbuf.engine.lru_pages=32768 pgbuf.engine.zone1=13088 pgbuf.engine.zone2=1632 pgbuf.engine.zone3=18048 pgbuf.engine.victim_candidates=18048 pgbuf.engine.dirty=0 pgbuf.engine.read_ms=0.01
-heapA.chunks=62525 heapA.total_bytes=343482368
+heapA.chunks=62466 heapA.total_bytes=343502848
 heapA.lea_segment_32k_x_n_bytes=290418432
-heapA.96b_chunk_73_88b_req_bytes=1040256
+heapA.96b_chunk_73_88b_req_bytes=1037856
 heapA.other_1m_bytes=1691648
-heapA.other_64k_1m_bytes=21807776
-heapA.other_8k_64k_bytes=11454096
-heapA.other_under_8k_bytes=17070160
-io.read_bps=0 io.write_bps=0 io.read_iops=33 io.write_iops=0 io.cache_absorb_ok=0 io.rchar_bps=262 io.blkio_wait_pct=0.00 io.total_read_bytes=164522487808 io.total_write_bytes=6752604160
+heapA.other_64k_1m_bytes=21823504
+heapA.other_8k_64k_bytes=11456272
+heapA.other_under_8k_bytes=17075136
+io.read_bps=0 io.write_bps=0 io.read_iops=33 io.write_iops=0 io.cache_absorb_ok=0 io.rchar_bps=262 io.blkio_wait_pct=0.00 io.total_read_bytes=164558036992 io.total_write_bytes=7197872128
 server.d_threads=0 server.threads_total=117
-hostdev.name="sda" hostdev.util_pct=15.8 hostdev.read_bps=23837516
+hostdev.name="dm-2" hostdev.util_pct=19.4 hostdev.read_bps=18305946
 param.data_buffer_size=536870912 param.data_buffer_size.observed=1
 param.log_buffer_size=268435456 param.log_buffer_size.observed=1
 param.double_write_buffer_size=2097152 param.double_write_buffer_size.observed=0
@@ -170,32 +174,32 @@ param.index_scan_oid_buffer_size=65536 param.index_scan_oid_buffer_size.observed
 param.index_scan_key_buffer_size=327680 param.index_scan_key_buffer_size.observed=0
 param.thread_stacksize=1048576 param.thread_stacksize.observed=0
 param.max_clients=100 param.max_clients.observed=0
-tier.server_rss_bytes=1005539328 tier.master_rss_bytes=2510848 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=208302080 tier.pl_count=1
-tier.server_cores=0.00 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
-total.cubrid_rss_bytes=1216352256 total.cubrid_pct_ram=0.60
-ts="2026-10-15 08:19:28" ts_epoch=1792052368 ts_epoch_ms=1792052368244
+tier.server_rss_bytes=1007869952 tier.master_rss_bytes=1847296 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=207482880 tier.pl_count=1
+tier.server_cores=0.01 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
+total.cubrid_rss_bytes=1217200128 total.cubrid_pct_ram=0.60
+ts="2026-10-15 13:22:00" ts_epoch=1792070520 ts_epoch_ms=1792070520271
 caps.vm_readv=1 caps.mem_pread=1 caps.rollup=1 caps.proc_io=1
 perm.limited=0
-os.ram_total_kb=197179440 os.ram_avail_kb=19279280 os.cached_kb=97631224 os.swap_total_kb=0 os.swap_free_kb=0
-os.cpu_us_pct=9.7 os.cpu_sy_pct=5.1 os.cpu_wa_pct=0.1 os.cpu_busy_cores=9.47 os.cores_logical=64 os.cores_physical=32
-os.load1=21.71 os.load5=21.52 os.load15=23.13
-os.cores_saturated=5 os.cores_high=1 os.core_max_pct=100.0
-os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,91.1,48.5,25.7,22.5,16.8,15.8,14.0,12.0,11.8,11.8,11.1,11.0,9.9,9.1,9.0,9.0,8.0,7.0,7.0,6.0,5.9,5.0,5.0,5.0,5.0,5.0,4.9,4.0,4.0,3.9,3.9,3.9,3.0,3.0,3.0,3.0,3.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0"
+os.ram_total_kb=197179440 os.ram_avail_kb=19519204 os.cached_kb=98001696 os.swap_total_kb=0 os.swap_free_kb=0
+os.cpu_us_pct=10.3 os.cpu_sy_pct=4.8 os.cpu_wa_pct=0.2 os.cpu_busy_cores=9.63 os.cores_logical=64 os.cores_physical=32
+os.load1=22.83 os.load5=23.79 os.load15=23.99
+os.cores_saturated=4 os.cores_high=1 os.core_max_pct=100.0
+os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,94.1,43.6,30.7,25.0,23.0,22.5,22.0,19.8,18.8,18.8,18.6,17.0,14.1,13.9,12.0,11.9,9.9,9.1,8.0,7.1,6.9,6.9,6.9,6.0,6.0,5.9,5.0,5.0,5.0,5.0,5.0,4.9,4.0,4.0,4.0,4.0,3.0,3.0,2.9,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,1.0,1.0,1.0,1.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0"
 cubrid.version="11.5.0.2543" heapB.table="offsets-file" heapB.lib="/proc/1177276/map_files/7f8b46c0a000-7f8b478ca000"
 server.up=1
 instance.count=4 instance.current="cbench"
-instance.cbench.pid=1177276 instance.cbench.rss_bytes=1005539328 instance.cbench.file_bytes=3497984 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=208302080 instance.cbench.pl_count=1 instance.cbench.tracked=1
-instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=988143616 instance.chkdb.file_bytes=1986560 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60805120 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
-instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025929216 instance.demodb.file_bytes=3379200 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202915840 instance.demodb.pl_count=1 instance.demodb.tracked=0
-instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=988110848 instance.jiradb.file_bytes=2969600 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=199409664 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
-server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=981972 server.pss_kb=978642 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=1.0 server.host_cores=64
+instance.cbench.pid=1177276 instance.cbench.rss_bytes=1007869952 instance.cbench.file_bytes=4894720 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=207482880 instance.cbench.pl_count=1 instance.cbench.tracked=1
+instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=988893184 instance.chkdb.file_bytes=2682880 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60715008 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
+instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025323008 instance.demodb.file_bytes=2772992 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202915840 instance.demodb.pl_count=1 instance.demodb.tracked=0
+instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=987910144 instance.jiradb.file_bytes=2744320 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=199421952 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
+server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=984248 server.pss_kb=981769 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=1.0 server.host_cores=64
 region.data_buffer.mapped_bytes=603860992 region.data_buffer.rss_bytes=603729920 region.data_buffer.cfg_bytes=536870912 region.data_buffer.over_pct=112.5
 region.log_buffer.mapped_bytes=276963328 region.log_buffer.rss_bytes=270536704 region.log_buffer.cfg_bytes=268435456 region.log_buffer.over_pct=103.2
-region.dynamic_heap.mapped_bytes=427036672 region.dynamic_heap.rss_bytes=124411904
+region.dynamic_heap.mapped_bytes=427102208 region.dynamic_heap.rss_bytes=124411904
 region.thread_stacks.mapped_bytes=939659264 region.thread_stacks.rss_bytes=1638400
-region.code_so.mapped_bytes=28827648 region.code_so.rss_bytes=5099520
-region.bin_shm_etc.mapped_bytes=7622656 region.bin_shm_etc.rss_bytes=122880
-region.glibc_arena.mapped_bytes=4620816384 region.glibc_arena.rss_bytes=0
+region.code_so.mapped_bytes=28827648 region.code_so.rss_bytes=7426048
+region.bin_shm_etc.mapped_bytes=7622656 region.bin_shm_etc.rss_bytes=126976
+region.glibc_arena.mapped_bytes=4620750848 region.glibc_arena.rss_bytes=0
 heapB.enabled=1 heapB.reason="자기검증 통과(num_buffers=32768, offsets-file)" heapB.total_bytes=663036 heapB.excluded=0
 heapB.plan_cache_xcache_bytes=27556 heapB.plan_cache_xcache_grade=M
 heapB.plan_clones_est_bytes=194184 heapB.plan_clones_est_grade=E
@@ -212,16 +216,16 @@ cap.perfmon_counters_running=0 cap.hit_source="turnover" cap.reason="이번 구�
 cap.buffer_hit_pct=100.00
 cap.turnover_pct=0.00 cap.miss_pages_per_s=0
 cap.readmit_pct=0.00
-cap.await_ms=0.63 cap.read_await_ms=0.68 cap.write_await_ms=0.44
-cap.queue_depth=0.31
+cap.await_ms=1.54 cap.read_await_ms=1.11 cap.write_await_ms=1.82
+cap.queue_depth=0.35
 cap.device="sda" cap.device_via="statfs_fsid" cap.device_reason=""
-cap.dev_iops=484 cap.proc_iops=33
-cap.req_kb=59.4 cap.read_ratio=0.86 cap.profile="8-64KB/read-heavy"
+cap.dev_iops=226 cap.proc_iops=33
+cap.req_kb=181.3 cap.read_ratio=0.28 cap.profile=">64KB/write-heavy"
 cap.ceiling_cells=0
 cap.ceiling_device_id="t10.ATA_SAMSUNG_MZ7L33T8HBLT-00A07_S6ERNE0T410626@7501476528"
-cap.verdict="· sda: IOPS 484, 대기 0.6ms, 장치 16% — 상한 미관측(큐 4 이상 순간이 필요)"
+cap.verdict="· sda: IOPS 226, 대기 1.5ms, 장치 18% — 상한 미관측(큐 4 이상 순간이 필요)"
 pgbuf.enabled=1 pgbuf.reason="페이지 슬롯 32768개 확인 (헤더 256개 표본)"
-pgbuf.num_buffers=32768 pgbuf.resident=32768 pgbuf.dirty=0 pgbuf.flushing=0 pgbuf.zone1_hot=13088 pgbuf.zone2_warm=1632 pgbuf.zone3_cold=18048 pgbuf.zone_void=0 pgbuf.zone_free=0 pgbuf.hdr_mismatch=0 pgbuf.hdr_unread=0 pgbuf.scan_ms=3.6
+pgbuf.num_buffers=32768 pgbuf.resident=32768 pgbuf.dirty=0 pgbuf.flushing=0 pgbuf.zone1_hot=13088 pgbuf.zone2_warm=1632 pgbuf.zone3_cold=18048 pgbuf.zone_void=0 pgbuf.zone_free=0 pgbuf.hdr_mismatch=0 pgbuf.hdr_unread=0 pgbuf.scan_ms=3.2
 pgbuf.hdr_mismatch_raw=0 pgbuf.rechecked=0 pgbuf.degraded=0
 pgbuf.hdr_read=256 pgbuf.hdr_nonresident=0 pgbuf.hdr_pagemap_unchecked=0
 pgbuf.vol0.resident=39 pgbuf.vol0.dirty=0
@@ -233,19 +237,21 @@ pgbuf.vol5.resident=2 pgbuf.vol5.dirty=0
 pgbuf.vol6.resident=9994 pgbuf.vol6.dirty=0
 pgbuf.vol7.resident=3 pgbuf.vol7.dirty=0
 pgbuf.vol8.resident=1 pgbuf.vol8.dirty=0
-log.append_pageid=4059221 log.append_offset=208 log.nxio_pageid=4059221 log.nxio_offset=208 log.eof_pageid=4059221 log.eof_offset=208 log.flush_lag_pages=0
+pgbuf.unflushed=0 pgbuf.oldest_dirty_excludes_flushing=0
+pgbuf.dwb_enabled=1 pgbuf.dwb_pages_max=128
+log.append_pageid=4059221 log.append_offset=4288 log.nxio_pageid=4059221 log.nxio_offset=4288 log.eof_pageid=4059221 log.eof_offset=4288 log.flush_lag_pages=0
 pgbuf.engine.enabled=1 pgbuf.engine.reason="엔진 집계"
 pgbuf.engine.num_buffers=32768 pgbuf.engine.lists=184 pgbuf.engine.lists_shared=32 pgbuf.engine.lru_pages=32768 pgbuf.engine.zone1=13088 pgbuf.engine.zone2=1632 pgbuf.engine.zone3=18048 pgbuf.engine.victim_candidates=18048 pgbuf.engine.dirty=0 pgbuf.engine.read_ms=0.01
-heapA.chunks=62525 heapA.total_bytes=343482368
+heapA.chunks=62466 heapA.total_bytes=343502848
 heapA.lea_segment_32k_x_n_bytes=290418432
-heapA.96b_chunk_73_88b_req_bytes=1040256
+heapA.96b_chunk_73_88b_req_bytes=1037856
 heapA.other_1m_bytes=1691648
-heapA.other_64k_1m_bytes=21807776
-heapA.other_8k_64k_bytes=11454096
-heapA.other_under_8k_bytes=17070160
-io.read_bps=0 io.write_bps=0 io.read_iops=33 io.write_iops=0 io.cache_absorb_ok=0 io.rchar_bps=262 io.blkio_wait_pct=0.00 io.total_read_bytes=164522487808 io.total_write_bytes=6752604160
+heapA.other_64k_1m_bytes=21823504
+heapA.other_8k_64k_bytes=11456272
+heapA.other_under_8k_bytes=17075136
+io.read_bps=0 io.write_bps=0 io.read_iops=33 io.write_iops=0 io.cache_absorb_ok=0 io.rchar_bps=262 io.blkio_wait_pct=0.00 io.total_read_bytes=164558036992 io.total_write_bytes=7197872128
 server.d_threads=0 server.threads_total=117
-hostdev.name="sda" hostdev.util_pct=16.2 hostdev.read_bps=25333973
+hostdev.name="sda" hostdev.util_pct=18.1 hostdev.read_bps=11530005
 param.data_buffer_size=536870912 param.data_buffer_size.observed=1
 param.log_buffer_size=268435456 param.log_buffer_size.observed=1
 param.double_write_buffer_size=2097152 param.double_write_buffer_size.observed=0
@@ -258,6 +264,6 @@ param.index_scan_oid_buffer_size=65536 param.index_scan_oid_buffer_size.observed
 param.index_scan_key_buffer_size=327680 param.index_scan_key_buffer_size.observed=0
 param.thread_stacksize=1048576 param.thread_stacksize.observed=0
 param.max_clients=100 param.max_clients.observed=0
-tier.server_rss_bytes=1005539328 tier.master_rss_bytes=2510848 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=208302080 tier.pl_count=1
+tier.server_rss_bytes=1007869952 tier.master_rss_bytes=1847296 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=207482880 tier.pl_count=1
 tier.server_cores=0.01 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
-total.cubrid_rss_bytes=1216352256 total.cubrid_pct_ram=0.60
+total.cubrid_rss_bytes=1217200128 total.cubrid_pct_ram=0.60

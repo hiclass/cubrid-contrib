@@ -171,8 +171,11 @@ util = (diskstats io_ms 델타) / 경과시간(ms) × 100
 |---|---|---|
 | `pgbuf.num_buffers` | BCB 수 = `data_buffer_size / page size` | paramdump 와 일치해야 한다(L4 게이트) |
 | `pgbuf.resident` | NULL 이 아닌 VPID 를 가진 BCB 수 = 버퍼에 올라온 페이지 수 | `resident/num_buffers` 가 100% 미만이면 버퍼가 아직 안 찼다(워밍 중 또는 DB 가 버퍼보다 작다) |
-| `pgbuf.dirty` | dirty 플래그가 선 BCB 수 = 볼륨에 아직 안 내려간 페이지 | 커밋과 무관하게 남는다(커밋은 로그만 내린다). 체크포인트·flush 스레드가 줄인다 |
-| `pgbuf.flushing` | flush 진행 중 표시 | 순간값 |
+| `pgbuf.dirty` | dirty 플래그가 선 BCB 수 | 커밋과 무관하게 남는다(커밋은 로그만 내린다). 체크포인트·flush 스레드가 줄인다. flush 가 시작되면 엔진이 dirty 를 내리므로 flush 중인 페이지는 여기 없다 |
+| `pgbuf.flushing` | flush 진행 중인 BCB 수 | 순간값. 아직 볼륨에 안 쓰였다 |
+| `pgbuf.unflushed` | dirty 또는 flushing 인 BCB 수 = 버퍼가 아직 내보내지 않은 페이지 | flush 도중 다시 dirty 가 된 페이지는 두 비트가 함께 서므로 합이 아니라 한 번만 센다 |
+| `pgbuf.oldest_dirty_excludes_flushing` | flushing 이면서 dirty 가 아닌 BCB 수 | 엔진이 flush 시작 때 `oldest_unflush_lsa` 를 비우므로 가장 오래된 dirty LSA 가 이 페이지들을 보지 못한다 — 보통 가장 오래된 축이다 |
+| `pgbuf.dwb_enabled / dwb_pages_max` | DWB 사용 여부와 DWB 가 담는 페이지 수(`double_write_buffer_size ÷ 페이지 크기`) | DWB 가 켜져 있으면 페이지는 DWB 에 복사된 순간 flush 완료로 처리된다. 그래서 dirty·flushing 이 아닌(clean) 페이지 중 최대 이만큼은 아직 DWB 에서 볼륨 쓰기를 기다릴 수 있다. 어느 페이지인지는 BCB 로 알 수 없다 |
 | `pgbuf.zone1_hot / zone2_warm / zone3_cold` | LRU 3구역 | victim 은 cold 에서만 뽑고 dirty 는 건너뛴다 → cold 가 대부분 dirty 면 victim 기아 신호 |
 | `pgbuf.zone_void` | 적재/축출 전이 중 | 순간값 |
 | `pgbuf.zone_free` | 빈 BCB(invalid 존) | `resident + zone_free = num_buffers` |
@@ -181,7 +184,7 @@ util = (diskstats io_ms 델타) / 경과시간(ms) × 100
 | `pgbuf.hdr_nonresident` | 상주가 아니어서(pagemap) 읽지 않은 헤더 수 | 읽으면 스왑인을 일으키므로 건너뛴다 |
 | `pgbuf.hdr_pagemap_unchecked` | pagemap 을 못 읽어 상주 확인 없이 읽은 수 | 보통 0 |
 | `pgbuf.hdr_mismatch / hdr_unread` | 읽은 헤더 중 대조 불일치 / 읽기 실패 수 | 소량(교체 중)은 정상, 표본의 50% 초과면 비활성 |
-| `pgbuf.oldest_dirty_pageid/offset` | 가장 오래된 dirty 페이지의 `oldest_unflush_lsa` | 리커버리 redo 의 시작점 후보 |
+| `pgbuf.oldest_dirty_pageid/offset` | 가장 오래된 dirty 페이지의 `oldest_unflush_lsa` | 리커버리 redo 의 시작점 후보. flush 중인 페이지는 LSA 가 비워져 빠진다(`oldest_dirty_excludes_flushing`) |
 | `pgbuf.engine.*` | 엔진이 유지하는 집계: `zone1/2/3`(LRU 리스트별 `count_lru1/2/3` 합), `victim_candidates`(`count_vict_cand` 합), `dirty`(`monitor.dirties_cnt`), `lru_pages`, `lists`(공유+private) | 퍼프몬과 무관하게 늘 읽힌다(O(1), 수십 KB). 버퍼 슬롯 26만 개 초과 버퍼풀은 BCB 스캔 대신 이것을 보인다. 존1 크기는 `pgbuf_lru_hot_ratio` 로 상한이 정해져 뜨거움의 지표는 아니다. victim 후보가 cold 대비 적으면 cold 가 dirty·fix 로 막혀 있다는 뜻 |
 | `log.append_*` | 로그 꼬리(`hdr.append_lsa`) | 새 로그 레코드가 붙는 위치 |
 | `log.nxio_*` | 아직 디스크에 안 쓴 첫 LSA(`append.nxio_lsa`) | WAL 경계: 이보다 앞선 로그는 영속 |

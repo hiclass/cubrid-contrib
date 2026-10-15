@@ -156,6 +156,12 @@ LSA 는 `struct log_lsa { int64 pageid:48; int64 offset:16; }` 8바이트다(리
                  | i32 hdr_ok | u64 page_lsa(메모리 페이지 헤더) | u64 oldest_lsa(BCB)
 ```
 
+`flags` 는 BCB 플래그 원값이다. **볼륨과 같은 내용이라고 볼 수 있는 것은 bit31(dirty)과 bit30(flushing)이 모두 꺼진 페이지뿐이다.**
+flush 가 시작되면 엔진은 dirty 를 내리고 flushing 을 세우며 `oldest_lsa` 를 비운다(쓰기가 끝나면 flushing 을 내린다). 도중에 다시
+dirty 가 되면 두 비트가 함께 선다. DWB 가 켜져 있으면(`pgbuf.dwb_enabled=1`) 페이지는 DWB 에 복사된 순간 flushing 이 내려가므로,
+두 비트가 모두 꺼진 페이지 중 최대 `pgbuf.dwb_pages_max` 개는 아직 DWB 에서 볼륨 쓰기를 기다릴 수 있다 — 이 파일만으로는 어느
+페이지인지 알 수 없고, 디스크 LSA 가 메모리 페이지 LSA 보다 오래되었다면 그런 페이지다.
+
 `cub_volmap --bufmap FILE` 은 db 이름이 다르면 거부하고, 레코드를 볼륨별 페이지 배열로 펴서 배경색 층(청록=상주, 자주=dirty)과
 페이지 박스 제목(`buf:DIRTY unflushed` = 메모리 LSA > 디스크 LSA)에 쓴다.
 

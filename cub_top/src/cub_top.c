@@ -2550,6 +2550,8 @@ static struct {
     int large;          /* Not scanned: a large buffer without a request */
     int nhdr, nonres, pm_unchecked;   /* Headers read (sample or all), skipped as not resident, read without a pagemap check */
     int nbuf, resident, dirty, flushing, z1,z2,z3, zvoid, zinv, mismatch, unread, badvpid;
+    int unflushed;      /* DIRTY or FLUSHING: not yet written by the buffer (a page re-dirtied mid-flush has both) */
+    int flush_only;     /* FLUSHING without DIRTY: the engine cleared oldest_unflush_lsa when the flush began */
     int mismatch_raw;   /* Mismatches before the recheck, including replacements between the two reads */
     int recheck;        /* Number rechecked */
     int nrec_all;               /* Records before a degraded frame dropped the unverified */
@@ -2621,6 +2623,15 @@ static FILE *tmp_create(const char *path,char *tmp,size_t tn){
 /* Whether this frame replaced the --bcb-dump file, and why not: --bcb-dump alone must not
    report a snapshot it did not write */
 static int g_bcb_saved=0; static char g_bcb_why[200]="";
+/* Pages the double write buffer holds (0 = off, -1 = setting unknown).  A page copied into it
+   counts as flushed - clean in the buffer - before the DWB block reaches the volume. */
+static int dwb_pages(void){
+    long long b=prm_get("double_write_buffer_size");
+    if(b<0) return -1;
+    if(b==0) return 0;
+    long long ps=g_pagesize>0?g_pagesize:16384;
+    return (int)(b/ps>0?b/ps:1);
+}
 static void pgbuf_dump(const char*db){
     if(!g_bcb_dump[0]||!PG.ok) return;
     char tmp[320]; FILE*f=tmp_create(g_bcb_dump,tmp,sizeof tmp);
@@ -2650,7 +2661,7 @@ static void pg_zone_add(int z,int d){
 }
 /* Residency, dirty and oldest-dirty totals from the records, after the recheck replaced some */
 static void pg_recount(void){
-    PG.resident=PG.dirty=PG.flushing=PG.tempvol=0; PG.have_oldest=0;
+    PG.resident=PG.dirty=PG.flushing=PG.tempvol=PG.unflushed=PG.flush_only=0; PG.have_oldest=0;
     memset(PG.vol_res,0,sizeof PG.vol_res); memset(PG.vol_dirty,0,sizeof PG.vol_dirty);
     for(int k=0;k<PG.nrec;k++){
         const pgrec_t*r=&PG.rec[k]; int vol_ok=(r->volid<PG_MAXVOL);
@@ -2662,6 +2673,8 @@ static void pg_recount(void){
             if(!lsa_isnull(l) && (!PG.have_oldest || lsa_cmp(l,PG.oldest_dirty)<0)){ PG.oldest_dirty=l; PG.raw_oldest=r->oldest_lsa; PG.have_oldest=1; }
         }
         if(r->flags&PGBUF_F_FLUSHING) PG.flushing++;
+        if(r->flags&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING)) PG.unflushed++;
+        if((r->flags&PGBUF_F_FLUSHING) && !(r->flags&PGBUF_F_DIRTY)) PG.flush_only++;
     }
 }
 /* Whether addr is resident in pid, from /proc/pid/pagemap (bit 63).  Reading pagemap does not
@@ -2733,6 +2746,7 @@ static void pgbuf_scan(proc_t*P){
         PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"BCB array read failed (%d x %zuB)":"BCB 배열 읽기 실패 (%d x %zuB)",nbuf,szb); return; }
     /* pass 1: decode and aggregate */
     PG.nbuf=nbuf; PG.resident=PG.dirty=PG.flushing=PG.z1=PG.z2=PG.z3=PG.zvoid=PG.zinv=PG.badvpid=0;
+    PG.unflushed=PG.flush_only=0;
     PG.tempvol=0;
     memset(PG.vol_res,0,sizeof PG.vol_res); memset(PG.vol_dirty,0,sizeof PG.vol_dirty);
     PG.have_oldest=0; PG.nrec=0;
@@ -2760,6 +2774,8 @@ static void pgbuf_scan(proc_t*P){
             if(!lsa_isnull(l) && (!PG.have_oldest || lsa_cmp(l,PG.oldest_dirty)<0)){ PG.oldest_dirty=l; PG.raw_oldest=olsa; PG.have_oldest=1; }
         }
         if(flags&PGBUF_F_FLUSHING) PG.flushing++;
+        if(flags&(PGBUF_F_DIRTY|PGBUF_F_FLUSHING)) PG.unflushed++;
+        if((flags&PGBUF_F_FLUSHING) && !(flags&PGBUF_F_DIRTY)) PG.flush_only++;
         pgrec_t*r=&PG.rec[PG.nrec];
         r->volid=volid; r->zone=(int16_t)(zone>>16); r->pageid=pageid; r->flags=flags; r->hdr_ok=0;
         r->page_lsa=~(uint64_t)0; r->oldest_lsa=olsa;
@@ -5762,6 +5778,8 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                          lsa_str(PG.log_append),lsa_str(PG.log_nxio),(long long)(PG.log_append.pageid-PG.log_nxio.pageid),
                          PG.have_oldest?lsa_str(PG.oldest_dirty):"-",
                          PG.have_oldest?(long long)(PG.log_append.pageid-PG.oldest_dirty.pageid):0LL);
+                if(PG.flush_only>0){ size_t l=strlen(ln);
+                    snprintf(ln+l,sizeof ln-l,g_ascii?" (excl. %d mid-flush)":" (flush 중 %d 제외)",PG.flush_only); }
             } else snprintf(ln,sizeof ln,g_ascii?"(log LSA unavailable)":"(로그 LSA 미확보)");
             cv_put(2,y+3,cutf(ln,W-4),"250");
             { int pos=0; ln[0]=0;
@@ -6151,9 +6169,12 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
            volmap --bufmap overlays the same snapshot on the volume map (--bcb-dump). */
         if(PG.ok){
             double rp = PG.nbuf>0 ? 100.0*PG.resident/PG.nbuf : 0, dp = PG.resident>0 ? 100.0*PG.dirty/PG.resident : 0;
-            printf(g_ascii?"├─ ◌ page buffer (page slots/BCB read directly, %.0fms)  resident %d/%d (%.0f%%)  dirty %d (%.1f%% of resident)  flushing %d\n"
-                          :"├─ ◌ 버퍼풀 (페이지 슬롯 %.0fms)  상주 %d/%d (%.0f%%)  dirty %d (상주의 %.1f%%)  flushing %d\n",
-                   PG.ms,PG.resident,PG.nbuf,rp,PG.dirty,dp,PG.flushing);
+            printf(g_ascii?"├─ ◌ page buffer (page slots/BCB read directly, %.0fms)  resident %d/%d (%.0f%%)  dirty %d (%.1f%% of resident)  flushing %d  → not yet written %d\n"
+                          :"├─ ◌ 버퍼풀 (페이지 슬롯 %.0fms)  상주 %d/%d (%.0f%%)  dirty %d (상주의 %.1f%%)  flushing %d  → 아직 안 쓴 페이지 %d\n",
+                   PG.ms,PG.resident,PG.nbuf,rp,PG.dirty,dp,PG.flushing,PG.unflushed);
+            { int dw=dwb_pages();
+              if(dw>0) printf(g_ascii?"│  ├─ DWB on: a page counts as written once copied into the DWB - up to %d \"clean\" pages may still await their volume write\n"
+                                     :"│  ├─ DWB 사용: DWB 에 복사된 페이지는 flush 완료로 처리 — \"clean\" 중 최대 %d 페이지는 아직 볼륨 쓰기 대기일 수 있음\n",dw); }
             printf(g_ascii?"│  ├─ zones  hot %d · warm %d · cold %d · void %d · free %d   (victims are taken from cold; dirty ones are skipped)\n"
                           :"│  ├─ 존  hot %d · warm %d · cold %d · void %d · free %d   (victim 은 cold 에서, dirty 는 건너뜀)\n",
                    PG.z1,PG.z2,PG.z3,PG.zvoid,PG.zinv);
@@ -6171,10 +6192,18 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
                 printf(g_ascii?"│  ├─ log  append %s  flushed(nxio) %s  → %lld log pages not yet on disk\n"
                               :"│  ├─ 로그  append %s  flushed(nxio) %s  → 아직 디스크에 안 내려간 로그 %lld 페이지\n",
                        lsa_str(PG.log_append),lsa_str(PG.log_nxio),(long long)(PG.log_append.pageid-PG.log_nxio.pageid));
+                char ex[160]="";
+                if(PG.flush_only>0) snprintf(ex,sizeof ex,g_ascii?"  (excludes %d page(s) mid-flush: the engine clears their LSA as the flush begins)"
+                                                                 :"  (flush 중 %d 페이지 제외 — 엔진이 flush 시작 때 LSA 를 비움)",PG.flush_only);
                 if(PG.have_oldest)
-                    printf(g_ascii?"│  └─ oldest dirty page LSA %s  → flush delay %lld log pg behind append (recovery redo length)\n"
-                                  :"│  └─ 가장 오래된 dirty 페이지 LSA %s  → append 보다 %lld 로그 페이지 뒤 = flush 지연(리커버리 redo 길이)\n",
-                           lsa_str(PG.oldest_dirty),(long long)(PG.log_append.pageid-PG.oldest_dirty.pageid));
+                    printf(g_ascii?"│  └─ oldest dirty page LSA %s  → flush delay %lld log pg behind append (recovery redo length)%s\n"
+                                  :"│  └─ 가장 오래된 dirty 페이지 LSA %s  → append 보다 %lld 로그 페이지 뒤 = flush 지연(리커버리 redo 길이)%s\n",
+                           lsa_str(PG.oldest_dirty),(long long)(PG.log_append.pageid-PG.oldest_dirty.pageid),ex);
+                else if(PG.unflushed>0)
+                    printf(g_ascii?"│  └─ no dirty page, %d being flushed%s\n":"│  └─ dirty 없음, flush 중 %d%s\n",PG.flushing,ex);
+                else if(dwb_pages()>0)
+                    printf(g_ascii?"│  └─ no dirty page — all written by the buffer (the last ones may still be in the DWB)\n"
+                                  :"│  └─ dirty 없음 — 버퍼는 전부 내보냄 (마지막 몇 페이지는 아직 DWB 에 있을 수 있음)\n");
                 else printf(g_ascii?"│  └─ no dirty page — buffer fully reflected to volumes\n":"│  └─ dirty 없음 — 버퍼 내용이 볼륨에 전부 반영됨\n");
             } else printf(g_ascii?"│  └─ (log LSA unavailable)\n":"│  └─ (로그 LSA 미확보)\n");
         } else if(AG.ok){
@@ -6571,6 +6600,11 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
             printf("pgbuf.vol%d.resident=%d pgbuf.vol%d.dirty=%d\n",v,PG.vol_res[v],v,PG.vol_dirty[v]);
         if(PG.have_oldest) printf("pgbuf.oldest_dirty_pageid=%lld pgbuf.oldest_dirty_offset=%d\n",
                                   (long long)PG.oldest_dirty.pageid,PG.oldest_dirty.offset);
+        /* Not yet written by the buffer, and what the oldest LSA cannot see: a flush clears
+           DIRTY and the page's oldest_unflush_lsa before it writes.  With a DWB, a page counts
+           as flushed once copied into it, so "clean" may still wait there for its volume write. */
+        printf("pgbuf.unflushed=%d pgbuf.oldest_dirty_excludes_flushing=%d\n",PG.unflushed,PG.flush_only);
+        { int dp=dwb_pages(); if(dp>=0) printf("pgbuf.dwb_enabled=%d pgbuf.dwb_pages_max=%d\n",dp>0,dp); }
     }
     {
         if(PG.have_log){
@@ -6937,6 +6971,8 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     PG.z1=(int)rp_num(t,"pgbuf.zone1_hot",0); PG.z2=(int)rp_num(t,"pgbuf.zone2_warm",0);
     PG.z3=(int)rp_num(t,"pgbuf.zone3_cold",0);
     PG.flushing=(int)rp_num(t,"pgbuf.flushing",0);
+    PG.unflushed=(int)rp_num(t,"pgbuf.unflushed",0);
+    PG.flush_only=(int)rp_num(t,"pgbuf.oldest_dirty_excludes_flushing",0);
     PG.zvoid=(int)rp_num(t,"pgbuf.zone_void",0);
     PG.mismatch=(int)rp_num(t,"pgbuf.hdr_mismatch",0);
     PG.unread=(int)rp_num(t,"pgbuf.hdr_unread",0);
