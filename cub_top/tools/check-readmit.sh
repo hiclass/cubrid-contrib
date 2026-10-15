@@ -26,7 +26,7 @@ cat >> "$TMP/t.c" <<'C'
 static int verdict(double readmit,double cold,const char *want_has,const char *want_not){
     static proc_t P; static mem_t M; static tier_t T; static iod_t IO;
     AG.ok=1; AG.nbuf=1000; AG.z3=(long)(cold*10); AG.z1=1000-AG.z3; AG.z2=0; AG.dirty=0; PG.ok=0;
-    IO.rb=20.0*1024*1024; CAP2.readmit_pct=readmit;
+    IO.rb=20.0*1024*1024; CAP2.readmit_pct=readmit; CAP2.miss_pps=1280; g_pagesize=16384;   /* 20MB/s admitted */
     hist_push(1,&P,&M,&T,&IO);
     char o[400]; const char*c=VD_INFO; vd_buf(o,sizeof o,&c);
     int ok = HS[HN-1].cap_readmit==readmit && (!want_has || strstr(o,want_has)) && (!want_not || !strstr(o,want_not));
@@ -81,6 +81,18 @@ int main(void){
     bad|=verdict(50,85,"버퍼 부족",NULL);
     bad|=verdict(5,85,"재사용 거리가 버퍼 밖","무효");
     bad|=verdict(20,85,"버퍼 2배면","무효");
+    { /* the OS page cache absorbs a short buffer: no disk reads, the buffer still misses */
+      static proc_t P; static mem_t M; static tier_t T; static iod_t IO;
+      IO.rb=0; CAP2.miss_pps=3840; CAP2.readmit_pct=85; g_pagesize=16384;
+      hist_push(1,&P,&M,&T,&IO);
+      char o[400]; const char*c=VD_INFO; vd_buf(o,sizeof o,&c);
+      int ok = c==VD_WARN && strstr(o,"버퍼 부족") && strstr(o,"OS 페이지 캐시");
+      printf("  %s   disk 0, 3840 pages/s admitted, re-admit 85%%: \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok;
+      CAP2.miss_pps=-1; hist_push(2,&P,&M,&T,&IO); c=VD_INFO; vd_buf(o,sizeof o,&c);
+      ok = c!=VD_OK && strstr(o,"적재 미측정");
+      printf("  %s   admissions not measured: not green, \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok;
+      ok = HS[HN-1].cap_miss==-1;
+      printf("  %s   history keeps admissions unmeasured (%.0f)\n",ok?"ok  ":"FAIL",HS[HN-1].cap_miss); bad|=!ok; }
     { /* capacity verdict: 300 pages/s admitted, re-admit 7% (a working set ~15x the buffer) */
       memset(&CAP2,0,sizeof CAP2); CAP2.await_ms=1; CAP2.dev_iops=100; CAP2.qdepth=-1; CAP2.headroom_pct=-1;
       CAP2.miss_pps=300; CAP2.readmit_pct=7; CAP2.turnover_pct=5; CAP2.hit_pct=-1; snprintf(CAP2.hit_src,sizeof CAP2.hit_src,"-");

@@ -3582,7 +3582,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->rss_broker=T->broker; s->rss_cas=T->cas;
     s->cap_iops=CAP2.dev_iops; s->cap_await=CAP2.await_ms<0?0:CAP2.await_ms;
     s->cap_readmit=CAP2.readmit_pct;          /* -1 = not measured: it alone separates shortage from scan */
-    s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps<0?0:CAP2.miss_pps;
+    s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps;   /* -1 = not measured */
     s->cap_head=CAP2.headroom_pct<0?0:CAP2.headroom_pct;
     s->pg_ok      = PG.ok || AG.ok;
     if(!PG.ok && AG.ok){                /* Not scanned: the engine's own aggregates; no oldest dirty */
@@ -4483,37 +4483,46 @@ static void vd_mem(char*o,size_t n,const char**col){
 static void vd_buf(char*o,size_t n,const char**col){
     if(HN<1){ snprintf(o,n,"%s",g_ascii?"collecting...":"표본 수집 중…"); *col=VD_INFO; return; }
     const hsam_t*b=&HS[HN-1];
-    double rb=b->rbps;
+    /* The buffer is judged by what it admits (misses), not by disk reads: CUBRID reads through the
+       OS page cache, so a short buffer over a volume that fits in RAM misses with ~0 disk reads.
+       Disk reads only say how much of the misses the page cache did not absorb. */
+    double rb=b->rbps, ps=g_pagesize>0?(double)g_pagesize:16384.0;
+    double ab = b->cap_miss>=0 ? b->cap_miss*ps : -1;          /* bytes/s admitted; -1 not measured */
+    char disk[96];
+    if(ab>0 && rb<ab*0.5) snprintf(disk,sizeof disk,g_ascii?"disk %s/s, the rest from the OS page cache":"디스크 %s/s, 나머지는 OS 페이지 캐시",H(rb));
+    else snprintf(disk,sizeof disk,g_ascii?"disk %s/s":"디스크 %s/s",H(rb));
     if(!b->pg_ok){ *col=VD_INFO;
         snprintf(o,n,g_ascii?"buffer-pool state unavailable - disk read %s/s, cache absorb %s":"· 버퍼풀 상태 읽기 비활성 — 디스크 읽기 %s/s, 캐시 흡수율 %s",
                  H(rb), b->absorb_ok?pf_val(b->absorb,1):(g_ascii?"idle":"유휴")); return; }
     if(b->pg_res_pct<90.0){ *col=VD_INFO;
-        snprintf(o,n,g_ascii?"buffer still filling (%.0f%% resident) - hit-rate judgement deferred, read %s/s"
-                           :"· 버퍼 채우는 중 (상주 %.0f%%) — 히트율 판단 보류, 읽기 %s/s",b->pg_res_pct,H(rb)); return; }
-    if(rb>=8.0*1024*1024 && b->cap_readmit<0){ *col=VD_INFO;
-        snprintf(o,n,g_ascii?"read %s/s, cold zone %.0f%% - re-admit not measured (no page-scan baseline), so shortage and scan are not told apart"
-                           :"· 읽기 %s/s · cold 존 %.0f%% — 재적재율 미측정(페이지 스캔 기준 없음)이라 버퍼 부족과 스캔을 가르지 않음",
-                 H(rb),b->pg_cold_pct); return; }
+        snprintf(o,n,g_ascii?"buffer still filling (%.0f%% resident) - judgement deferred, %s"
+                           :"· 버퍼 채우는 중 (상주 %.0f%%) — 판단 보류, %s",b->pg_res_pct,disk); return; }
+    if(ab<0){ *col=VD_INFO;
+        snprintf(o,n,g_ascii?"admissions not measured (no page-scan baseline) - buffer not judged, %s"
+                           :"· 버퍼 적재 미측정(페이지 스캔 기준 없음) — 버퍼 판단 보류, %s",disk); return; }
+    if(ab>=8.0*1024*1024 && b->cap_readmit<0){ *col=VD_INFO;
+        snprintf(o,n,g_ascii?"admitting %s/s (%s) - re-admit not measured, so shortage and scan are not told apart"
+                           :"· 적재 %s/s(%s) — 재적재율 미측정이라 버퍼 부족과 스캔을 가르지 않음",H(ab),disk); return; }
     /* Re-admit = admitted pages evicted within the last nbuf evictions: under LRU those are
        the misses a buffer twice the size would have served, so it estimates (a lower bound)
-       the share of reads doubling removes.  It does not tell a scan from a working set
+       the share of misses doubling removes.  It does not tell a scan from a working set
        many times the buffer - both are low - so no "enlarging is useless" is concluded. */
-    if(rb>=8.0*1024*1024 && b->cap_readmit>=30.0){ *col=VD_WARN;
-        snprintf(o,n,g_ascii?"! buffer shortage - re-admit %.0f%%, read %s/s: doubling the buffer cuts reads by about %.0f%% (lower bound)"
-                           :"⚠ 버퍼 부족 — 재적재 %.0f%%·읽기 %s/s: 버퍼 2배면 디스크 읽기 약 %.0f%% 감소(추정 하한)",b->cap_readmit,H(rb),b->cap_readmit); return; }
-    if(rb>=8.0*1024*1024 && b->cap_readmit>=10.0){ *col=VD_NOTE;
-        snprintf(o,n,g_ascii?"! working set larger than the buffer - re-admit %.0f%%, read %s/s: doubling cuts reads by about %.0f%% (lower bound)"
-                           :"⚠ 작업집합이 버퍼보다 큼 — 재적재 %.0f%%·읽기 %s/s: 버퍼 2배면 디스크 읽기 약 %.0f%% 감소(추정 하한)",b->cap_readmit,H(rb),b->cap_readmit); return; }
-    if(rb>=8.0*1024*1024){ *col=VD_INFO;
-        snprintf(o,n,g_ascii?"read %s/s, re-admit %.0f%% - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
-                           :"· 읽기 %s/s · 재적재 %.0f%% — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): 버퍼 2배로 줄어드는 읽기 약 %.0f%%",
-                 H(rb),b->cap_readmit,b->cap_readmit); return; }
-    if(rb<1.0*1024*1024){ *col=VD_OK;
-        snprintf(o,n,g_ascii?"served from buffer - disk read %s/s, resident %.0f%%, hot+warm %.0f%%"
-                           :"· 버퍼에서 처리 중 — 디스크 읽기 %s/s, 상주 %.0f%%, hot+warm 존 %.0f%%",H(rb),b->pg_res_pct,100.0-b->pg_cold_pct); return; }
+    if(ab>=8.0*1024*1024 && b->cap_readmit>=30.0){ *col=VD_WARN;
+        snprintf(o,n,g_ascii?"! buffer shortage - admitting %s/s (%s), re-admit %.0f%%: doubling the buffer cuts misses by about %.0f%% (lower bound)"
+                           :"⚠ 버퍼 부족 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정 하한)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+    if(ab>=8.0*1024*1024 && b->cap_readmit>=10.0){ *col=VD_NOTE;
+        snprintf(o,n,g_ascii?"! working set larger than the buffer - admitting %s/s (%s), re-admit %.0f%%: doubling cuts misses by about %.0f%% (lower bound)"
+                           :"⚠ 작업집합이 버퍼보다 큼 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정 하한)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+    if(ab>=8.0*1024*1024){ *col=VD_INFO;
+        snprintf(o,n,g_ascii?"admitting %s/s (%s), re-admit %.0f%% - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
+                           :"· 적재 %s/s(%s) · 재적재 %.0f%% — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): 버퍼 2배로 줄어드는 미스 약 %.0f%%",
+                 H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+    if(ab<1.0*1024*1024){ *col=VD_OK;
+        snprintf(o,n,g_ascii?"served from buffer - admitting %.0f pages/s, %s, resident %.0f%%"
+                           :"· 버퍼에서 처리 중 — 적재 초당 %.0f페이지, %s, 상주 %.0f%%",b->cap_miss,disk,b->pg_res_pct); return; }
     *col=VD_INFO;
-    snprintf(o,n,g_ascii?"read %s/s - hot+warm %.0f%% cold %.0f%% - working set turning over":"· 읽기 %s/s · hot+warm %.0f%% cold %.0f%% — 작업집합 교체 중",
-             H(rb),100.0-b->pg_cold_pct,b->pg_cold_pct);
+    snprintf(o,n,g_ascii?"admitting %s/s (%s) - hot+warm %.0f%% cold %.0f%% - working set turning over":"· 적재 %s/s(%s) · hot+warm %.0f%% cold %.0f%% — 작업집합 교체 중",
+             H(ab),disk,100.0-b->pg_cold_pct,b->pg_cold_pct);
 }
 /* Host-wide verdict: separates a CUBRID problem from a machine-level one.
    Device utilization is host-wide (diskstats), so it belongs here. */
