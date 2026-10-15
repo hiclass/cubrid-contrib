@@ -415,9 +415,9 @@ static int inst_find(const char*db){
 static void parse_smaps(proc_t *P){
     char f[64]; snprintf(f,sizeof f,"/proc/%d/smaps",P->pid);
     P->smaps_ok=0; P->s_rss_kb=P->s_pss_kb=P->s_swap_kb=P->s_clean_kb=0;
-    FILE *fp=fopen(f,"r"); if(!fp) return;
+    P->nreg=0; P->reg_dropped=0;       /* before the open: a refused smaps must not leave the last target's regions */
+    FILE *fp=fopen(f,"re"); if(!fp) return;
     char line[1024]; region_t *cur=NULL;
-    P->nreg=0; P->reg_dropped=0;
     while(fgets(line,sizeof line,fp)){
         /* First-character gate: a header starts with lower-case hex, an attribute line with
            an upper-case letter.  96% are attribute lines, so trying sscanf on each. */
@@ -2998,6 +2998,7 @@ static unsigned g_inst_gen=0;
 static void reset_instance_state(void){
     g_inst_gen++;
     g_hprevn=0;                        /* heap item deltas */
+    g_perm_limited=0; g_perm_why[0]=0; /* the next target's access is judged afresh */
     g_reg_db=NULL; g_reg_lg=NULL;
     NSR=0; memset(SR,0,sizeof SR);
     g_dyn_rss=0; g_dyn_mapped=0;
