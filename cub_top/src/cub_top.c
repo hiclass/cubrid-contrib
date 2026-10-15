@@ -3098,7 +3098,8 @@ static void grade_dynamic_heap(void){
     for(int i=0;i<NSR;i++){
         if(strcmp(SR[i].name,"dynamic-heap")) continue;
         if(SR[i].rss<=0) return;
-        double explained=B.total+A.total;
+        /* A walks every chunk of the arenas, B's items included, so the two never add up */
+        double explained = A.total>B.total ? A.total : B.total;
         if(explained>=SR[i].rss*0.5) SR[i].grade='E';   /* Estimated */
     }
 }
