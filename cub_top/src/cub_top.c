@@ -42,6 +42,8 @@
 #include <grp.h>
 #include <elf.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/sysmacros.h>
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
@@ -3509,7 +3511,8 @@ typedef struct {
     double miss_pps;                            /* Buffer misses: pages loaded per second */
     double hit_pct;                             /* Hit ratio percentage; -1 means it cannot be computed */
     char   hit_src[16];                         /* "perfmon" | "turnover" | "-" */
-    char   dev[32];                             /* Device the ceiling applies to (the frame's busiest) */
+    char   dev[32];                             /* The DB's busiest disk this frame; "" when unknown */
+    char   dev_why[160];                        /* Why no DB disk was found */
     double turnover_pct;                        /* Share of resident pages replaced within the window */
     double readmit_pct;                         /* Share evicted and read back: the signal that the working set exceeds the buffer */
     /* Ceiling and latency */
@@ -4111,7 +4114,7 @@ static void cap_turnover(double now_s){
     cap_prev_n=n; cap_prev_t=now_s;
 }
 
-/* ---- Remembered ceilings: the peak IOPS and bandwidth of saturated frames (util >= 90%) are kept in a state file ---- */
+/* ---- Remembered ceilings: the peak IOPS and bandwidth of frames with a queue (depth >= 4) are kept in a state file ---- */
 static void cap_ceiling(void){
     CAP2.headroom_pct=-1;
     if(!g_cap_state[0]) g_cap_state[0]=0;
@@ -4180,16 +4183,121 @@ static void cap_ceiling(void){
 }
 
 /* ---- Collection entry point, once at the end of sample_once ---- */
+/* The disks under the DB's own files, as the install account (no root): the target's open
+   volumes and logs (basename <db>, <db>_*), or - when its fds are another account's - the
+   volume and log directories in $CUBRID_DATABASES/databases.txt.  A file's block device is
+   found by st_dev in /sys/dev/block, else by the mount's /dev source, else by statfs f_fsid:
+   overlay passes its upper filesystem's fsid through, and XFS puts its device number there
+   (ext4/btrfs put a UUID hash - those stay unresolved).  A partition maps to its disk, dm/md
+   through slaves to the physical disks.  Cached until the target's fd count changes. */
+static void disk_leaves(const char *sys,char out[][32],int *n,int max,int depth){
+    char sl[PATH_MAX+16], rp[PATH_MAX], b[16];
+    if(depth>4 || !realpath(sys,rp)) return;
+    snprintf(sl,sizeof sl,"%.4000s/partition",rp);
+    if(read_file(sl,b,sizeof b)>0){ char *q=strrchr(rp,'/'); if(q) *q=0; }
+    snprintf(sl,sizeof sl,"%.4000s/slaves",rp);
+    DIR *d=opendir(sl); int any=0;
+    if(d){ struct dirent *e;
+           while((e=readdir(d))){ if(e->d_name[0]=='.') continue; any=1;
+               char sub[PATH_MAX+300]; snprintf(sub,sizeof sub,"%.4000s/%.255s",sl,e->d_name);
+               disk_leaves(sub,out,n,max,depth+1); }
+           closedir(d); }
+    if(any) return;
+    const char *nm=strrchr(rp,'/'); nm=nm?nm+1:rp;
+    for(int i=0;i<*n;i++) if(!strcmp(out[i],nm)) return;
+    if(*n<max) snprintf(out[(*n)++],32,"%.31s",nm);
+}
+static int blk_sys(unsigned ma,unsigned mi,char *sys,size_t sn){
+    snprintf(sys,sn,"/sys/dev/block/%u:%u",ma,mi); return access(sys,F_OK)==0;
+}
+/* 1 = st_dev, 2 = mount source, 3 = statfs fsid, 0 = none */
+static int file_blkdev(const char *path,char *sys,size_t sn){
+    struct stat st; if(stat(path,&st)!=0) return 0;
+    if(blk_sys(major(st.st_dev),minor(st.st_dev),sys,sn)) return 1;
+    FILE *mf=fopen("/proc/self/mountinfo","re"); char ln[4096]; int found=0;
+    while(mf && !found && fgets(ln,sizeof ln,mf)){ unsigned ma,mi;
+        if(sscanf(ln,"%*s %*s %u:%u",&ma,&mi)!=2 || ma!=major(st.st_dev) || mi!=minor(st.st_dev)) continue;
+        char *sep=strstr(ln," - "), fs[64], src[512]; struct stat bs;
+        if(sep && sscanf(sep+3,"%63s %511s",fs,src)==2 && !strncmp(src,"/dev/",5)
+           && stat(src,&bs)==0 && S_ISBLK(bs.st_mode) && blk_sys(major(bs.st_rdev),minor(bs.st_rdev),sys,sn)) found=2;
+        break; }
+    if(mf) fclose(mf);
+    if(found) return found;
+    struct statfs sf; if(statfs(path,&sf)!=0) return 0;
+    uint64_t v; int32_t f[2]; memcpy(f,&sf.f_fsid,sizeof f); v=(uint32_t)f[0]|((uint64_t)(uint32_t)f[1]<<32);
+    unsigned ma=(v>>8)&0xfff, mi=(v&0xff)|((v>>12)&0xfff00);      /* huge_encode_dev */
+    if(v>>32 || !ma || !blk_sys(ma,mi,sys,sn)) return 0;
+    char zp[PATH_MAX+16], zb[32]; snprintf(zp,sizeof zp,"%.4000s/size",sys);   /* a hash rarely decodes to a device large enough */
+    if(read_file(zp,zb,sizeof zb)<=0 || (double)sf.f_blocks*sf.f_bsize > strtod(zb,NULL)*512.0) return 0;
+    return 3;
+}
+static int g_dk_via;                                /* best resolution used: 1 st_dev, 2 mount, 3 fsid */
+static int db_disks(int pid,const char *db,char out[][32],int max,char *why,size_t wn){
+    static int c_pid=-1, c_nfd=-2, c_n=0, c_via=0; static char c_db[64], c_out[8][32], c_why[160];
+    char p[64], paths[16][PATH_MAX]; int np=0, files=0, nfd=-1; size_t dl=strlen(db);
+    snprintf(p,sizeof p,"/proc/%d/fd",pid);
+    DIR *d=opendir(p); struct dirent *e;
+    if(d){ nfd=0; while((e=readdir(d))) if(e->d_name[0]!='.') nfd++; }
+    if(pid==c_pid && nfd==c_nfd && !strcmp(db,c_db)){
+        if(d) closedir(d);
+        for(int i=0;i<c_n && i<max;i++) memcpy(out[i],c_out[i],32);
+        snprintf(why,wn,"%s",c_why); g_dk_via=c_via; return c_n<max?c_n:max; }
+    if(d){ rewinddir(d);
+        while((e=readdir(d)) && np<16){
+            if(e->d_name[0]=='.') continue;
+            char fp[400], lk[PATH_MAX]; snprintf(fp,sizeof fp,"%s/%s",p,e->d_name);
+            ssize_t k=readlink(fp,lk,sizeof lk-1); if(k<=0) continue; lk[k]=0;
+            if(lk[0]!='/') continue;
+            const char *bn=strrchr(lk,'/')+1;
+            if(strncmp(bn,db,dl) || (bn[dl] && bn[dl]!='_')) continue;   /* <db>, <db>_lgat, <db>_x001 ... */
+            struct stat st; if(stat(fp,&st)!=0 || !S_ISREG(st.st_mode)) continue;
+            files++; snprintf(paths[np++],PATH_MAX,"%s",fp);           /* via the fd: right in any mount namespace */
+        }
+        closedir(d); }
+    if(!files){                                     /* another account's server: its databases.txt entry */
+        const char *dbs=getenv("CUBRID_DATABASES"); char tp[PATH_MAX], ln[4096];
+        FILE *f=NULL; if(dbs){ snprintf(tp,sizeof tp,"%.4000s/databases.txt",dbs); f=fopen(tp,"re"); }
+        while(f && fgets(ln,sizeof ln,f)){ char nm[256], vp[2048], hs[256], lp[2048];
+            if(ln[0]=='#' || sscanf(ln,"%255s %2047s %255s %2047s",nm,vp,hs,lp)<2 || strcmp(nm,db)) continue;
+            snprintf(paths[np++],PATH_MAX,"%s",vp); files++;
+            if(strcmp(lp,vp) && np<16 && sscanf(ln,"%*s %*s %*s %2047s",lp)==1) snprintf(paths[np++],PATH_MAX,"%s",lp);
+            break; }
+        if(f) fclose(f); }
+    int n=0, via=0; char sys[PATH_MAX];
+    for(int i=0;i<np;i++){ int v=file_blkdev(paths[i],sys,sizeof sys);
+        if(v){ if(v>via) via=v; disk_leaves(sys,out,&n,max,0); } }
+    if(n) why[0]=0;
+    else if(!files) snprintf(why,wn,"%s",g_ascii?"DB files not found (no open file readable, no databases.txt entry)"
+                                                 :"DB 파일 위치 확인 불가(열린 파일 읽기 불가·databases.txt 항목 없음)");
+    else snprintf(why,wn,"%s",g_ascii?"DB files are on no identifiable block device (tmpfs, network, overlay over ext4/btrfs)"
+                                      :"DB 파일의 블록 장치 식별 불가(tmpfs·네트워크·ext4/btrfs 위 overlay)");
+    g_dk_via=via; c_via=via;
+    c_pid=pid; c_nfd=nfd; snprintf(c_db,sizeof c_db,"%s",db); c_n=n<8?n:8;
+    for(int i=0;i<c_n;i++) snprintf(c_out[i],32,"%s",out[i]);
+    snprintf(c_why,sizeof c_why,"%s",why);
+    return n;
+}
 static void cap_collect(proc_t*P,iod_t*IO,const dstat_t*d0,int nd0,const dstat_t*d1,int nd1,double dt){
     CAP2.read_bps=IO->rb; CAP2.write_bps=IO->wb; CAP2.riops=IO->ri; CAP2.wiops=IO->wi;
-    CAP2.dev_util=IO->devutil;
-    snprintf(CAP2.dev,sizeof CAP2.dev,"%s",IO->devnm);
+    CAP2.dev[0]=0; CAP2.dev_why[0]=0; CAP2.dev_util=0; g_dk_via=0;
     CAP2.await_ms=CAP2.r_await_ms=CAP2.w_await_ms=-1; CAP2.qdepth=-1; CAP2.dev_iops=0;
-    /* Latency, queue and device IOPS, from the diskstats delta of the busiest device (IO->devnm) */
-    if(IO->devnm[0] && dt>0){
+    /* The device judged is the DB's own disk, the busiest of them - not the host's busiest:
+       a backup saturating another disk says nothing about the DB's storage */
+    { char dk[8][32]; int nk = P->pid>=0 ? db_disks(P->pid,P->db,dk,8,CAP2.dev_why,sizeof CAP2.dev_why) : 0;
+      if(P->pid<0) snprintf(CAP2.dev_why,sizeof CAP2.dev_why,"%s",g_ascii?"server not running":"서버 미기동");
+      double best=-1;
+      for(int k=0;k<nk && dt>0;k++)
+          for(int i=0;i<nd1;i++) if(!strcmp(d1[i].name,dk[k]))
+              for(int j=0;j<nd0;j++) if(!strcmp(d0[j].name,dk[k])){
+                  double u=UDELTA(d1[i].io_ms,d0[j].io_ms)/(dt*1000.0)*100.0; if(u>100) u=100;
+                  if(u>best){ best=u; memcpy(CAP2.dev,dk[k],32); CAP2.dev_util=u; }
+                  break; }
+      if(nk>0 && !CAP2.dev[0]) snprintf(CAP2.dev_why,sizeof CAP2.dev_why,g_ascii?"DB disk %s not in diskstats":"DB 디스크 %s 가 diskstats 에 없음",dk[0]); }
+    /* Latency, queue and device IOPS, from the diskstats delta of that disk */
+    if(CAP2.dev[0] && dt>0){
         const dstat_t *a=NULL,*b2=NULL;
-        for(int i=0;i<nd0;i++) if(!strcmp(d0[i].name,IO->devnm)){ a=&d0[i]; break; }
-        for(int i=0;i<nd1;i++) if(!strcmp(d1[i].name,IO->devnm)){ b2=&d1[i]; break; }
+        for(int i=0;i<nd0;i++) if(!strcmp(d0[i].name,CAP2.dev)){ a=&d0[i]; break; }
+        for(int i=0;i<nd1;i++) if(!strcmp(d1[i].name,CAP2.dev)){ b2=&d1[i]; break; }
         if(a&&b2){
             double dr=UDELTA(b2->rios,a->rios), dw=UDELTA(b2->wios,a->wios);
             double tr=UDELTA(b2->rticks,a->rticks), tw=UDELTA(b2->wticks,a->wticks);
@@ -4728,15 +4836,19 @@ static void vd_capacity(char*o,size_t n,const char**col){
                                 :"· 과다 할당: data_buffer 중 %.0f%%만 사용, 초당 %.0f페이지 — 축소 가능",
                      res,c->miss_pps); return; }
     }
+    /* No device verdict without the DB's own disk: another disk's load is not the DB's */
+    if(!c->dev[0]){ *col=VD_INFO;
+        snprintf(o,n,g_ascii?"DB volume device unknown - %s; no storage verdict"
+                            :"· DB 볼륨 장치 미확인 — %s; 스토리지 판정 생략",c->dev_why[0]?c->dev_why:"-"); return; }
     /* With no ceiling observed, say so rather than pass an estimate off as fact */
     if(c->headroom_pct<0){ *col=VD_INFO;
-        snprintf(o,n,g_ascii?"IOPS %.0f, await %.1fms, dev %.0f%% - ceiling not yet observed (needs a >=90%% util moment)"
-                            :"· IOPS %.0f, 대기 %.1fms, 장치 %.0f%% — 상한 미관측(사용률 90%% 순간이 필요)",
-                 c->dev_iops,c->await_ms>=0?c->await_ms:0,c->dev_util); return; }
+        snprintf(o,n,g_ascii?"%s: IOPS %.0f, await %.1fms, dev %.0f%% - ceiling not yet observed (needs a moment with queue >= 4)"
+                            :"· %s: IOPS %.0f, 대기 %.1fms, 장치 %.0f%% — 상한 미관측(큐 4 이상 순간이 필요)",
+                 c->dev,c->dev_iops,c->await_ms>=0?c->await_ms:0,c->dev_util); return; }
     *col=VD_INFO;
-    snprintf(o,n,g_ascii?"IOPS %.0f (%.0f%% of ceiling), await %.1fms, hit %.0f%% (%s)"
-                        :"· IOPS %.0f (상한의 %.0f%%), 대기 %.1fms, 히트 %.0f%% (%s)",
-             c->dev_iops,c->headroom_pct,c->await_ms>=0?c->await_ms:0,
+    snprintf(o,n,g_ascii?"%s: IOPS %.0f (%.0f%% of ceiling), await %.1fms, hit %.0f%% (%s)"
+                        :"· %s: IOPS %.0f (상한의 %.0f%%), 대기 %.1fms, 히트 %.0f%% (%s)",
+             c->dev,c->dev_iops,c->headroom_pct,c->await_ms>=0?c->await_ms:0,
              c->hit_pct>=0?c->hit_pct:0,c->hit_src);
 }
 /* In a replay the recorded sentence is shown as is, when it is in the language in force */
@@ -6362,6 +6474,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         if(CAP2.await_ms>=0)      printf("cap.await_ms=%.2f cap.read_await_ms=%.2f cap.write_await_ms=%.2f\n",
                                          CAP2.await_ms,CAP2.r_await_ms<0?0:CAP2.r_await_ms,CAP2.w_await_ms<0?0:CAP2.w_await_ms);
         if(CAP2.qdepth>=0)        printf("cap.queue_depth=%.2f\n",CAP2.qdepth);
+        printf("cap.device=\"%s\" cap.device_via=\"%s\" cap.device_reason=\"%s\"\n",CAP2.dev,
+               g_dk_via==1?"st_dev":g_dk_via==2?"mount":g_dk_via==3?"statfs_fsid":"",CAP2.dev_why);
         printf("cap.dev_iops=%.0f cap.proc_iops=%.0f\n",CAP2.dev_iops,rnd_as_printed(CAP2.riops,0)+rnd_as_printed(CAP2.wiops,0));
         /* I/O profile: ceilings are compared only within this cell (block size x read share) */
         printf("cap.req_kb=%.1f cap.read_ratio=%.2f cap.profile=\"%s/%s\"\n",
@@ -6813,9 +6927,12 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* The remembered ceilings are per profile cell, so the whole matrix is restored -
        a verdict compares against the cell in force, not a single number. */
     /* The cells are the recorded device's, restored into that device's matrix */
-    snprintf(CAP2.dev,sizeof CAP2.dev,"%s",IO->devnm);
+    rp_str(t,"cap.device",CAP2.dev,sizeof CAP2.dev);
+    rp_str(t,"cap.device_reason",CAP2.dev_why,sizeof CAP2.dev_why);
+    { char v[16]=""; rp_str(t,"cap.device_via",v,sizeof v);
+      g_dk_via = !strcmp(v,"st_dev")?1 : !strcmp(v,"mount")?2 : !strcmp(v,"statfs_fsid")?3 : 0; }
     rp_str(t,"cap.ceiling_device_id",g_cap_devid,sizeof g_cap_devid);
-    { cap_dev_t *d=cap_dev_get(IO->devnm); g_cap_mtx = d ? d->m : g_cap_none; }
+    { cap_dev_t *d=cap_dev_get(CAP2.dev); g_cap_mtx = d ? d->m : g_cap_none; }
     if(g_cap_mtx!=g_cap_none) memset(g_cap_mtx,0,sizeof(cap_cell_t)*CAP_BS_N*CAP_RW_N);
     for(int bs=0;bs<CAP_BS_N && g_cap_mtx!=g_cap_none;bs++) for(int rw=0;rw<CAP_RW_N;rw++){
         char k[64]; snprintf(k,sizeof k,"cap.cell%d%d.iops",bs,rw);
@@ -7273,7 +7390,7 @@ static const opt_t OPTS[]={
  {"--offsets",   "F","오프셋 표 파일/디렉터리 (tools/collect-offsets.sh 산출물 — 디렉터리면 버전 자동 선택; 생략 시 실행파일 옆 offsets/ 자동 탐색)"},
  {"--pgbuf-detail","","버퍼 슬롯 26만 개(16K 페이지 4GB) 초과 버퍼풀도 페이지 단위로 스캔 (기본은 엔진 집계만 — 전수 스캔은 대상에 접촉이 크다)"},
  {"--bcb-dump",  "F","버퍼풀 BCB 스냅샷을 파일 F 로 (cub_volmap --bufmap F 가 지도에 얹음; 라이브는 매 프레임 갱신, 이때는 헤더를 전수 읽음)"},
- {"--capacity-state","F","용량 상한(포화 시 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정"},
+ {"--capacity-state","F","용량 상한(큐가 쌓인 순간의 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정"},
  {"-p, --plot",  "", "시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)"},
  {"--interval",  "S","샘플 창(초, 0.05~3600, 기본 0.5)"},
  {"--record", "F", "라이브(-b/-p) 프레임을 새 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가). 이미 있거나 심볼릭 링크면 거부"},
@@ -7585,17 +7702,18 @@ static void help_keys_dash(void){
 "\f\n"
 "── ⓐ 용량(capacity) — 증설·축소·개선을 무엇으로 판단하나 ──\n"
 "  숲 관점의 축이다: 수요(지금 얼마 쓰나) · 상한(이 환경이 얼마까지 되나) · 헤드룸(남은 여유).\n"
-"  수요   dev IOPS = 장치 전체, this server IOPS = 이 인스턴스 귀속(/proc/<pid>/io).\n"
+"  수요   dev IOPS = DB 파일(볼륨·로그)이 놓인 디스크 전체, this server IOPS = 이 인스턴스 귀속(/proc/<pid>/io).\n"
+"         장치는 호스트 최다사용 장치가 아니다. overlay 는 하위 XFS 의 fsid 로 찾고, 못 찾으면 장치 판정을 생략한다.\n"
 "  지연   await = 요청당 대기(ms). IOPS 는 낮은데 await 가 크면 'IOPS 증설'이 아니라\n"
 "         '더 빠른 스토리지'가 답이다. queue = 평균 큐 깊이.\n"
-"  상한   포화(사용률 90%% 이상) 또는 큐가 쌓인 순간의 IOPS 를 그 환경의 실효 상한으로 기억한다.\n"
+"  상한   큐가 쌓인 순간(평균 깊이 4 이상)의 IOPS 를 그 환경의 실효 상한으로 기억한다.\n"
 "         **하나의 숫자로 기억하지 않는다.** 같은 장치라도 4KB 랜덤과 128KB 순차는 IOPS 상한이\n"
 "         자릿수로 다르므로, I/O 프로파일 = 평균 요청 크기(<8KB / 8-64KB / >64KB) x 읽기 비중\n"
 "         (write-heavy <30%% / mixed / read-heavy >70%%) 9칸으로 나눠 칸마다 따로 기억하고,\n"
 "         지금 프로파일과 **같은 칸**의 상한하고만 비교한다. 다른 칸 값을 빌려 쓰면\n"
 "         (128KB 로 잰 상한을 4KB 워크로드에 적용) '여유 있다' 는 거짓 판정이 나온다.\n"
 "         --capacity-state FILE 로 보존하면 재실행해도 칸별 상한을 이어서 판정한다.\n"
-"         그 칸이 한 번도 포화하지 않았으면 '이 칸은 미관측'으로 표기한다(추정을 사실로 위장하지 않는다).\n"
+"         그 칸에서 큐가 쌓인 적이 없으면 '이 칸은 미관측'으로 표기한다(추정을 사실로 위장하지 않는다).\n"
 "  버퍼   히트율의 출처가 두 가지다.\n"
 "         perfmon   엔진 카운터가 **이미 돌고 있을 때**(statdump·csql ;histo 등 watcher 존재)\n"
 "                   그 값을 읽는다. 우리가 watcher 를 만들지는 않는다(무침습 절대 조건).\n"

@@ -201,7 +201,10 @@ cub_volmap 페이지 박스의 `buf:DIRTY unflushed / flushed` 는 마지막 두
 
 | 키 | 정의 | 읽는 법 |
 |---|---|---|
-| `cap.dev_iops` | 최다사용 장치의 초당 I/O 완료 수 = `(rd_ios+wr_ios) 델타 ÷ 경과` | 호스트 전체 값이다(다른 프로세스 포함). 컨테이너에서는 DB 볼륨의 백킹 장치를 못 찾을 수 있다 |
+| `cap.device` | 용량 판정 장치 = DB 파일(볼륨·로그)이 놓인 물리 디스크 중 이 프레임에 가장 바쁜 것. 비면 장치 판정 없음 | 호스트 최다사용 장치가 아니다 — 백업이 다른 디스크를 채워도 DB 디스크의 판정에 섞이지 않는다 |
+| `cap.device_via` | 찾은 경로: `st_dev`(일반 마운트) · `mount`(마운트 원본) · `statfs_fsid`(overlay 등 익명 장치, 하위 XFS 의 fsid) | |
+| `cap.device_reason` | 장치를 못 찾은 사유(tmpfs·네트워크·ext4/btrfs 위 overlay, DB 파일 위치 미확인) | |
+| `cap.dev_iops` | `cap.device` 의 초당 I/O 완료 수 = `(rd_ios+wr_ios) 델타 ÷ 경과` | 디스크 단위 값이다(같은 디스크의 다른 프로세스 포함) |
 | `cap.proc_iops` | 이 인스턴스의 `syscr+syscw` 초당 = 엔진이 발행한 요청 수 | 장치 IOPS 보다 크면 정상(페이지 캐시가 흡수한 분) |
 | `cap.read_bps` / `write_bps` | `/proc/<pid>/io` 의 `read_bytes`/`write_bytes` 초당 | 블록 계층 실제 디스크 바이트 |
 
@@ -222,8 +225,8 @@ cub_volmap 페이지 박스의 `buf:DIRTY unflushed / flushed` 는 마지막 두
 | `cap.ceiling_util_pct` / `ceiling_qdepth` / `ceiling_epoch` | 그 순간의 근거(사용률·큐)와 시각 |
 | `cap.used_of_ceiling_pct` | 현재 IOPS ÷ 상한. 80% 이상이면 용량 한계, 20% 이하이고 사용률 50% 미만이면 여유 |
 
-상한은 **그 장치, 그 워크로드 패턴에서의 실효 상한**이다(16KB 랜덤 읽기 위주 등). 장치마다, 그리고 요청 크기 3구간 × 읽기 비율 3구간의 칸마다 따로 기억하고, 판정은 그 프레임의 최다 사용 장치(`hostdev.name`)와 같은 칸의 상한과만 비교한다.
-`--capacity-state FILE` 로 보존하면 재실행·재부팅 뒤에도 헤드룸 판정이 이어진다. 파일은 한 줄에 장치 하나·칸 하나(`cell <장치 ID> <크기> <읽기비율> iops=…`)이며, 지금 장치의 ID 와 맞지 않는 줄은 그 장치에 붙지 않는다. 한 번도 포화하지 않았으면 `상한 미관측`으로 표기한다.
+상한은 **그 장치, 그 워크로드 패턴에서의 실효 상한**이다(16KB 랜덤 읽기 위주 등). 장치마다, 그리고 요청 크기 3구간 × 읽기 비율 3구간의 칸마다 따로 기억하고, 판정은 DB 디스크(`cap.device`)의 같은 칸 상한과만 비교한다.
+`--capacity-state FILE` 로 보존하면 재실행·재부팅 뒤에도 헤드룸 판정이 이어진다. 파일은 한 줄에 장치 하나·칸 하나(`cell <장치 ID> <크기> <읽기비율> iops=…`)이며, 지금 장치의 ID 와 맞지 않는 줄은 그 장치에 붙지 않는다. 큐가 4 이상 쌓인 적이 없으면 `상한 미관측`으로 표기한다.
 
 실측(cbench 콜드 스캔, sda): 사용률 100% 시점 **5,449 IOPS**, 이후 프레임 헤드룸 81~100%.
 

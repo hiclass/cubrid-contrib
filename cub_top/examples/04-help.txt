@@ -10,10 +10,11 @@
   --offsets F        오프셋 표 파일/디렉터리 (tools/collect-offsets.sh 산출물 — 디렉터리면 버전 자동 선택; 생략 시 실행파일 옆 offsets/ 자동 탐색)
   --pgbuf-detail     버퍼 슬롯 26만 개(16K 페이지 4GB) 초과 버퍼풀도 페이지 단위로 스캔 (기본은 엔진 집계만 — 전수 스캔은 대상에 접촉이 크다)
   --bcb-dump F       버퍼풀 BCB 스냅샷을 파일 F 로 (cub_volmap --bufmap F 가 지도에 얹음; 라이브는 매 프레임 갱신, 이때는 헤더를 전수 읽음)
-  --capacity-state F 용량 상한(포화 시 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정
+  --capacity-state F 용량 상한(큐가 쌓인 순간의 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정
   -p, --plot         시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)
   --interval S       샘플 창(초, 0.05~3600, 기본 0.5)
-  --record F         라이브(-b/-p) 프레임을 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가)
+  --record F         라이브(-b/-p) 프레임을 새 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가). 이미 있거나 심볼릭 링크면 거부
+  --record-overwrite --record 의 기존 파일을 덮어씀 (이 계정 소유의 일반 파일일 때만)
   --replay F         기록 파일 F 를 재생 (서버·/proc 불필요, -b/-p 키 그대로)
   --replay-speed N   재생 배속 (1=실측 간격, 0=최대속도, 기본 1)
   --dump-hist        히스토리 1샘플을 stderr 로 덤프 (수치 대조·진단용)

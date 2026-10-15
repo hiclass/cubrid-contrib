@@ -18,13 +18,20 @@
 # device's identity (wwid/serial/dm uuid + size), not its kernel name.  Two devices alternate as
 # the busiest; each must be judged against its own ceiling.  A ceiling is learned only where a
 # queue built (depth >= 4): one outstanding I/O shows util ~100% at depth ~1 and measures the
-# latency, which must be judged latency-bound.  Drives cap_collect() with synthetic diskstats.
+# latency, which must be judged latency-bound.  Drives cap_collect() with synthetic diskstats;
+# the frame's device stands in as the DB's disk (check-dbdisk covers finding it).
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
 TMP=${TMPDIR:-/tmp}/cub_top-ceiling.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
+sed -e 's/nk = P->pid>=0 ? db_disks(/nk = 1 ? test_db_disks(/' "$SRC" > "$TMP/src.c"
+grep -q 'test_db_disks(' "$TMP/src.c" || { echo "→ FAIL (db_disks call not found)"; exit 1; }
 cat > "$TMP/t.c" <<C
+#include <stddef.h>
+static char g_test_dev[32];
+static int test_db_disks(int pid,const char*db,char out[][32],int max,char*why,size_t wn){
+    (void)pid; (void)db; (void)max; (void)why; (void)wn; memcpy(out[0],g_test_dev,32); return 1; }
 #define main cub_top_main
-#include "$SRC"
+#include "$TMP/src.c"
 #undef main
 /* One 1-second frame on device nm: iops of 16KB reads at utilization util, mean queue qd, wait aw ms */
 static void frame4(const char*nm,double iops,double util,double qd,double aw){
@@ -32,7 +39,8 @@ static void frame4(const char*nm,double iops,double util,double qd,double aw){
     memset(&d0,0,sizeof d0); memset(&IO,0,sizeof IO);
     snprintf(d0.name,sizeof d0.name,"%s",nm); d1=d0;
     d1.rios=(unsigned long)iops; d1.rsect=(unsigned long)(iops*32); d1.rticks=(unsigned long)(iops*aw); d1.tiq=(unsigned long)(qd*1000);
-    snprintf(IO.devnm,sizeof IO.devnm,"%s",nm); IO.devutil=util;
+    d1.io_ms=(unsigned long)(util*10);
+    snprintf(IO.devnm,sizeof IO.devnm,"%s",nm); IO.devutil=util; snprintf(g_test_dev,sizeof g_test_dev,"%s",nm);
     cap_collect(&P,&IO,&d0,1,&d1,1,1.0);
 }
 static void frame(const char*nm,double iops,double util){ frame4(nm,iops,util,util>=90?8.0:0.5,0.5); }
