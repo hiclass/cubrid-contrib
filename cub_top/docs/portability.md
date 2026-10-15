@@ -47,15 +47,19 @@ caps: vm_readv=no(pread 폴백) rollup=no(smaps 합산) proc_io=yes … ← 구 
 
 | 인터페이스 | 도입 | 없을 때 폴백 | 영향 |
 |---|---|---|---|
-| `process_vm_readv` | 커널 3.2 / glibc 2.15 | `pread(/proc/pid/mem)` | **없음** — 방법 B 정상 동작(폴백 상태에서 자기검증 통과 확인) |
+| `process_vm_readv` | 커널 3.2 / glibc 2.15 | `pread(/proc/pid/mem)` | **없음** — 방법 B 정상 동작(폴백 상태에서 자기검증 통과 확인). 단 2.6.39 미만은 `/proc/pid/mem` 을 tracer 만 읽을 수 있어 폴백도 거부되고 엔진 직독이 꺼진다(사유에 커널 때문임을 적는다) |
+| `/proc/pid/comm` | 커널 2.6.33 | 쓰지 않음 — 프로세스 이름은 `/proc/pid/stat` 의 `(comm)` 에서 읽는다 | 없음 |
 | `smaps_rollup` | 커널 4.14 | `smaps` 전체 합산 | 비용만 증가(수 ms) |
 | `/proc/pid/io` | `CONFIG_TASK_IO_ACCOUNTING` | I/O 섹션 생략 | I/O 지표 없음 |
 | `/proc/pid/pagemap` | 커널 2.6.25 | 상주 확인 없이 헤더 표본을 읽음 | `pgbuf.hdr_pagemap_unchecked` 로 표기, 스왑된 표본 페이지가 다시 적재될 수 있음 |
 | `MemAvailable` | 커널 3.14 | `MemFree` 사용 | 가용량이 보수적으로 표시 |
 
 `process_vm_readv` 와 `/proc/pid/mem` 은 시작 시(대상 전환·재시작 때도) 대상의 매핑된 주소 1바이트를 실제로 읽어 시험합니다.
-EPERM/EACCES(Yama `ptrace_scope>=1`, 2.6.32 의 tracer 전용 mem)는 폴백이 아니라 권한 제한이므로 `perm.limited=1` 과 사유를 내고
+EPERM/EACCES(Yama `ptrace_scope>=1`, 2.6.39 미만의 tracer 전용 mem)는 폴백이 아니라 권한 제한이므로 `perm.limited=1` 과 사유를 내고
 엔진 직독을 끕니다([limitations §15](limitations.md)).
+
+2.6.32(CentOS 6) 실기에서는 검증하지 않았다 — 위 동작은 커널 소스와 문서 기준이며, `tools/check-oldkernel.sh` 는 이름 읽기와
+커널 판정 논리만 이 호스트에서 확인한다. 2.6.32 에서 나오는 것은 `/proc` 만으로 되는 축(메모리 영역·스레드·CPU·I/O·용량)이다.
 
 `process_vm_readv`는 **glibc 래퍼가 아니라 `syscall()` 직접 호출**입니다. 따라서 glibc 2.15 미만에서도 컴파일되며, 커널이 지원하지 않으면 `ENOSYS`로 폴백합니다. 시스템콜 번호는 `<asm/unistd.h>` 매크로를 우선 쓰고 없을 때만 아키텍처별 상수로 보완합니다.
 

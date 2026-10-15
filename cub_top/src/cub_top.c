@@ -50,6 +50,7 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/utsname.h>
 #include <signal.h>
 #include <time.h>
 
@@ -210,6 +211,17 @@ static unsigned long first_readable_map(int pid){
     return a;
 }
 /* Memory reads denied though maps/smaps are readable: Yama ptrace_scope>=1 checks only the attach mode */
+/* A kernel release string ("2.6.32-754.el6.x86_64") is older than a.b.c */
+static int release_before(const char *rel,int a,int b,int c){
+    int x=0,y=0,z=0;
+    if(sscanf(rel,"%d.%d.%d",&x,&y,&z)<2) return 0;
+    if(x!=a) return x<a;
+    if(y!=b) return y<b;
+    return z<c;
+}
+static int kernel_before(int a,int b,int c){
+    struct utsname u; return uname(&u)==0 && release_before(u.release,a,b,c);
+}
 static void perm_vm_denied(int err){
     int sc=-1; FILE *f=fopen("/proc/sys/kernel/yama/ptrace_scope","r");
     if(f){ if(fscanf(f,"%d",&sc)!=1) sc=-1; fclose(f); }
@@ -224,6 +236,11 @@ static void perm_vm_denied(int err){
                  g_ascii?"memory read denied (%s): kernel.yama.ptrace_scope=%d - engine view off (needs root/CAP_SYS_PTRACE%s)"
                         :"메모리 읽기 거부(%s): kernel.yama.ptrace_scope=%d - 엔진 직독 꺼짐 (root/CAP_SYS_PTRACE%s 필요)",
                  err==EACCES?"EACCES":"EPERM",sc,sc==1?(g_ascii?" or ptrace_scope=0":" 또는 ptrace_scope=0"):"");
+    else if(kernel_before(2,6,39))   /* no process_vm_readv (3.2) and /proc/pid/mem for the tracer only */
+        snprintf(g_perm_why,sizeof g_perm_why,
+                 g_ascii?"memory read denied (%s): kernel before 2.6.39 lets only a tracer read /proc/<pid>/mem (and has no process_vm_readv) - engine view off on this kernel"
+                        :"메모리 읽기 거부(%s): 2.6.39 이전 커널은 /proc/<pid>/mem 을 tracer 만 읽게 함(process_vm_readv 도 없음) - 이 커널에서는 엔진 직독 불가",
+                 err==EACCES?"EACCES":"EPERM");
     else
         snprintf(g_perm_why,sizeof g_perm_why,
                  g_ascii?"memory read denied (%s) - engine view off (run as the server owner or root)"
@@ -365,15 +382,23 @@ static tier_t *g_enum_T=NULL; static double g_enum_dt=0;   /* For the pass 2 tie
    A cub_pl joins its database's record: whichever of the server and the PL the walk meets
    first creates it (a PL first leaves pid -1 for the server to fill), and a record that
    ends with no server is dropped. */
+/* The process name, from /proc/<pid>/stat's "(comm)" - /proc/<pid>/comm only exists from
+   2.6.33.  The name may hold ')' or spaces, so it ends at the last ')'. */
+static int proc_name(const char *pid,char *out,size_t on){
+    char p[64], b[512]; snprintf(p,sizeof p,"/proc/%.20s/stat",pid);
+    if(read_file(p,b,sizeof b)<=0) return 0;
+    char *l=strchr(b,'('), *r=strrchr(b,')');
+    if(!l || !r || r<l) return 0;
+    size_t n=(size_t)(r-l-1); if(n>=on) n=on-1;
+    memcpy(out,l+1,n); out[n]=0; return 1;
+}
 static int enum_instances(void){
     g_ninst=0; g_inst_lost=0;
     DIR *d=opendir("/proc"); if(!d) return 0;
-    struct dirent *e; char p[300],b[256];
+    struct dirent *e; char b[256];
     while((e=readdir(d))){
         if(e->d_name[0]<'0'||e->d_name[0]>'9') continue;
-        snprintf(p,sizeof p,"/proc/%.20s/comm",e->d_name);
-        if(read_file(p,b,sizeof b)<=0) continue;
-        char*nl=strchr(b,'\n'); if(nl)*nl=0;
+        if(!proc_name(e->d_name,b,sizeof b)) continue;
         int pid=atoi(e->d_name);
         if(!strcmp(b,"cub_server")){
             char db[64]; cmd_db(pid,db,sizeof db);
