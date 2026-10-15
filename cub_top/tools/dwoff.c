@@ -454,6 +454,16 @@ static tgt_t TG[]={
   {"OFF_LRU_C2",        NULL,"count_lru2","pgbuf_lru_list",         84},
   {"OFF_LRU_C3",        NULL,"count_lru3","pgbuf_lru_list",         88},
   {"OFF_LRU_VICT",      NULL,"count_vict_cand","pgbuf_lru_list",    92},
+  /* Hash map kind and object lock pools: lockfree_hashmap::m_type is OLD(0)/NEW(1); only OLD
+     keeps the lf freelist whose alloc_cnt is read */
+  {"OFF_SESS_HTYPE",    "sessions","m_type",                  NULL, 400},
+  {"OFF_CAT_HTYPE",     "catalog_Hashmap","m_type",           NULL, 400},
+  {"OFF_LK_HTYPE",      "lk_Gl","m_type",                     NULL, 472},
+  {"OFF_LK_RES_ALLOC",  "lk_Gl","alloc_cnt",                  NULL, 84},
+  {"OFF_LK_ENTFL",      "lk_Gl","obj_free_entry_list",        NULL, 480},
+  {"OFF_LFFL_ALLOC",    NULL,"alloc_cnt","lf_freelist",             12},
+  {"SZ_LK_ENTRY",       NULL,NULL,"lk_entry",                       128},
+  {"SZ_LK_RES",         NULL,NULL,"lk_res",                         120},
 };
 #define NTG ((int)(sizeof TG/sizeof TG[0]))
 static long GOT[NTG]; static int OKF[NTG]; static char NOTE[NTG][160];

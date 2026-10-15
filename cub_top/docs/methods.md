@@ -27,18 +27,19 @@ CUBRID 11.5 빌드의 DWARF(`readelf --debug-dump=info`)에서 추출한 값입�
 |---|---|---|---|---|
 | 페이지 버퍼 | `_ZL10pgbuf_Pool` | `num_buffers` | 0 | `num_buffers × DB_PAGESIZE` |
 | **플랜 캐시(XASL)** | `xcache_Global` | `entry_count` | 440 | 엔트리 수 |
-| | | `memory_usage_cache` | 484 | **엔진이 직접 세는 바이트** |
-| | | `memory_usage_clone` | 488 | 같음 |
+| | | `memory_usage_cache` | 484 | **엔진이 직접 세는 바이트** (● 측정) |
+| | | `memory_usage_clone` | 488 | 엔진의 **추정치** — 클론당 `UNPACK_SCALE(3) × stream 크기` (◌ 추정, `plan clones (est)`) |
 | 결과(list) 캐시 | `_ZL16qfile_List_cache` | `n_entries` | 24 | 엔트리 수 |
 | | | `n_pages` | 28 | `n_pages × DB_PAGESIZE` |
 | | `_ZL27qfile_List_cache_entry_pool` | `n_entries` | 8 | `× 4096`(고정 슬롯) |
 | 필터 술어 캐시 | `_ZL21fpcache_Entry_counter` | (INT32 자체) | 0 | `× 120` |
-| 락 매니저 | `lk_Gl` | `config.num_trans` | 0 | `× 152` |
-| 세션 테이블 | `_ZL8sessions` | `lf_freelist.alloc_cnt` | 12 | `× 312` |
-| 카탈로그 캐시 | `_ZL15catalog_Hashmap` | `lf_freelist.alloc_cnt` | 12 | `× 48` |
+| 락 매니저(트랜잭션 슬롯) | `lk_Gl` | `config.num_trans` | 0 | `× 152` |
+| 락 자원(객체) | `lk_Gl` | `m_obj_hash_table…m_freelist.alloc_cnt` | 84 | `× sizeof(lk_res)` 120 |
+| 락 엔트리(객체) | `lk_Gl` | `obj_free_entry_list.alloc_cnt` | 480+12 | `× sizeof(lk_entry)` 128 |
+| 세션 테이블 | `_ZL8sessions` | `…m_old_hash.m_freelist.alloc_cnt` | 12 (`OFF_LF_ALLOCCNT`) | `× 312` |
+| 카탈로그 캐시 | `_ZL15catalog_Hashmap` | `m_old_hash.m_freelist.alloc_cnt` | 12 (`OFF_LF_ALLOCCNT2`, 세션과 별도 키) | `× 48` |
 | 연결 엔트리 | `_ZL16css_Num_max_conn` | (INT32 자체) | 0 | `× 480` |
 | | `_ZL19css_Num_active_conn` | (INT32 자체) | 0 | 활성 수 |
-| VACUUM | `_ZL11vacuum_Data` | (구조체 전체) | — | 184B |
 
 ### DWARF에서 얻은 sizeof
 
@@ -54,18 +55,27 @@ CUBRID 11.5 빌드의 DWARF(`readelf --debug-dump=info`)에서 추출한 값입�
 
 ### 정확도가 가장 높은 지점
 
-`xcache_Global.memory_usage_cache` / `memory_usage_clone`은 **엔진이 스스로 카운팅하는 바이트 값**입니다. 추정이 아니라 그 값을 그대로 읽으므로 오차가 없습니다.
+`xcache_Global.memory_usage_cache` 는 **엔진이 스스로 카운팅하는 바이트 값**입니다. 그 값을 그대로 읽으므로 측정(●)입니다.
+`memory_usage_clone` 은 엔진이 실제 할당을 세는 값이 아니라 클론당 `sizeof(xasl_unpack_info)+sizeof(XASL_NODE)+UNPACK_SCALE×stream` 으로
+**가정한 크기**의 합이라 별도 항목 `plan clones (est)` 로 추정(◌) 등급을 붙입니다.
+
+`vacuum_Data` 는 184B 구조체일 뿐 vacuum 이 쓰는 메모리를 나타내지 않으므로 항목으로 내지 않습니다.
 
 이 두 필드는 11.5 표에만 있습니다. 10.2~11.4 표에는 `entry_count`만 있으므로 플랜 캐시는 **엔트리 수만** 표시하고(크기 `-`, `heapB.plan_cache_xcache_count`) 합계에서 뺍니다. 표에 없는 오프셋은 읽지 않고 그 항목을 생략합니다.
 
 ### 락프리 해시맵 주의
 
-`sessions`, `catalog_Hashmap`, `fpcache_Hashmap`, `lk_Gl.m_obj_hash_table`은 `cubthread::lockfree_hashmap<K,V>`이고, 런타임에 **구현 두 개 중 하나**를 씁니다(`enable_new_lfhash`).
+`sessions`, `catalog_Hashmap`, `fpcache_Hashmap`, `lk_Gl.m_obj_hash_table`은 `cubthread::lockfree_hashmap<K,V>`이고, 숨은 파라미터
+`new_lfhash`(기본 `no`)에 따라 **구현 두 개 중 하나**를 씁니다. 어느 쪽인지는 래퍼의 `m_type`(OLD=0, NEW=1)에 있습니다.
 
-- **OLD 경로**: 임베드된 `lf_freelist`의 `alloc_cnt @12` (현재 구현이 사용)
-- **NEW 경로**: `lockfree::freelist`의 `m_alloc_count` (오프셋 다름)
+| `m_type` | 읽는 값 | 표시 |
+|---|---|---|
+| OLD(0) | 임베드된 `lf_freelist.alloc_cnt` | 개수 × 구조체 크기 (● 측정) |
+| NEW(1) | — (구 freelist 의 `alloc_cnt` 는 0 으로 남음) | `?` "새 lockfree 해시 — 개수 미상, 합산 제외". 0 B 측정으로 보이지 않게 한다 |
+| 래퍼 없음(10.x) | 그 자체가 구 lf 해시 | OLD 와 같음 |
 
-경험적으로 OLD 경로가 활성임을 확인했습니다(`sessions+12 = 102`가 실제 세션 수와 일치). 다른 환경에서는 `m_type`을 먼저 읽어 판정해야 합니다.
+`m_type` 오프셋은 표의 `OFF_SESS_HTYPE`·`OFF_CAT_HTYPE`·`OFF_LK_HTYPE` 이다. 락 엔트리 풀(`obj_free_entry_list`)은 해시맵이 아닌
+`LF_FREELIST` 라 종류와 무관하게 읽는다.
 
 ### 전역 루트에서 도달 불가한 것
 

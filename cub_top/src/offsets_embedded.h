@@ -66,6 +66,11 @@ static const embtbl_t EMB_TBL[]={
     "OFF_LRU_C2 84\n"
     "OFF_LRU_C3 88\n"
     "OFF_LRU_VICT 92\n"
+    "OFF_LK_RES_ALLOC 84\n"
+    "OFF_LK_ENTFL 128\n"
+    "OFF_LFFL_ALLOC 12\n"
+    "SZ_LK_ENTRY 128\n"
+    "SZ_LK_RES 120\n"
   },
   {"10.2.17.9008",
     "OFF_PGBUF_NBUF 0\n"
@@ -153,6 +158,14 @@ static const embtbl_t EMB_TBL[]={
     "OFF_LRU_C2 84\n"
     "OFF_LRU_C3 88\n"
     "OFF_LRU_VICT 92\n"
+    "OFF_SESS_HTYPE 400\n"
+    "OFF_CAT_HTYPE 400\n"
+    "OFF_LK_HTYPE 408\n"
+    "OFF_LK_RES_ALLOC 20\n"
+    "OFF_LK_ENTFL 416\n"
+    "OFF_LFFL_ALLOC 12\n"
+    "SZ_LK_ENTRY 128\n"
+    "SZ_LK_RES 120\n"
   },
   {"11.0.16.0419",
     "OFF_PGBUF_NBUF 0\n"
@@ -255,6 +268,14 @@ static const embtbl_t EMB_TBL[]={
     "OFF_LRU_C2 84\n"
     "OFF_LRU_C3 88\n"
     "OFF_LRU_VICT 92\n"
+    "OFF_SESS_HTYPE 400\n"
+    "OFF_CAT_HTYPE 400\n"
+    "OFF_LK_HTYPE 408\n"
+    "OFF_LK_RES_ALLOC 20\n"
+    "OFF_LK_ENTFL 416\n"
+    "OFF_LFFL_ALLOC 12\n"
+    "SZ_LK_ENTRY 128\n"
+    "SZ_LK_RES 120\n"
   },
   {"11.3.5.1274",
     "OFF_PGBUF_NBUF 0\n"
@@ -342,6 +363,14 @@ static const embtbl_t EMB_TBL[]={
     "OFF_LRU_C2 84\n"
     "OFF_LRU_C3 88\n"
     "OFF_LRU_VICT 92\n"
+    "OFF_SESS_HTYPE 400\n"
+    "OFF_CAT_HTYPE 400\n"
+    "OFF_LK_HTYPE 408\n"
+    "OFF_LK_RES_ALLOC 20\n"
+    "OFF_LK_ENTFL 416\n"
+    "OFF_LFFL_ALLOC 12\n"
+    "SZ_LK_ENTRY 128\n"
+    "SZ_LK_RES 120\n"
   },
   {"11.4.5.1865",
     "OFF_PGBUF_NBUF 0\n"
@@ -398,6 +427,14 @@ static const embtbl_t EMB_TBL[]={
     "OFF_LRU_C2 84\n"
     "OFF_LRU_C3 88\n"
     "OFF_LRU_VICT 92\n"
+    "OFF_SESS_HTYPE 400\n"
+    "OFF_CAT_HTYPE 400\n"
+    "OFF_LK_HTYPE 408\n"
+    "OFF_LK_RES_ALLOC 20\n"
+    "OFF_LK_ENTFL 416\n"
+    "OFF_LFFL_ALLOC 12\n"
+    "SZ_LK_ENTRY 128\n"
+    "SZ_LK_RES 120\n"
   },
   {"11.4.6.1963",
     "OFF_PGBUF_NBUF 0\n"
@@ -491,6 +528,14 @@ static const embtbl_t EMB_TBL[]={
     "OFF_LRU_C2 84\n"
     "OFF_LRU_C3 88\n"
     "OFF_LRU_VICT 92\n"
+    "OFF_SESS_HTYPE 400\n"
+    "OFF_CAT_HTYPE 400\n"
+    "OFF_LK_HTYPE 472\n"
+    "OFF_LK_RES_ALLOC 84\n"
+    "OFF_LK_ENTFL 480\n"
+    "OFF_LFFL_ALLOC 12\n"
+    "SZ_LK_ENTRY 128\n"
+    "SZ_LK_RES 120\n"
   },
   {"11.5.0.2543",
     "OFF_PGBUF_NBUF 0\n"
@@ -549,6 +594,14 @@ static const embtbl_t EMB_TBL[]={
     "OFF_LRU_C2 84\n"
     "OFF_LRU_C3 88\n"
     "OFF_LRU_VICT 92\n"
+    "OFF_SESS_HTYPE 400\n"
+    "OFF_CAT_HTYPE 400\n"
+    "OFF_LK_HTYPE 472\n"
+    "OFF_LK_RES_ALLOC 84\n"
+    "OFF_LK_ENTFL 480\n"
+    "OFF_LFFL_ALLOC 12\n"
+    "SZ_LK_ENTRY 128\n"
+    "SZ_LK_RES 120\n"
   },
 };
 #define EMB_TBL_N ((int)(sizeof EMB_TBL / sizeof EMB_TBL[0]))

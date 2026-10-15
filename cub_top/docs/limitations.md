@@ -248,7 +248,7 @@ CUBRID의 내장 메모리 모니터(`cubrid memmon`)는 할당을 **소스 `파
 ## 10.0 힙 B 항목 한계 (offsets 표 사용 시)
 10.0 은 lock table(lk_Gl 멤버 미해소)·session table(값 위생 위반) 두 항목이 측정에서 빠진다
 (구조가 11.x 와 달라 DWARF 로도 대상 멤버를 못 찾음). 지어내지 않고 생략/제외로 표기한다.
-list cache·conn entries·vacuum data 는 실 바이트로 측정된다.
+list cache·conn entries 는 실 바이트로 측정된다.
 
 ## 13. 버퍼풀 버퍼 제어블록(BCB) 상태 읽기의 한계
 

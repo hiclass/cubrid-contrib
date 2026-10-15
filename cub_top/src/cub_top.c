@@ -1424,6 +1424,16 @@ static tgt_t TG[]={
   {"OFF_LRU_C2",        NULL,"count_lru2","pgbuf_lru_list",         84},
   {"OFF_LRU_C3",        NULL,"count_lru3","pgbuf_lru_list",         88},
   {"OFF_LRU_VICT",      NULL,"count_vict_cand","pgbuf_lru_list",    92},
+  /* Hash map kind and object lock pools: lockfree_hashmap::m_type is OLD(0)/NEW(1); only OLD
+     keeps the lf freelist whose alloc_cnt is read */
+  {"OFF_SESS_HTYPE",    "sessions","m_type",                  NULL, 400},
+  {"OFF_CAT_HTYPE",     "catalog_Hashmap","m_type",           NULL, 400},
+  {"OFF_LK_HTYPE",      "lk_Gl","m_type",                     NULL, 472},
+  {"OFF_LK_RES_ALLOC",  "lk_Gl","alloc_cnt",                  NULL, 84},
+  {"OFF_LK_ENTFL",      "lk_Gl","obj_free_entry_list",        NULL, 480},
+  {"OFF_LFFL_ALLOC",    NULL,"alloc_cnt","lf_freelist",             12},
+  {"SZ_LK_ENTRY",       NULL,NULL,"lk_entry",                       128},
+  {"SZ_LK_RES",         NULL,NULL,"lk_res",                         120},
 };
 #define NTG ((int)(sizeof TG/sizeof TG[0]))
 /* The standalone dwoff's GOT/OKF/NOTE are unused here; out[] replaces them */
@@ -1499,7 +1509,8 @@ enum { DW_PGBUF=0, DW_XC_ENT, DW_XC_USE, DW_XC_CLN, DW_QLIST, DW_QPOOL,
        DW_IOBUF_IOPG, DW_LOG_NXIO, DW_LOG_APPEND, DW_LOG_EOF,
        DW_PS_NVALS, DW_PS_GSTATS, DW_PS_INIT, DW_PS_SZMD, DW_PS_MDPSID, DW_PS_MDSTART,
        DW_AG_LRULIST, DW_AG_NLRU, DW_AG_QUOTA, DW_AG_NPRIV, DW_AG_MONITOR, DW_AG_DIRTIES,
-       DW_AG_SZLRU, DW_AG_C1, DW_AG_C2, DW_AG_C3, DW_AG_VICT, DW_N };
+       DW_AG_SZLRU, DW_AG_C1, DW_AG_C2, DW_AG_C3, DW_AG_VICT,
+       DW_HX_SESS, DW_HX_CAT, DW_HX_LK, DW_LK_RES, DW_LK_ENTFL, DW_LFFL, DW_SZ_LKE, DW_SZ_LKR, DW_N };
 
 /* Extraction takes about 8 seconds over 125MB of .debug_info, so its result is cached
    as text in /var/tmp/cub_top.dw-<uid>-<size>-<mtime>.tbl, keyed by the .so's size and
@@ -1787,6 +1798,9 @@ typedef struct {
     int ssz[S_NSYM];
     /* Engine buffer pool aggregates; -1 disables only them.  Append at the struct end only */
     struct { int lrulist, nlru, quota, npriv, monitor, dirties, sz_lru, c1, c2, c3, vict; } ag;
+    /* catalog alloc_cnt; hash map kind (lockfree_hashmap::m_type, -1 = no wrapper: the old lf
+       hash); object lock pools.  Append at the struct end only */
+    struct { int lf2, sess_ht, cat_ht, lk_ht, lk_res, lk_entfl, lffl, sz_lke, sz_lkr; } hx;
 } btab_t;
 static const btab_t BTABS[]={
     {"table-11.5","11.5.0.2374",SYMN,0,
@@ -1798,7 +1812,8 @@ static const btab_t BTABS[]={
      {8,144,44,64,128,136,8,48,280,488} /* pg, measured with dwoff on 11.5.0.2374 */,
      {0,8,44,56,0,20} /* ps, measured with dwoff on 11.5.0.2374 */,
      {648,608,48,16,4,640,416,408,4,4,184,1360,56,16968} /* ssz, readelf -s of 11.5.0.2374 */,
-     {56,40,328,0,280,0,128,80,84,88,92} /* ag, measured with dwoff on 11.5.0.2374 */},
+     {56,40,328,0,280,0,128,80,84,88,92} /* ag, measured with dwoff on 11.5.0.2374 */,
+     {12,400,400,472,84,480,12,128,120} /* hx, measured with dwoff on 11.5.0.2374 */},
 };
 /* DWARF or offset-file values into the pg group.  If any is missing all become -1 - no partial trust. */
 static void ps_from_dw(btab_t*bt,const long dw[]){
@@ -1806,6 +1821,10 @@ static void ps_from_dw(btab_t*bt,const long dw[]){
     int ok=1; for(int i=0;i<6;i++) if(v[i]<0) ok=0;
     int *f=(int*)&bt->ps;
     for(int i=0;i<6;i++) f[i]= ok ? (int)v[i] : -1;
+}
+static void hx_from_dw(btab_t*bt,const long dw[]){
+    int *f=(int*)&bt->hx; f[0]=(int)dw[DW_LF2];
+    for(int i=DW_HX_SESS;i<=DW_SZ_LKR;i++) f[1+i-DW_HX_SESS]=(int)dw[i];   /* each -1 when absent */
 }
 static void ag_from_dw(btab_t*bt,const long dw[]){
     int ok=1; for(int i=DW_AG_LRULIST;i<=DW_AG_VICT;i++) if(dw[i]<0) ok=0;
@@ -1965,6 +1984,153 @@ static struct {
     int n_bad;         /* Items failing validation, excluded from the sum */
 } B;
 
+/* Heap detail B items from the adopted table (B.base, B.sym, g_bt set by method_b) */
+static void b_items(proc_t *P){
+
+    bitem_t *it; double v;
+    #define ADD_COUNT(nm_,cnt_,...) do{ if(B.n<16){ it=&B.it[B.n++]; \
+        snprintf(it->name,sizeof it->name,"%s",nm_); \
+        it->bytes=0.0; it->grade='M'; it->count=(long)(cnt_); it->count_only=1; \
+        snprintf(it->note,sizeof it->note,__VA_ARGS__); } }while(0)
+    if(B.partial){
+        /* Items with an anchor only.  An item that fails uniqueness cannot carry a note
+           saying why (it does not exist at all), so the reason is in the help and docs. */
+        long mxc=prm_get("max_clients"); if(mxc<0) mxc=0;
+        if(B.sym[S_LKGL] && mxc>0){
+            int off; int32_t nt;
+            if(probe_i32(P->pid,B.base+B.sym[S_LKGL],mxc,mxc+16,&off,&nt))
+                ADD_COUNT("lock table (tran)",nt,"num_trans=%d @+%d — 크기 미상",nt,off);
+        }
+        if(B.sym[S_CONNMAX] && mxc>0){
+            int32_t mx=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]);
+            if(mx>=mxc && mx<=mxc*2+32)
+                ADD_COUNT("conn entries (css)",mx,"max=%d — 크기 미상",mx);
+        }
+        for(int i=0;i<B.n;i++) B.total+=0;   /* count-only is excluded from the sum (obvious, but stated) */
+        return;
+    }
+    /* No single subsystem uses 64GB - the guard against reading a pointer as a count.
+       Out-of-range values are downgraded to '?' and left out of totals. */
+    #define SANE_MAX (64.0*1024.0*1024.0*1024.0)
+    #define ADD(nm_,val_,gr_,...) do{ if(B.n<16){ it=&B.it[B.n++]; \
+        snprintf(it->name,sizeof it->name,"%s",nm_); it->bytes=(val_); it->grade=(gr_); \
+        it->count=0; it->count_only=0; \
+        snprintf(it->note,sizeof it->note,__VA_ARGS__); \
+        if(!(it->bytes>=0.0 && it->bytes<=SANE_MAX)){ \
+            it->grade='U'; it->bytes=0.0; \
+            snprintf(it->note,sizeof it->note,g_ascii?"out of plausible range - excluded" \
+                                                     :"값 범위 벗어남 — 신뢰 불가, 합산 제외"); } } }while(0)
+
+    /* Per item: on a read failure the grade drops to '?' so a 0 is not passed off as measured */
+    /* An item at 0 was measured as 0, not missing - the screen says so */
+    #define GRD (g_rd_ok?'M':'U')
+    /* L4 count check: no negatives, and an upper bound from max_clients with 8x slack.
+       Catches an offset that is aligned but wrong (entries far above the limit). */
+    long mxcli=prm_get("max_clients"); if(mxcli<=0) mxcli=1000;
+    #define CNT_OK(c) ((c)>=0)
+    #define CNT_IN_RANGE(c) ((c)>=0 && (double)(c) <= (double)mxcli*8.0)
+    /* An offset missing from the table is -1: that field is not read */
+    if(B.sym[S_XCACHE] && g_bt->off_xc_entries>=0){
+        unsigned long a=B.base+B.sym[S_XCACHE];
+        g_rd_ok=1;
+        int32_t ent=rd_i32(P->pid,a+g_bt->off_xc_entries);
+        if(g_bt->off_xc_usage>=0 && g_bt->off_xc_clone>=0){
+            int32_t uc =rd_i32(P->pid,a+g_bt->off_xc_usage);
+            int32_t ucl=rd_i32(P->pid,a+g_bt->off_xc_clone);
+            /* memory_usage_cache sums what the engine added; memory_usage_clone is its estimate,
+               UNPACK_SCALE (3) x stream size per clone - so the two are graded apart */
+            ADD("plan cache (xcache)",(double)uc,GRD,"entries=%d, engine-tracked",ent);
+            ADD("plan clones (est)",(double)ucl,g_rd_ok?'E':'U',g_ascii?"engine estimate: 3 x stream size per clone":"엔진 추정치: 클론당 stream 크기 x3");
+        } else if(CNT_OK(ent))   /* 11.5 and later track usage; older tables give the count only */
+            ADD_COUNT("plan cache (xcache)",ent,g_ascii?"entries=%d - size not tracked":"entries=%d — 크기 미상",ent);
+    }
+    /* terse keys are separate from screen labels: a Hangul label makes slugify produce
+       an empty string and keys like `heapB._bytes`.  The screen changes with L() but
+       keys must stay fixed ASCII or monitoring integrations break. */
+    if(B.sym[S_QLIST]||B.sym[S_QPOOL]){
+        /* The manual's term is "query result cache" (list cache is the internal name).
+           The feature is off entirely when max_query_cache_entries=0 (the 11.5
+           default), so the screen distinguishes "off, hence 0" from "on but empty". */
+        long qce=prm_get("max_query_cache_entries");
+        int qok=(!B.sym[S_QLIST]||g_bt->off_qlist_npages>=0) && (!B.sym[S_QPOOL]||g_bt->off_qpool_nent>=0);
+        g_rd_ok=1;
+        if(qce==0)
+            ADD("result cache (query)",0.0,GRD,g_ascii?"disabled (max_query_cache_entries=0)"
+                                                 :"비활성 (max_query_cache_entries=0)");
+        else if(qok){
+            int32_t np=B.sym[S_QLIST]?rd_i32(P->pid,B.base+B.sym[S_QLIST]+g_bt->off_qlist_npages):0;
+            int32_t pe=B.sym[S_QPOOL]?rd_i32(P->pid,B.base+B.sym[S_QPOOL]+g_bt->off_qpool_nent):0;
+            v=(double)np*g_pagesize + (double)pe*4096;
+            ADD("result cache (query)",(CNT_OK(np)&&CNT_OK(pe))?v:-1.0,GRD,"pages=%d pool=%d",np,pe);
+        }
+    }
+    if(B.sym[S_FPCNT]){
+        g_rd_ok=1;
+        int32_t c=rd_i32(P->pid,B.base+B.sym[S_FPCNT]);
+        ADD("filter pred cache",CNT_OK(c)?(double)c*g_bt->sz_fpcache:-1.0,GRD,"counter=%d x%d",c,g_bt->sz_fpcache);
+    }
+    /* lockfree_hashmap kind: an alloc_cnt is the old lf freelist's, which stays 0 under the hidden
+       new_lfhash=yes - then the count is unknown, not zero.  No wrapper (older builds): the old hash. */
+    #define HASH_OLD(base_,off_) ((off_)<0 || rd_i32(P->pid,(base_)+(off_))==0)
+    #define NEW_HASH_NOTE (g_ascii?"new lockfree hash (new_lfhash) - count not read, excluded":"새 lockfree 해시(new_lfhash) — 개수 미상, 합산 제외")
+    if(B.sym[S_LKGL] && g_bt->off_lk_ntran>=0){
+        g_rd_ok=1;
+        int32_t nt=rd_i32(P->pid,B.base+B.sym[S_LKGL]+g_bt->off_lk_ntran);
+        /* lk_Gl.tran_lock_table = per-transaction lock slots: num_trans x 152B
+           preallocated from the connection limit.  Not lockdb's "Object Lock
+           Table" (an LK_ENTRY/LK_RES pool), so the label names its subject. */
+        ADD("lock table (tran)",CNT_IN_RANGE(nt)?(double)nt*g_bt->sz_lk_tran:-1.0,GRD,
+            g_ascii?"num_trans=%d x%dB (not object locks)":"num_trans=%d x%dB (객체락 아님)",nt,g_bt->sz_lk_tran);
+    }
+    /* Object locks: the lock resources (LK_RES, the object hash's freelist) and the lock entries
+       (LK_ENTRY freelist).  alloc_cnt is what the freelist has allocated, in use or free. */
+    if(B.sym[S_LKGL] && g_bt->hx.lk_res>=0 && g_bt->hx.sz_lkr>0){
+        unsigned long lk=B.base+B.sym[S_LKGL];
+        g_rd_ok=1;
+        if(HASH_OLD(lk,g_bt->hx.lk_ht)){
+            int32_t c=rd_i32(P->pid,lk+g_bt->hx.lk_res);
+            ADD("lock resources (obj)",CNT_OK(c)?(double)c*g_bt->hx.sz_lkr:-1.0,GRD,"alloc_cnt=%d x%dB",c,g_bt->hx.sz_lkr);
+        } else ADD("lock resources (obj)",0.0,'U',"%s",NEW_HASH_NOTE);
+    }
+    if(B.sym[S_LKGL] && g_bt->hx.lk_entfl>=0 && g_bt->hx.lffl>=0 && g_bt->hx.sz_lke>0){
+        g_rd_ok=1;
+        int32_t c=rd_i32(P->pid,B.base+B.sym[S_LKGL]+g_bt->hx.lk_entfl+g_bt->hx.lffl);
+        ADD("lock entries (obj)",CNT_OK(c)?(double)c*g_bt->hx.sz_lke:-1.0,GRD,"alloc_cnt=%d x%dB",c,g_bt->hx.sz_lke);
+    }
+    if(B.sym[S_SESS] && g_bt->off_lf_alloccnt>=0){
+        g_rd_ok=1;
+        if(HASH_OLD(B.base+B.sym[S_SESS],g_bt->hx.sess_ht)){
+            int32_t c=rd_i32(P->pid,B.base+B.sym[S_SESS]+g_bt->off_lf_alloccnt);
+            ADD("session table",CNT_IN_RANGE(c)?(double)c*g_bt->sz_session:-1.0,GRD,g_ascii?"alloc_cnt=%d x%dB, cap %ld":"alloc_cnt=%d x%dB, 한도 %ld",c,g_bt->sz_session,mxcli*8);
+        } else ADD("session table",0.0,'U',"%s",NEW_HASH_NOTE);
+    }
+    /* catalog_Hashmap has its own alloc_cnt offset (OFF_LF_ALLOCCNT2), not the sessions' */
+    if(B.sym[S_CAT] && g_bt->hx.lf2>=0){
+        g_rd_ok=1;
+        if(HASH_OLD(B.base+B.sym[S_CAT],g_bt->hx.cat_ht)){
+            int32_t c=rd_i32(P->pid,B.base+B.sym[S_CAT]+g_bt->hx.lf2);
+            ADD("catalog cache",CNT_OK(c)?(double)c*g_bt->sz_catalog:-1.0,GRD,"alloc_cnt=%d x%d",c,g_bt->sz_catalog);
+        } else ADD("catalog cache",0.0,'U',"%s",NEW_HASH_NOTE);
+    }
+    #undef HASH_OLD
+    #undef NEW_HASH_NOTE
+    if(B.sym[S_CONNMAX]){
+        g_rd_ok=1;
+        int32_t mx=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]);
+        int32_t ac=B.sym[S_CONNACT]?rd_i32(P->pid,B.base+B.sym[S_CONNACT]):0;
+        ADD("conn entries (css)",CNT_IN_RANGE(mx)?(double)mx*g_bt->sz_conn:-1.0,GRD,"max=%d act=%d x%d",mx,ac,g_bt->sz_conn);
+    }
+    #undef GRD
+    #undef CNT_OK
+    #undef CNT_IN_RANGE
+    #undef ADD
+    /* Sum valid items only; read failures and out-of-range values are excluded, leaving the count */
+    B.total=0; B.n_bad=0;
+    for(int i=0;i<B.n;i++){
+        if(B.it[i].grade=='U'){ B.n_bad++; continue; }
+        B.total+=B.it[i].bytes;
+    }
+}
 static void method_b(proc_t *P){
     memset(&B,0,sizeof B);
     char so[512]={0};
@@ -2143,7 +2309,7 @@ static void method_b(proc_t *P){
             fbt.sz_catalog =(int)fv[DW_SZ_CAT];  fbt.sz_fpcache=(int)fv[DW_SZ_FP];
             fbt.sz_conn    =(int)fv[DW_SZ_CONN]; fbt.sz_vacuum =(int)fv[DW_SZ_VAC];
             fbt.off_lk_ntran=(int)fv[DW_LK_NTRAN];
-            pg_from_dw(&fbt,fv); ps_from_dw(&fbt,fv); ag_from_dw(&fbt,fv);
+            pg_from_dw(&fbt,fv); ps_from_dw(&fbt,fv); ag_from_dw(&fbt,fv); hx_from_dw(&fbt,fv);
             memcpy(fbt.ssz,fss,sizeof fbt.ssz);
             f_ready=1;
             f_exact = r_explicit || (g_cver[0] && fver[0] && !strcmp(fver,g_cver));
@@ -2171,7 +2337,7 @@ static void method_b(proc_t *P){
             dwbt.sz_catalog =(int)dwv[DW_SZ_CAT];  dwbt.sz_fpcache=(int)dwv[DW_SZ_FP];
             dwbt.sz_conn    =(int)dwv[DW_SZ_CONN]; dwbt.sz_vacuum =(int)dwv[DW_SZ_VAC];
             dwbt.off_lk_ntran=(int)dwv[DW_LK_NTRAN];
-            pg_from_dw(&dwbt,dwv); ps_from_dw(&dwbt,dwv); ag_from_dw(&dwbt,dwv);
+            pg_from_dw(&dwbt,dwv); ps_from_dw(&dwbt,dwv); ag_from_dw(&dwbt,dwv); hx_from_dw(&dwbt,dwv);
             memset(dwbt.ssz,0,sizeof dwbt.ssz);   /* From this very .so: nothing to compare */
             TRY_BOTH(&dwbt,1);
         } else if(dwst==2 && dwwhy[0])
@@ -2222,122 +2388,7 @@ static void method_b(proc_t *P){
     if(!B.partial) BT_CACHE_FILL();   /* Probing mode is not a table, so it is excluded from the cache */
     }
 adopted:;
-
-    bitem_t *it; double v;
-    #define ADD_COUNT(nm_,cnt_,...) do{ if(B.n<16){ it=&B.it[B.n++]; \
-        snprintf(it->name,sizeof it->name,"%s",nm_); \
-        it->bytes=0.0; it->grade='M'; it->count=(long)(cnt_); it->count_only=1; \
-        snprintf(it->note,sizeof it->note,__VA_ARGS__); } }while(0)
-    if(B.partial){
-        /* Items with an anchor only.  An item that fails uniqueness cannot carry a note
-           saying why (it does not exist at all), so the reason is in the help and docs. */
-        long mxc=prm_get("max_clients"); if(mxc<0) mxc=0;
-        if(B.sym[S_LKGL] && mxc>0){
-            int off; int32_t nt;
-            if(probe_i32(P->pid,B.base+B.sym[S_LKGL],mxc,mxc+16,&off,&nt))
-                ADD_COUNT("lock table (tran)",nt,"num_trans=%d @+%d — 크기 미상",nt,off);
-        }
-        if(B.sym[S_CONNMAX] && mxc>0){
-            int32_t mx=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]);
-            if(mx>=mxc && mx<=mxc*2+32)
-                ADD_COUNT("conn entries (css)",mx,"max=%d — 크기 미상",mx);
-        }
-        for(int i=0;i<B.n;i++) B.total+=0;   /* count-only is excluded from the sum (obvious, but stated) */
-        return;
-    }
-    /* No single subsystem uses 64GB - the guard against reading a pointer as a count.
-       Out-of-range values are downgraded to '?' and left out of totals. */
-    #define SANE_MAX (64.0*1024.0*1024.0*1024.0)
-    #define ADD(nm_,val_,gr_,...) do{ if(B.n<16){ it=&B.it[B.n++]; \
-        snprintf(it->name,sizeof it->name,"%s",nm_); it->bytes=(val_); it->grade=(gr_); \
-        it->count=0; it->count_only=0; \
-        snprintf(it->note,sizeof it->note,__VA_ARGS__); \
-        if(!(it->bytes>=0.0 && it->bytes<=SANE_MAX)){ \
-            it->grade='U'; it->bytes=0.0; \
-            snprintf(it->note,sizeof it->note,g_ascii?"out of plausible range - excluded" \
-                                                     :"값 범위 벗어남 — 신뢰 불가, 합산 제외"); } } }while(0)
-
-    /* Per item: on a read failure the grade drops to '?' so a 0 is not passed off as measured */
-    /* An item at 0 was measured as 0, not missing - the screen says so */
-    #define GRD (g_rd_ok?'M':'U')
-    /* L4 count check: no negatives, and an upper bound from max_clients with 8x slack.
-       Catches an offset that is aligned but wrong (entries far above the limit). */
-    long mxcli=prm_get("max_clients"); if(mxcli<=0) mxcli=1000;
-    #define CNT_OK(c) ((c)>=0)
-    #define CNT_IN_RANGE(c) ((c)>=0 && (double)(c) <= (double)mxcli*8.0)
-    /* An offset missing from the table is -1: that field is not read */
-    if(B.sym[S_XCACHE] && g_bt->off_xc_entries>=0){
-        unsigned long a=B.base+B.sym[S_XCACHE];
-        g_rd_ok=1;
-        int32_t ent=rd_i32(P->pid,a+g_bt->off_xc_entries);
-        if(g_bt->off_xc_usage>=0 && g_bt->off_xc_clone>=0){
-            int32_t uc =rd_i32(P->pid,a+g_bt->off_xc_usage);
-            int32_t ucl=rd_i32(P->pid,a+g_bt->off_xc_clone);
-            ADD("plan cache (xcache)",(double)uc+ucl,GRD,"entries=%d, engine-tracked",ent);
-        } else if(CNT_OK(ent))   /* 11.5 and later track usage; older tables give the count only */
-            ADD_COUNT("plan cache (xcache)",ent,g_ascii?"entries=%d - size not tracked":"entries=%d — 크기 미상",ent);
-    }
-    /* terse keys are separate from screen labels: a Hangul label makes slugify produce
-       an empty string and keys like `heapB._bytes`.  The screen changes with L() but
-       keys must stay fixed ASCII or monitoring integrations break. */
-    if(B.sym[S_QLIST]||B.sym[S_QPOOL]){
-        /* The manual's term is "query result cache" (list cache is the internal name).
-           The feature is off entirely when max_query_cache_entries=0 (the 11.5
-           default), so the screen distinguishes "off, hence 0" from "on but empty". */
-        long qce=prm_get("max_query_cache_entries");
-        int qok=(!B.sym[S_QLIST]||g_bt->off_qlist_npages>=0) && (!B.sym[S_QPOOL]||g_bt->off_qpool_nent>=0);
-        g_rd_ok=1;
-        if(qce==0)
-            ADD("result cache (query)",0.0,GRD,g_ascii?"disabled (max_query_cache_entries=0)"
-                                                 :"비활성 (max_query_cache_entries=0)");
-        else if(qok){
-            int32_t np=B.sym[S_QLIST]?rd_i32(P->pid,B.base+B.sym[S_QLIST]+g_bt->off_qlist_npages):0;
-            int32_t pe=B.sym[S_QPOOL]?rd_i32(P->pid,B.base+B.sym[S_QPOOL]+g_bt->off_qpool_nent):0;
-            v=(double)np*g_pagesize + (double)pe*4096;
-            ADD("result cache (query)",(CNT_OK(np)&&CNT_OK(pe))?v:-1.0,GRD,"pages=%d pool=%d",np,pe);
-        }
-    }
-    if(B.sym[S_FPCNT]){
-        g_rd_ok=1;
-        int32_t c=rd_i32(P->pid,B.base+B.sym[S_FPCNT]);
-        ADD("filter pred cache",CNT_OK(c)?(double)c*g_bt->sz_fpcache:-1.0,GRD,"counter=%d x%d",c,g_bt->sz_fpcache);
-    }
-    if(B.sym[S_LKGL] && g_bt->off_lk_ntran>=0){
-        g_rd_ok=1;
-        int32_t nt=rd_i32(P->pid,B.base+B.sym[S_LKGL]+g_bt->off_lk_ntran);
-        /* lk_Gl.tran_lock_table = per-transaction lock slots: num_trans x 152B
-           preallocated from the connection limit.  Not lockdb's "Object Lock
-           Table" (an LK_ENTRY/LK_RES pool), so the label names its subject. */
-        ADD("lock table (tran)",CNT_IN_RANGE(nt)?(double)nt*g_bt->sz_lk_tran:-1.0,GRD,
-            g_ascii?"num_trans=%d x%dB (not object locks)":"num_trans=%d x%dB (객체락 아님)",nt,g_bt->sz_lk_tran);
-    }
-    if(B.sym[S_SESS] && g_bt->off_lf_alloccnt>=0){
-        g_rd_ok=1;
-        int32_t c=rd_i32(P->pid,B.base+B.sym[S_SESS]+g_bt->off_lf_alloccnt);
-        ADD("session table",CNT_IN_RANGE(c)?(double)c*g_bt->sz_session:-1.0,GRD,g_ascii?"alloc_cnt=%d x%dB, cap %ld":"alloc_cnt=%d x%dB, 한도 %ld",c,g_bt->sz_session,mxcli*8);
-    }
-    if(B.sym[S_CAT] && g_bt->off_lf_alloccnt>=0){
-        g_rd_ok=1;
-        int32_t c=rd_i32(P->pid,B.base+B.sym[S_CAT]+g_bt->off_lf_alloccnt);
-        ADD("catalog cache",CNT_OK(c)?(double)c*g_bt->sz_catalog:-1.0,GRD,"alloc_cnt=%d x%d",c,g_bt->sz_catalog);
-    }
-    if(B.sym[S_CONNMAX]){
-        g_rd_ok=1;
-        int32_t mx=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]);
-        int32_t ac=B.sym[S_CONNACT]?rd_i32(P->pid,B.base+B.sym[S_CONNACT]):0;
-        ADD("conn entries (css)",CNT_IN_RANGE(mx)?(double)mx*g_bt->sz_conn:-1.0,GRD,"max=%d act=%d x%d",mx,ac,g_bt->sz_conn);
-    }
-    #undef GRD
-    #undef CNT_OK
-    #undef CNT_IN_RANGE
-    if(B.sym[S_VACUUM]) ADD("vacuum data",(double)g_bt->sz_vacuum,'E',"struct only");
-    #undef ADD
-    /* Sum valid items only; read failures and out-of-range values are excluded, leaving the count */
-    B.total=0; B.n_bad=0;
-    for(int i=0;i<B.n;i++){
-        if(B.it[i].grade=='U'){ B.n_bad++; continue; }
-        B.total+=B.it[i].bytes;
-    }
+    b_items(P);
 }
 
 /* ---------------- Method A: glibc chunk histogram ---------------- */
@@ -6298,7 +6349,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         if(!sl[0]){ snprintf(kb,sizeof kb,"item%d",i); sl=kb; }   /* Safety net for non-ASCII labels */
         if(B.it[i].count_only)
              printf("heapB.%s_count=%ld\n",sl,B.it[i].count);
-        else printf("heapB.%s_bytes=%.0f\n",sl,B.it[i].bytes); }
+        else printf("heapB.%s_bytes=%.0f heapB.%s_grade=%c\n",sl,B.it[i].bytes,sl,B.it[i].grade); }
     /* Capacity axis: demand, ceiling, headroom.  Snapshot-based estimate. */
     printf("cap.aggregate_ms=%.1f cap.over_budget=%d cap.budget_ms=%.0f\n",CAP2.ms,CAP2.over_budget,(double)CAP_BUDGET_MS);
     printf("cap.perfmon_counters_running=%d cap.hit_source=\"%s\" cap.reason=\"%s\"\n",
@@ -6687,14 +6738,16 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* Heap detail B items.  The keys are slugified screen labels, so the map back is
        explicit; without it the box draws an empty table and "B total 0B". */
     { static const struct { const char *slug, *name; } BIT[]={
-        {"plan_cache_xcache","plan cache (xcache)"},
+        {"plan_cache_xcache","plan cache (xcache)"},     /* the order method_b adds them */
+        {"plan_clones_est","plan clones (est)"},
         {"result_cache_query","result cache (query)"},
         {"filter_pred_cache","filter pred cache"},
         {"lock_table_tran","lock table (tran)"},
+        {"lock_resources_obj","lock resources (obj)"},
+        {"lock_entries_obj","lock entries (obj)"},
         {"session_table","session table"},
         {"catalog_cache","catalog cache"},
         {"conn_entries_css","conn entries (css)"},
-        {"vacuum_data","vacuum data"},
       };
       B.n=0;
       for(unsigned i=0;i<sizeof BIT/sizeof BIT[0] && B.n<16;i++){
@@ -6709,7 +6762,9 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
           memset(x,0,sizeof *x);
           snprintf(x->name,sizeof x->name,"%s",BIT[i].name);
           if(cnt_only){ x->count=(long)strtod(b,NULL); x->count_only=1; x->grade='?'; }
-          else        { x->bytes=strtod(b,NULL); x->grade='M'; }
+          else        { x->bytes=strtod(b,NULL);
+                        char g[8]; snprintf(k,sizeof k,"heapB.%s_grade",BIT[i].slug);
+                        x->grade = rp_find(t,k,g,sizeof g) && g[0] ? g[0] : 'M'; }
       } }
     /* Capacity axis.  Without this the verdict is recomputed from zeros and states the
        OPPOSITE of the recording ("no headroom problem" for a frame that was at its

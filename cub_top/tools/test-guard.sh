@@ -83,7 +83,7 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
     # an embedded table takes over, the items sized by the table (num x struct size)
     # are compared against the healthy build.  Not the total: it includes the plan
     # cache's live usage, which moves between the two runs on any active server.
-    sized() { printf '%s' "$1" | grep -oE 'heapB\.(lock_table_tran|conn_entries_css|vacuum_data)_bytes=[0-9]+' | tr '\n' ' '; }
+    sized() { printf '%s' "$1" | grep -oE 'heapB\.(lock_table_tran|conn_entries_css)_bytes=[0-9]+' | tr '\n' ' '; }
     tot=$(printf '%s' "$raw" | grep -o 'heapB.total_bytes=[0-9]*')
     if [ "$tbl2" = 'heapB.table="probe-runtime"' ] && [ "$tot" = "heapB.total_bytes=0" ]; then
         say "corrupted cache -> probe downgrade" "PASS(count-only)"
@@ -119,7 +119,7 @@ else say "L3 detects a wrong table" "PASS"; fi
 #    must not be read: xcache shows the count only, session/catalog are omitted.
 TBL="$ROOT/offsets/cubrid-${VER:-none}.tbl"; [ -f "$TBL" ] || TBL="$ROOT/offsets/cubrid-11.5.0.2374.tbl"
 sed 's/{"table-11.5","11.5.0.2374",SYMN,0,/{"table-11.5","99.9",SYMN,0,/' "$SRC" > "$TMP/miss.c"
-grep -vE '^OFF_(XCACHE_USAGE|XCACHE_CLONE|LF_ALLOCCNT) ' "$TBL" > "$TMP/miss.tbl"
+grep -vE '^OFF_(XCACHE_USAGE|XCACHE_CLONE|LF_ALLOCCNT|LF_ALLOCCNT2) ' "$TBL" > "$TMP/miss.tbl"
 if [ ! -f "$TBL" ]; then
     say "missing offset -> field not read" "SKIP(no 11.5 table)"
 elif gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/miss" "$TMP/miss.c" 2>/dev/null; then
