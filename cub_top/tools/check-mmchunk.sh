@@ -20,6 +20,8 @@
 # general start probe needs.  malloc(100MB), 3 x 20MB (one merged VMA) and 5 x 20MB must all
 # be counted in full, a block over the 768MB walk bound too, also when an anonymous neighbour is
 # merged into the same VMA in front or behind; zeroed anonymous memory stays 0.
+# Size labels say what the size is: lea (db_private_alloc) grows by malloc(32K x n) and its
+# base is malloc(64K), in an arena or mmapped (page-rounded); a 96B chunk is any 73-88B request.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC=${1:-"$ROOT/src/cub_top.c"}
 TMP=${TMPDIR:-/tmp}/cub_top-mmchunk.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
@@ -37,8 +39,8 @@ static void check(const char *what,void *p,double want){
     unsigned long s,e; if(!vma_of(p,&s,&e)){ printf("  FAIL %s: no mapping\n",what); bad=1; return; }
     memset(&A,0,sizeof A); walk_region(getpid(),s,e);
     int ok = A.total==want && A.trunc==0;
-    printf("  %s   %-38s VMA %6.1fMB: counted %6.1fMB in %ld chunk(s), >=1M class %6.1fMB (want %.1fMB)\n",ok?"ok  ":"FAIL",what,
-           (e-s)/1048576.0,A.total/1048576.0,A.chunks,A.cat[3]/1048576.0,want/1048576.0);
+    printf("  %s   %-38s VMA %6.1fMB: counted %6.1fMB in %ld chunk(s) (want %.1fMB)\n",ok?"ok  ":"FAIL",what,
+           (e-s)/1048576.0,A.total/1048576.0,A.chunks,want/1048576.0);
     bad|=!ok;
 }
 static double csz(void *p){ return (double)(((unsigned long*)p)[-1]&~7UL); }
@@ -65,6 +67,16 @@ int main(void){
     for(int i=0;i<(64<<10);i++) j2[i]=(unsigned char)(i*53+7);
     void *f=malloc(20u<<20);
     check("20MB followed by 64K of junk",f,csz(f));
+    { struct { size_t req; int want; const char *what; } cs[]={
+        {32768,0,"malloc(32K), arena: lea segment"},{65536,0,"malloc(64K) (lea base), arena"},
+        {10*32768,0,"malloc(320K), mmapped: lea segment"},{80,1,"malloc(80): 96B chunk"},{73,1,"malloc(73): 96B chunk"},
+        {100,5,"malloc(100): other under 8K"},{(2u<<20)+5000,2,"malloc(2M+5000), mmapped: other 1M+"},{40000,4,"malloc(40000): other 8K~64K"} };
+      for(unsigned k=0;k<sizeof cs/sizeof cs[0];k++){
+          unsigned long *p=malloc(cs[k].req); unsigned long raw=p[-1];
+          int got=classify((long)(raw&CHUNK_MASK),(int)((raw>>1)&1));
+          int ok=got==cs[k].want;
+          printf("  %s   %-38s chunk %lu%s -> %s\n",ok?"ok  ":"FAIL",cs[k].what,raw&CHUNK_MASK,(raw&2)?" (mmapped)":"",ACAT[got]);
+          bad|=!ok; free(p); } }
     void *z=mmap(NULL,8u<<20,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
     memset(z,0,4096);                              check("zeroed anonymous 8MB (not a chunk)",z,0);
     return bad;

@@ -2407,28 +2407,29 @@ adopted:;
 /* ---------------- Method A: glibc chunk histogram ---------------- */
 #define CHUNK_MASK  (~(unsigned long)7)
 #define CHUNK_ALIGN (2*sizeof(size_t)-1)   /* 15 on x86_64, 7 on i386; generalizes the alignment check */
+#define ACAT_N 6
 static struct {
     long chunks; double total;
-    double cat[7];               /* Category total */
+    double cat[ACAT_N];          /* Category total */
     long trunc; double unwalked; /* Regions walked only up to the cap, and the bytes left out */
 } A;
-static const char *ACAT[7]={
-    /* LEA_HEAP_BASE_SIZE (64KB): one mspace base per hl_register_lea_heap() call.
-       A thread may create several, so the count does not match the thread count
-       (measured 430 vs 151), hence "each" rather than "/thread". */
-    "db_private heap base (64K each)","page-pair block (32K)","MVCC snapshot (est, 80B)",
-    "large work block (>=1M)","query working mem (64K~1M)","working buffer (8K~64K)",
-    "small/misc (<8K)"
+static const char *ACAT[ACAT_N]={
+    /* lea (db_private_alloc) is built with USE_MALLOC_INSTEAD and a 32K granularity: its mspace
+       base is malloc(64K) and every segment it adds is malloc(32K x n) - so a 32K-multiple
+       request is most likely lea's, though any malloc of that size lands here too. */
+    "lea segment (32K x n)",
+    "96B chunk (73-88B req)",
+    "other 1M+","other 64K~1M","other 8K~64K","other under 8K"
 };
-static int classify(long chunk){
+/* mm: the chunk is mmapped, whose size is the request + 8 rounded up to a page */
+static int classify(long chunk,int mm){
     long ud=chunk-16;
-    if(ud==65536) return 0;
-    if(ud==32768) return 1;
-    if(ud==80)    return 2;
-    if(chunk>=(1L<<20)) return 3;
-    if(chunk>=(1L<<16)) return 4;
-    if(chunk>=8192)     return 5;
-    return 6;
+    if(mm ? (chunk>4096 && (chunk-4096)%32768==0) : (ud>0 && ud%32768==0)) return 0;
+    if(chunk==96)       return 1;
+    if(chunk>=(1L<<20)) return 2;
+    if(chunk>=(1L<<16)) return 3;
+    if(chunk>=8192)     return 4;
+    return 5;
 }
 /* Read one chunk header (8B) outside the probe window, for the verification hop only */
 static unsigned long chunk_hdr(int pid,unsigned long s,size_t span,
@@ -2492,7 +2493,7 @@ static void walk_region(int pid,unsigned long s,unsigned long e){
         if(z<16||z>span-o||(z&CHUNK_ALIGN)) break;
         if(mm && !mm_hdr(buf+o-boff,span-o)) break;   /* past the mmapped chunks: a merged neighbour */
         A.total+=z; A.chunks++;
-        A.cat[classify((long)z)]+=z;
+        A.cat[classify((long)z,(int)((*(const unsigned long*)(buf+o-boff+8)>>1)&1))]+=z;
         o+=z; w++;
     }
 }
@@ -5667,7 +5668,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         cv_put(Lw+2,y+2,with_a?L("힙 순회 중…"):L("[a] 로 방법 A 분석"),"38;5;240");
     } else {
         int row=0;
-        for(int c=0;c<7&&row<6;c++){
+        for(int c=0;c<ACAT_N&&row<6;c++){
             if(A.cat[c]<=0) continue;
             int yy=y+1+row++;
             cv_put(Lw+2,yy,"◌","38;5;250"); cv_put(Lw+4,yy,padf(ACAT[c],22,0),"250");
@@ -6049,7 +6050,7 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
             } else printf(g_ascii?"│  │  │  ├─ ? [B] disabled — %s\n"
                                  :"│  │  │  ├─ ? [B] 비활성 — %s\n",B.why);
             if(with_a){
-                for(int c=0;c<7;c++) if(A.cat[c]>0)
+                for(int c=0;c<ACAT_N;c++) if(A.cat[c]>0)
                     printf("│  │  │  ├─ ◌ [A] %-22s %s\n",ACAT[c],H(A.cat[c]));
                 double diff=g_dyn_rss-A.total;
                 /* A walks the heap after the smaps window, so its instant differs from dyn.
@@ -6561,7 +6562,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     if(with_a){
         printf("heapA.chunks=%ld heapA.total_bytes=%.0f\n",A.chunks,A.total);
         if(A.trunc) printf("heapA.truncated_regions=%ld heapA.unwalked_bytes=%.0f\n",A.trunc,A.unwalked);
-        for(int c=0;c<7;c++)
+        for(int c=0;c<ACAT_N;c++)
             if(A.cat[c]>0) printf("heapA.%s_bytes=%.0f\n",slugify(ACAT[c]),A.cat[c]);
     }
     printf("io.read_bps=%.0f io.write_bps=%.0f io.read_iops=%.0f io.write_iops=%.0f ",
@@ -6987,7 +6988,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     if(g_rp_have_a){
         A.chunks=(long)strtod(b,NULL);
         A.total=rp_num(t,"heapA.total_bytes",0);
-        for(int c=0;c<7;c++){ char k[96]; snprintf(k,sizeof k,"heapA.%s_bytes",slugify(ACAT[c])); A.cat[c]=rp_num(t,k,0); }
+        for(int c=0;c<ACAT_N;c++){ char k[96]; snprintf(k,sizeof k,"heapA.%s_bytes",slugify(ACAT[c])); A.cat[c]=rp_num(t,k,0); }
         A.trunc=(long)rp_num(t,"heapA.truncated_regions",0);
         A.unwalked=rp_num(t,"heapA.unwalked_bytes",0);
     }

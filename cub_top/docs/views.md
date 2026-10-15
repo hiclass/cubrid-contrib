@@ -62,8 +62,8 @@ OS RAM  188.0G
    │  ├─ ? dynamic-heap  732.6M / alloc 766.8M
    │  │  ├─ ● [B] plan cache (xcache)  76K
    │  │  ├─ ● [B] session table  30K
-   │  │  ├─ ◌ [A] page-pair block  625.6M
-   │  │  └─ ◌ [A] db_private heap base  27.9M
+   │  │  ├─ ◌ [A] lea segment (32K x n)  653.5M
+   │  │  └─ ◌ [A] other 64K~1M  15.0M
    │  ├─ ◐ thread stacks  796K / alloc 368.1M
    │  ├─ ● code (.so)  16.2M / alloc 29.5M
    │  ├─ ◐ glibc arena  0B / alloc 3.3G
@@ -404,8 +404,8 @@ log.append_pageid=564300 log.append_offset=2152 log.nxio_pageid=564300 log.nxio_
  ● plan cache (xcache)             44K   entries=1
  ● session table                   30K   alloc_cnt=100×312
  [A · 힙 크기 히스토그램 — 잔여 분류]  (청크 33,053개, 걷은 힙 67.2M)
-   db_private heap base (64K/thr)              27.9M
-   query working mem (64K~1M)                  15.0M
+   lea segment (32K x n)                       27.9M
+   other 64K~1M                                15.0M
 ```
 
 ## 렌더링 참고 — 프레임 출력 방식

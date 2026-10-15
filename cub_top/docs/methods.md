@@ -193,25 +193,23 @@ LSA 는 `struct log_lsa { int64 pageid:48; int64 offset:16; }` 8바이트다(리
 
 ### 크기 라벨
 
-| 청크 크기 | 사용자 데이터 | 라벨 | 근거 |
-|---|---|---|---|
-| 65552 | 65536 (64K) | `db_private heap base` | 스레드별 dlmalloc mspace base — lea가 `USE_MALLOC_INSTEAD=1`이라 glibc 청크로 노출 |
-| 32784 | 32768 (32K) | `page-pair block` | 2 × DB 페이지(16K). 부하 시 지배적 |
-| 96 | 80 | `MVCC snapshot` | `sizeof(mvcc_snapshot)=80` |
-| ≥1M | — | `large work block` | 정렬·해시 작업 영역 추정 |
-| 64K~1M | — | `query working mem` | 질의 작업 버퍼 |
-| 8K~64K | — | `working buffer` | |
-| <8K | — | `small/misc` | 개별 malloc |
+라벨은 **크기가 무엇인지**만 말합니다. 소유자를 단정할 수 있는 것은 lea 세그먼트뿐이고, 나머지는 크기 구간입니다.
 
-### 32KB 블록 — 검증된 사례
+| 청크 크기 | 라벨 | 근거 |
+|---|---|---|
+| `32K × n + 16` (아레나) · `32K × n + 4096` (mmapped) | `lea segment (32K x n)` | lea(`db_private_alloc`)는 `USE_MALLOC_INSTEAD=1`·`DEFAULT_GRANULARITY=32K`·`ONLY_MSPACES`(MORECORE 없음)로 빌드되어, mspace 를 늘릴 때마다 `malloc(granularity_align(…))` = `malloc(32K × n)` 을 부른다. mspace base(`LEA_HEAP_BASE_SIZE` 64K)와 lea 의 대형 블록(`mmap_alloc` → malloc)도 같은 꼴이다. mmapped 청크는 요청 + 8 을 페이지로 올린 크기라 `32K × n` 보다 한 페이지 안쪽으로 큰 다른 요청도 여기 든다 |
+| 96 | `96B chunk (73-88B req)` | 73~88B 요청은 모두 96B 청크가 된다. `MVCC_SNAPSHOT` 은 `MVCC_INFO` 에 내장(`mvcc.h`)되어 단독 malloc 되지 않으므로 소유자를 특정하지 않는다 |
+| ≥1M | `other 1M+` | 위 둘이 아닌 청크의 크기 구간 |
+| 64K~1M | `other 64K~1M` | |
+| 8K~64K | `other 8K~64K` | |
+| <8K | `other under 8K` | |
 
-부하 중 힙의 최대 소비자로 32KB 청크 약 2만 개(625MB)가 관측되었습니다. 허상이 아님을 세 가지로 확인했습니다.
+### 32K 배수 블록 — 사례
 
-1. **진짜 청크 헤더** — `size=0x8015`, 하위 3비트는 `PREV_INUSE|NON_MAIN_ARENA` 플래그이고 마스킹하면 정확히 `0x8010 = 32784`.
-2. **실제 상주** — 해당 64MB 아레나가 `Rss 65,508KB`로 전량 상주.
-3. **실제 데이터 보유** — 블록 내용에 벤치마크 데이터셋의 UTF-8 행 값이 담겨 있음.
-
-크기가 DB 페이지(16K)의 정확히 2배이고 스레드별 아레나에 있으므로, 워커가 질의 처리 중 잡는 페이지 배수 작업 버퍼로 해석합니다.
+부하 중 힙의 최대 소비자로 32784B 청크 약 2만 개(625MB)가 관측되었습니다. 진짜 청크(`size=0x8015`, 플래그
+`PREV_INUSE|NON_MAIN_ARENA` 를 마스킹하면 `0x8010 = 32784`)이고, 해당 64MB 아레나가 `Rss 65,508KB` 로 전량 상주했으며,
+블록 안에 벤치마크 데이터셋의 행 값이 있었습니다. DB 페이지 크기와는 무관하게, 워커 스레드의 lea mspace 가 질의 처리 중
+`malloc(32K)` 세그먼트로 늘어난 것입니다 — 행 값은 그 세그먼트 안에서 `db_private_alloc` 된 작업 메모리입니다.
 
 ### 방법 A의 구조적 과대계상
 
