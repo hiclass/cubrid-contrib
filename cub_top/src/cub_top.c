@@ -1989,7 +1989,7 @@ static struct {
 /* Heap detail B items from the adopted table (B.base, B.sym, g_bt set by method_b) */
 static void b_items(proc_t *P){
 
-    bitem_t *it; double v;
+    bitem_t *it;
     #define ADD_COUNT(nm_,cnt_,...) do{ if(B.n<16){ it=&B.it[B.n++]; \
         snprintf(it->name,sizeof it->name,"%s",nm_); \
         it->bytes=0.0; it->grade='M'; it->count=(long)(cnt_); it->count_only=1; \
@@ -2051,19 +2051,30 @@ static void b_items(proc_t *P){
        keys must stay fixed ASCII or monitoring integrations break. */
     if(B.sym[S_QLIST]||B.sym[S_QPOOL]){
         /* The manual's term is "query result cache" (list cache is the internal name).
-           The feature is off entirely when max_query_cache_entries=0 (the 11.5
-           default), so the screen distinguishes "off, hence 0" from "on but empty". */
-        long qce=prm_get("max_query_cache_entries");
+           The feature is off entirely when max_query_cache_entries or query_cache_size_in_pages
+           is 0 (the 11.5 default), so the screen distinguishes "off, hence 0" from "on but empty". */
+        long qce=prm_get("max_query_cache_entries"), qcp=prm_get("query_cache_size_in_pages");
         int qok=(!B.sym[S_QLIST]||g_bt->off_qlist_npages>=0) && (!B.sym[S_QPOOL]||g_bt->off_qpool_nent>=0);
         g_rd_ok=1;
-        if(qce==0)
-            ADD("result cache (query)",0.0,GRD,g_ascii?"disabled (max_query_cache_entries=0)"
-                                                 :"비활성 (max_query_cache_entries=0)");
+        if(qce==0 || qcp==0)
+            ADD("result cache (query)",0.0,GRD,g_ascii?"disabled (%s=0)":"비활성 (%s=0)",
+                qce==0?"max_query_cache_entries":"query_cache_size_in_pages");
         else if(qok){
+            /* The cached results themselves are preserved temp list files (temp volume and data
+               buffer, already outside A), so their pages are a count outside the heap total.
+               The heap is the entry pool (4096B slots) and the (max_plan_cache_entries + 10)
+               hash tables of as many buckets each, made at boot (qfile_initialize_list_cache). */
             int32_t np=B.sym[S_QLIST]?rd_i32(P->pid,B.base+B.sym[S_QLIST]+g_bt->off_qlist_npages):0;
             int32_t pe=B.sym[S_QPOOL]?rd_i32(P->pid,B.base+B.sym[S_QPOOL]+g_bt->off_qpool_nent):0;
-            v=(double)np*g_pagesize + (double)pe*4096;
-            ADD("result cache (query)",(CNT_OK(np)&&CNT_OK(pe))?v:-1.0,GRD,"pages=%d pool=%d",np,pe);
+            ADD("result cache (query)",CNT_OK(pe)?(double)pe*4096:-1.0,GRD,g_ascii?"entry pool %d x 4096":"엔트리 풀 %d x 4096",pe);
+            long xe=prm_get("max_plan_cache_entries");
+            if(xe>=0){ double nh=(double)xe+10;   /* per table: MHT_TABLE 112B, its fixed heap, nh bucket pointers */
+                ADD("result cache hash (est)",nh*(112.0+64.0+nh*8.0)+nh*12.0,'E',
+                    g_ascii?"%.0f tables x ~%.0f buckets (max_plan_cache_entries+10), lower bound":"해시 %.0f개 x 버킷 약 %.0f (max_plan_cache_entries+10), 하한",nh,nh); }
+            else ADD("result cache hash (est)",0.0,'U',g_ascii?"max_plan_cache_entries not read - size unknown":"max_plan_cache_entries 미확인 — 크기 미상");
+            if(CNT_OK(np))
+                ADD_COUNT("result temp pages",np,g_ascii?"%d temp-volume pages (%.1fMB), not heap":"temp 볼륨 페이지 %d (%.1fMB) — 힙 아님",
+                          np,(double)np*g_pagesize/1048576.0);
         }
     }
     if(B.sym[S_FPCNT]){
@@ -6855,6 +6866,8 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
         {"plan_cache_xcache","plan cache (xcache)"},     /* the order method_b adds them */
         {"plan_clones_est","plan clones (est)"},
         {"result_cache_query","result cache (query)"},
+        {"result_cache_hash_est","result cache hash (est)"},
+        {"result_temp_pages","result temp pages"},
         {"filter_pred_cache","filter pred cache"},
         {"lock_table_tran","lock table (tran)"},
         {"lock_resources_obj","lock resources (obj)"},

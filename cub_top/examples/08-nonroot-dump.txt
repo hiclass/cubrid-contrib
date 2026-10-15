@@ -1,41 +1,44 @@
 opts.used="-d"
-ts="2026-10-15 05:37:11" ts_epoch=1792042631 ts_epoch_ms=1792042631000
+ts="2026-10-15 05:54:40" ts_epoch=1792043680 ts_epoch_ms=1792043680000
 caps.vm_readv=0 caps.mem_pread=0 caps.rollup=1 caps.proc_io=1
 perm.limited=1 perm.reason="대상이 다른 사용자 소유: maps/smaps/io 차단 - status 기반 총량만 (전체는 서버 소유자 또는 root 로 실행)"
-os.ram_total_kb=197179440 os.ram_avail_kb=23221604 os.cached_kb=100921244 os.swap_total_kb=0 os.swap_free_kb=0
-os.cpu_us_pct=25.0 os.cpu_sy_pct=6.3 os.cpu_wa_pct=0.6 os.cpu_busy_cores=20.01 os.cores_logical=64 os.cores_physical=32
-os.load1=34.98 os.load5=35.03 os.load15=36.14
-os.cores_saturated=6 os.cores_high=9 os.core_max_pct=100.0
-os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,98.0,85.7,84.0,70.8,66.0,56.9,56.9,56.2,56.0,51.0,47.1,46.0,45.1,44.0,43.1,38.8,38.8,38.3,33.3,29.4,28.6,24.0,23.5,23.5,23.1,22.4,22.4,20.4,18.4,17.6,16.0,14.0,12.2,12.2,12.0,12.0,11.8,11.8,10.0,10.0,9.8,8.0,8.0,7.8,7.7,6.0,6.0,6.0,6.0,4.1,2.0,2.0,2.0,2.0,0.0,0.0,0.0,0.0,0.0"
+os.ram_total_kb=197179440 os.ram_avail_kb=25217328 os.cached_kb=103418728 os.swap_total_kb=0 os.swap_free_kb=0
+os.cpu_us_pct=23.4 os.cpu_sy_pct=8.3 os.cpu_wa_pct=1.1 os.cpu_busy_cores=20.29 os.cores_logical=64 os.cores_physical=32
+os.load1=37.02 os.load5=35.21 os.load15=35.12
+os.cores_saturated=4 os.cores_high=7 os.core_max_pct=100.0
+os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,92.0,80.0,73.5,61.2,61.2,57.1,52.0,49.0,47.1,46.8,45.8,44.9,44.9,42.0,38.8,38.8,38.3,36.0,36.0,30.4,30.4,28.0,28.0,25.5,25.5,24.5,24.5,23.4,22.4,22.4,20.4,19.6,19.2,18.8,18.4,18.0,18.0,16.0,15.4,14.3,14.3,14.0,13.7,13.5,12.2,12.0,12.0,10.4,10.0,10.0,9.8,8.2,5.8,4.1,4.0,3.9,2.1,2.1,2.0,0.0"
 cubrid.version="unknown" heapB.table="-" heapB.lib="-"
 server.up=1
 instance.count=4 instance.current=cbench
-instance.cbench.pid=1177276 instance.cbench.rss_bytes=1006206976 instance.cbench.file_bytes=4796416 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=207556608 instance.cbench.pl_count=1 instance.cbench.tracked=1
-instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=989937664 instance.chkdb.file_bytes=3805184 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60268544 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
-instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025912832 instance.demodb.file_bytes=3362816 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202067968 instance.demodb.pl_count=1 instance.demodb.tracked=0
-instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=989102080 instance.jiradb.file_bytes=3969024 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=197976064 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
-server.db=cbench server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=982624 server.pss_kb=0 server.swap_kb=0 server.workers=117 server.minflt_per_s=256 server.majflt_per_s=0 server.cpu_pct=2.0 server.host_cores=64
+instance.cbench.pid=1177276 instance.cbench.rss_bytes=1004716032 instance.cbench.file_bytes=3309568 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=207556608 instance.cbench.pl_count=1 instance.cbench.tracked=1
+instance.chkdb.pid=2304878 instance.chkdb.rss_bytes=989769728 instance.chkdb.file_bytes=3624960 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60268544 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
+instance.demodb.pid=1229138 instance.demodb.rss_bytes=1025601536 instance.demodb.file_bytes=3051520 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202067968 instance.demodb.pl_count=1 instance.demodb.tracked=0
+instance.jiradb.pid=2357500 instance.jiradb.rss_bytes=988811264 instance.jiradb.file_bytes=3678208 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=197976064 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
+server.db=cbench server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=981168 server.pss_kb=0 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=0.0 server.host_cores=64
 region.dynamic_heap.mapped_bytes=0 region.dynamic_heap.rss_bytes=0
 region.thread_stacks.mapped_bytes=0 region.thread_stacks.rss_bytes=0
 region.code_so.mapped_bytes=0 region.code_so.rss_bytes=0
 region.glibc_arena.mapped_bytes=0 region.glibc_arena.rss_bytes=0
 heapB.enabled=0 heapB.reason="libcubrid.so 매핑 없음" heapB.total_bytes=0 heapB.excluded=0
-cap.aggregate_ms=0.4 cap.over_budget=0 cap.budget_ms=500
+cap.aggregate_ms=0.3 cap.over_budget=0 cap.budget_ms=500
 cap.perfmon_counters_running=0 cap.hit_source="-" cap.reason="방법 B 비활성"
-cap.await_ms=1.37 cap.read_await_ms=1.53 cap.write_await_ms=1.31
-cap.queue_depth=1.55
+cap.await_ms=4.59 cap.read_await_ms=4.83 cap.write_await_ms=3.56
+cap.queue_depth=12.17
 cap.device="sda" cap.device_via="statfs_fsid" cap.device_reason=""
-cap.dev_iops=1129 cap.proc_iops=0
-cap.req_kb=155.9 cap.read_ratio=0.21 cap.profile=">64KB/write-heavy"
-cap.ceiling_cells=0
+cap.dev_iops=2653 cap.proc_iops=0
+cap.req_kb=90.0 cap.read_ratio=0.45 cap.profile=">64KB/mixed"
+cap.ceiling_cells=1
 cap.ceiling_device_id="t10.ATA_SAMSUNG_MZ7L33T8HBLT-00A07_S6ERNE0T410626@7501476528"
-cap.verdict="· sda: IOPS 1129, 대기 1.4ms, 장치 53% — 상한 미관측(큐 4 이상 순간이 필요)"
+cap.cell21.profile=">64KB/mixed" cap.cell21.iops=2653 cap.cell21.util_pct=69.7 cap.cell21.await_ms=4.59 cap.cell21.queue_depth=12.17 cap.cell21.epoch=1792043680
+cap.ceiling_iops=2653 cap.ceiling_bps=244414442 cap.ceiling_util_pct=69.7 cap.ceiling_qdepth=12.17 cap.ceiling_epoch=1792043680
+cap.used_of_ceiling_pct=100.0
+cap.verdict="⚠ IOPS 2653 / 상한 2653 (100%, >64KB/mixed), 대기 4.6ms 큐 12.2 — 용량 한계: IOPS 증설 또는 읽기 감축"
 pgbuf.enabled=0 pgbuf.reason="방법 B 비활성 — libcubrid.so 매핑 없음"
 pgbuf.engine.enabled=0 pgbuf.engine.reason="방법 B 비활성"
 io.read_bps=0 io.write_bps=0 io.read_iops=0 io.write_iops=0 io.cache_absorb_ok=0 io.rchar_bps=0 io.blkio_wait_pct=0.00 io.total_read_bytes=0 io.total_write_bytes=0
 server.d_threads=0 server.threads_total=117
 param.skipped_reason="서버 설치 위치를 읽을 수 없음(다른 계정) — paramdump 생략"
-hostdev.name=sda hostdev.util_pct=53.1 hostdev.read_bps=37255627
-tier.server_rss_bytes=1006206976 tier.master_rss_bytes=1843200 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=207556608 tier.pl_count=1
-tier.server_cores=0.02 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
-total.cubrid_rss_bytes=1215606784 total.cubrid_pct_ram=0.60
+hostdev.name=sda hostdev.util_pct=69.7 hostdev.read_bps=109455043
+tier.server_rss_bytes=1004716032 tier.master_rss_bytes=1843200 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=207556608 tier.pl_count=1
+tier.server_cores=0.00 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
+total.cubrid_rss_bytes=1214115840 total.cubrid_pct_ram=0.60

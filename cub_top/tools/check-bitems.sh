@@ -19,12 +19,14 @@
 # hidden new_lfhash=yes (lockfree_hashmap::m_type NEW) the old freelist's 0 is "not read", not
 # a measured 0; object locks (resources and entries) are counted; the plan cache separates the
 # engine's measured usage from its clone estimate; no "vacuum data" item stands for vacuum memory.
+# The result cache's pages are temp-volume list files, a count outside the heap total; its heap
+# is the entry pool and the (max_plan_cache_entries + 10) hash tables.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
 TMP=${TMPDIR:-/tmp}/cub_top-bitems.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
 printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$SRC" > "$TMP/t.c"
 cat >> "$TMP/t.c" <<'C'
-static unsigned char xc[1024], sess[1024], cat[1024], lk[1024], vac[256];
+static unsigned char xc[1024], sess[1024], cat[1024], lk[1024], vac[256], ql[256], qp[256];
 static btab_t bt;
 static void put(unsigned char*b,int off,int32_t v){ memcpy(b+off,&v,4); }
 static const bitem_t *item(const char*nm){ for(int i=0;i<B.n;i++) if(!strcmp(B.it[i].name,nm)) return &B.it[i]; return NULL; }
@@ -34,6 +36,7 @@ static void run(int newhash){
     B.sym[S_XCACHE]=(unsigned long)(uintptr_t)xc; B.sym[S_SESS]=(unsigned long)(uintptr_t)sess;
     B.sym[S_CAT]=(unsigned long)(uintptr_t)cat;   B.sym[S_LKGL]=(unsigned long)(uintptr_t)lk;
     B.sym[S_VACUUM]=(unsigned long)(uintptr_t)vac;
+    B.sym[S_QLIST]=(unsigned long)(uintptr_t)ql;  B.sym[S_QPOOL]=(unsigned long)(uintptr_t)qp;
     put(sess,bt.hx.sess_ht,newhash); put(cat,bt.hx.cat_ht,newhash); put(lk,bt.hx.lk_ht,newhash);
     b_items(&P);
 }
@@ -45,6 +48,8 @@ int main(void){
     put(sess,bt.off_lf_alloccnt,5);
     put(cat,bt.off_lf_alloccnt,999); put(cat,20,7);
     put(lk,bt.off_lk_ntran,10); put(lk,bt.hx.lk_res,100); put(lk,bt.hx.lk_entfl+bt.hx.lffl,200);
+    put(ql,bt.off_qlist_npages,640); put(qp,bt.off_qpool_nent,5); g_pagesize=16384;
+    { char pb[]="[S ] max_query_cache_entries=100\n[S ] query_cache_size_in_pages=1000\n[S ] max_plan_cache_entries=1000\n"; paramdump_apply(pb); }
     run(0);
     const bitem_t *c=item("catalog cache"), *s=item("session table"), *pc=item("plan cache (xcache)"),
                   *pk=item("plan clones (est)"), *lr=item("lock resources (obj)"), *le=item("lock entries (obj)"),
@@ -58,6 +63,17 @@ int main(void){
     ok = lr && le && lr->bytes==100.0*bt.hx.sz_lkr && le->bytes==200.0*bt.hx.sz_lke;
     printf("  %s   object locks: resources %.0f, entries %.0f\n",ok?"ok  ":"FAIL",lr?lr->bytes:-1,le?le->bytes:-1); bad|=!ok;
     printf("  %s   no vacuum data item\n",!va?"ok  ":"FAIL"); bad|=va!=NULL;
+    { const bitem_t *rq=item("result cache (query)"), *rh=item("result cache hash (est)"), *rt=item("result temp pages");
+      double tot=0; for(int i=0;i<B.n;i++) tot+=B.it[i].count_only?0:B.it[i].bytes;
+      ok = rq && rq->bytes==5.0*4096 && rh && rh->grade=='E' && rh->bytes>1010.0*1010*8 && rt && rt->count_only && rt->count==640
+           && B.total < 640.0*16384;
+      printf("  %s   result cache: pool %.0f (5 x 4096), hash %.0f (%c, 1010 tables), temp pages %ld count-only; total %.0f excludes the %d pages\n",
+             ok?"ok  ":"FAIL",rq?rq->bytes:-1,rh?rh->bytes:-1,rh?rh->grade:'-',rt?rt->count:-1,B.total,640); bad|=!ok; }
+    { char pb[]="[S ] max_query_cache_entries=100\n[S ] query_cache_size_in_pages=0\n"; paramdump_apply(pb); run(0);
+      const bitem_t *rq=item("result cache (query)"), *rh=item("result cache hash (est)");
+      ok = rq && rq->bytes==0 && strstr(rq->note,"query_cache_size_in_pages") && !rh;
+      printf("  %s   query_cache_size_in_pages=0: disabled, no hash item (\"%s\")\n",ok?"ok  ":"FAIL",rq?rq->note:"-"); bad|=!ok;
+      char pb2[]="[S ] max_query_cache_entries=100\n[S ] query_cache_size_in_pages=1000\n[S ] max_plan_cache_entries=1000\n"; paramdump_apply(pb2); }
     run(1);                                         /* new_lfhash=yes */
     s=item("session table"); c=item("catalog cache"); lr=item("lock resources (obj)"); le=item("lock entries (obj)");
     ok = s && c && lr && s->grade=='U' && c->grade=='U' && lr->grade=='U' && le && le->grade=='M';

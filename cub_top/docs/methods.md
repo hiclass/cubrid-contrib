@@ -29,9 +29,9 @@ CUBRID 11.5 빌드의 DWARF(`readelf --debug-dump=info`)에서 추출한 값입�
 | **플랜 캐시(XASL)** | `xcache_Global` | `entry_count` | 440 | 엔트리 수 |
 | | | `memory_usage_cache` | 484 | **엔진이 직접 세는 바이트** (● 측정) |
 | | | `memory_usage_clone` | 488 | 엔진의 **추정치** — 클론당 `UNPACK_SCALE(3) × stream 크기` (◌ 추정, `plan clones (est)`) |
-| 결과(list) 캐시 | `_ZL16qfile_List_cache` | `n_entries` | 24 | 엔트리 수 |
-| | | `n_pages` | 28 | `n_pages × DB_PAGESIZE` |
-| | `_ZL27qfile_List_cache_entry_pool` | `n_entries` | 8 | `× 4096`(고정 슬롯) |
+| 결과(list) 캐시 | `_ZL27qfile_List_cache_entry_pool` | `n_entries` | 8 | `× 4096`(고정 슬롯, `result cache (query)`) |
+| | (파라미터) | `max_plan_cache_entries` | — | 해시 `(N+10)`개 × 버킷 약 `(N+10)` — ◌ 추정·하한, `result cache hash (est)` |
+| | `_ZL16qfile_List_cache` | `n_pages` | 28 | **힙 아님**: 결과 리스트 파일의 temp 볼륨 페이지 수 — 개수만 표시, B 합계 제외(`result temp pages`) |
 | 필터 술어 캐시 | `_ZL21fpcache_Entry_counter` | (INT32 자체) | 0 | `× 120` |
 | 락 매니저(트랜잭션 슬롯) | `lk_Gl` | `config.num_trans` | 0 | `× 152` |
 | 락 자원(객체) | `lk_Gl` | `m_obj_hash_table…m_freelist.alloc_cnt` | 84 | `× sizeof(lk_res)` 120 |
@@ -58,6 +58,13 @@ CUBRID 11.5 빌드의 DWARF(`readelf --debug-dump=info`)에서 추출한 값입�
 `xcache_Global.memory_usage_cache` 는 **엔진이 스스로 카운팅하는 바이트 값**입니다. 그 값을 그대로 읽으므로 측정(●)입니다.
 `memory_usage_clone` 은 엔진이 실제 할당을 세는 값이 아니라 클론당 `sizeof(xasl_unpack_info)+sizeof(XASL_NODE)+UNPACK_SCALE×stream` 으로
 **가정한 크기**의 합이라 별도 항목 `plan clones (est)` 로 추정(◌) 등급을 붙입니다.
+
+결과 캐시의 `n_pages` 는 캐시된 결과 리스트 파일(`list_id.page_cnt`)의 합입니다. 이 파일은 preserved temp file 이라
+temp 볼륨과 데이터 버퍼에 있고(방법 A 에서 이미 제외하는 영역) `file_temp_retire_preserved` 로 지워지므로, 힙 합계에
+넣지 않고 페이지 수만 따로 보입니다. 결과 캐시의 실제 힙은 엔트리 풀(`× 4096`)과, 기동 시
+`qfile_initialize_list_cache` 가 만드는 `max_plan_cache_entries + 10` 개의 해시 테이블(각 같은 수의 버킷)입니다.
+해시 크기는 테이블 헤더·fixed heap·버킷 포인터 배열로 추정하며, 엔트리가 들어오면서 늘어나는 HENTRY 청크는 넣지 않아
+하한입니다. `max_query_cache_entries` 또는 `query_cache_size_in_pages` 가 0 이면 결과 캐시가 꺼져 해시도 만들어지지 않습니다.
 
 `vacuum_Data` 는 184B 구조체일 뿐 vacuum 이 쓰는 메모리를 나타내지 않으므로 항목으로 내지 않습니다.
 
