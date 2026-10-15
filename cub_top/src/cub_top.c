@@ -2439,19 +2439,31 @@ static unsigned long chunk_hdr(int pid,unsigned long s,size_t span,
     *rok=(vmread(pid,s+o+8,&z,8)==8);
     return z&CHUNK_MASK;
 }
+/* A mmapped chunk (glibc above its mmap threshold, and lea's large blocks, which go through
+   malloc) starts on a page with prev_size 0, IS_MMAPPED and a page-multiple size.  One to three
+   of them fill a VMA - often merged with a neighbouring anonymous mapping - and never give the
+   four hops the general probe needs, so such a header is a start of its own. */
+static int mm_hdr(const unsigned char *h,size_t room){
+    unsigned long p0=*(const unsigned long*)h, z=*(const unsigned long*)(h+8)&CHUNK_MASK;
+    return p0==0 && (*(const unsigned long*)(h+8)&2) && z>=4096 && !(z&4095) && z<=room;
+}
 static void walk_region(int pid,unsigned long s,unsigned long e){
     /* Instead of copying the whole region up front (up to 768MB, 593MB peak measured):
        probe the first 128K, then move a 64K window along the chunk boundaries.
        Only 16B per chunk is needed, so the copy comes to a few windows. */
     size_t span=e-s;
-    if(span>(768UL<<20)){            /* Bounded for time; say so, or the rest reads as "unexplained" */
-        A.trunc++; A.unwalked+=(double)(span-(768UL<<20)); span=768UL<<20; }
     static unsigned char head[0x20000+64];
     static unsigned char win[1<<16];
     size_t hn=vmread(pid,s,head,span<sizeof head?span:sizeof head);
     if(hn<64) return;
-    long start=-1;
-    for(size_t off=0; off+64<hn && off<0x20000; off+=16){
+    long start=-1; int mm=0;
+    for(size_t off=0; off+16<=hn; off+=4096)
+        if(mm_hdr(head+off,span-off)){ start=(long)off; mm=1; break; }
+    /* Bounded for time; say so, or the rest reads as "unexplained".  Mmapped chunks are
+       page multiples of at least the mmap threshold, so their walk needs no bound. */
+    if(start<0 && span>(768UL<<20)){
+        A.trunc++; A.unwalked+=(double)(span-(768UL<<20)); span=768UL<<20; }
+    for(size_t off=0; start<0 && off+64<hn && off<0x20000; off+=16){
         size_t o=off; int ok=1;
         for(int k=0;k<4;k++){
             int rok; unsigned long z=chunk_hdr(pid,s,span,head,hn,o,&rok);
@@ -2477,7 +2489,8 @@ static void walk_region(int pid,unsigned long s,unsigned long e){
         }
         unsigned long z=*(const unsigned long*)(buf+o-boff+8)&CHUNK_MASK;
         prev_z=z;
-        if(z<16||z>span||(z&CHUNK_ALIGN)) break;
+        if(z<16||z>span-o||(z&CHUNK_ALIGN)) break;
+        if(mm && !mm_hdr(buf+o-boff,span-o)) break;   /* past the mmapped chunks: a merged neighbour */
         A.total+=z; A.chunks++;
         A.cat[classify((long)z)]+=z;
         o+=z; w++;
