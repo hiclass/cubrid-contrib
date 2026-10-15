@@ -114,7 +114,7 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 |---|---|
 | 0 | 정상 |
 | 1 | 실행 중 실패 (예: `--replay` 파일을 읽을 수 없음) |
-| 2 | **사용법 오류** — 출력 모드(`-t`·`-d`/`--dump-json`·`-b`/`-p`) 없이 DB 이름이나 옵션만 줌, 모드를 둘 이상 지정, `--replay` 에 `-t`, 알 수 없는 옵션, 옵션 값 누락·숫자가 아닌 값, 없는 DB, DB 를 둘 이상 지정, `--record` 경로 쓰기 불가·이미 있음(`--record-overwrite` 없이)·심볼릭 링크, 라이브가 아닌 모드의 `--record`, `--record` 와 `--replay` 동시 지정 |
+| 2 | **사용법 오류** — 출력 모드(`-t`·`-d`/`--dump-json`·`-b`/`-p`) 없이 DB 이름이나 옵션만 줌, 모드를 둘 이상 지정, `--replay` 에 `-t` 또는 재생에 적용되지 않는 옵션(DB 이름·`--interval`·`--bcb-dump`·`--capacity-state`·`--offsets`·`--pgbuf-detail`·`--dump-hist`·`--record-overwrite`), 알 수 없는 옵션, 옵션 값 누락·숫자가 아닌 값, 없는 DB, DB 를 둘 이상 지정, `--record` 경로 쓰기 불가·이미 있음(`--record-overwrite` 없이)·심볼릭 링크, 라이브가 아닌 모드의 `--record`, `--record` 와 `--replay` 동시 지정 |
 
 사용법 오류는 반드시 2로 끝난다. 오타 난 `--dump-jsn` 을 조용히 무시하고 0으로 끝내면
 종료 코드만 보는 호출자에게 **JSON 을 받은 것처럼** 보이기 때문이다.

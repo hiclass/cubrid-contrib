@@ -8219,7 +8219,7 @@ static int opt_num(const char *opt,const char *s,double lo,double hi,double *out
 
 int main(int argc,char **argv){
     g_argc=argc; g_argv=argv;
-    int terse=0,tree=0,with_a=0,live=0,view0=0,dump_hist=0,force_ko=0; double interval=0.5;
+    int terse=0,tree=0,with_a=0,live=0,view0=0,dump_hist=0,force_ko=0,interval_set=0; double interval=0.5;
     int bcb_only=0;                   /* --bcb-dump with no display mode: write the snapshot only */
     const char *want_db=NULL;         /* The positional argument is the db to view; without it, the first alphabetically */
     /* Options that take a value.  The tests below are written "&&i+1<argc", which would
@@ -8251,7 +8251,7 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"--ko")) force_ko=1;
         else if(!strcmp(argv[i],"--offsets") && i+1<argc)
             snprintf(g_offs_file,sizeof g_offs_file,"%s",argv[++i]);
-        else if(!strcmp(argv[i],"--interval") && i+1<argc){ if(!opt_num(argv[i],argv[i+1],0.05,3600,&interval)) return 2; i++; }
+        else if(!strcmp(argv[i],"--interval") && i+1<argc){ if(!opt_num(argv[i],argv[i+1],0.05,3600,&interval)) return 2; i++; interval_set=1; }
         else if(!strcmp(argv[i],"--bcb-dump") && i+1<argc) snprintf(g_bcb_dump,sizeof g_bcb_dump,"%s",argv[++i]);
         else if(!strcmp(argv[i],"--capacity-state") && i+1<argc) snprintf(g_cap_state,sizeof g_cap_state,"%s",argv[++i]);
         else if(!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")||!strcmp(argv[i],"/h")
@@ -8289,6 +8289,21 @@ int main(int argc,char **argv){
     if(g_rep_path && tree){
         fprintf(stderr,"cub_top: --replay 는 트리(-t)를 그리지 않습니다 — -b/-p 또는 -d/--dump-json\n");
         return 2;
+    }
+    /* A replay shows the recording as it was: options that act on a live server or on this
+       run's sampling have nothing to act on, and accepting them silently would make the
+       options line claim what did not happen */
+    if(g_rep_path){
+        char no[200]=""; size_t nl=0;
+        #define NOREP(c_,s_) do{ if(c_) nl+=(size_t)snprintf(no+nl,nl<sizeof no?sizeof no-nl:0,"%s%s",nl?", ":"",s_); }while(0)
+        NOREP(want_db,"<db>"); NOREP(interval_set,"--interval"); NOREP(g_bcb_dump[0],"--bcb-dump");
+        NOREP(g_cap_state[0],"--capacity-state"); NOREP(g_offs_file[0],"--offsets");
+        NOREP(g_pg_detail,"--pgbuf-detail"); NOREP(dump_hist,"--dump-hist"); NOREP(g_rec_overwrite,"--record-overwrite");
+        #undef NOREP
+        if(no[0]){
+            fprintf(stderr,g_ascii?"cub_top: --replay shows the recording as recorded - not applicable: %s\n"
+                                  :"cub_top: --replay 는 기록된 그대로 보여 줍니다 — 적용되지 않는 옵션: %s\n",no);
+            return 2; }
     }
     /* No mode: the help, as a CLI does.  --bcb-dump alone is an action of its own (the
        snapshot cub_volmap --bufmap reads), so it runs without one. */

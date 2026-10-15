@@ -179,6 +179,18 @@ if [ "$a" = "$b" ] && [ "$c" = "ts=$(printf '%s' "$L1" | python3 -c 'import json
     echo "  ok   replay output is the same under UTC, Asia/Seoul and America/New_York ($c)"
 else echo "  FAIL replay depends on TZ ($c)"; bad=1; fi
 
+# 2d) options a replay cannot apply are refused with status 2, not silently ignored
+nrej=0; for o in "-d nosuchdb" "-d cbench" "--bcb-dump $TMP/x.bin" "-d --interval 2" "-b --capacity-state $TMP/c" \
+                 "-d --offsets $TMP" "-d --pgbuf-detail" "-d --dump-hist" "-d --record-overwrite"; do
+    "$BIN" --replay "$REC" $o </dev/null >/dev/null 2>"$TMP/oerr"; rc=$?
+    if [ $rc = 2 ] && grep -q -- '--replay' "$TMP/oerr"; then nrej=$((nrej+1)); else echo "  FAIL --replay with $o: exit $rc"; bad=1; fi
+done
+[ -e "$TMP/x.bin" ] && { echo "  FAIL --bcb-dump wrote a file during a replay"; bad=1; }
+nacc=0; for o in "-d --heap --ascii" "--dump-json --replay-speed 0"; do
+    "$BIN" --replay "$REC" $o </dev/null >/dev/null 2>&1 && nacc=$((nacc+1)) || { echo "  FAIL --replay with $o refused"; bad=1; }
+done
+[ $nrej = 9 ] && [ $nacc = 2 ] && echo "  ok   9 inapplicable option sets refused with status 2, 2 applicable ones accepted"
+
 # 2b') a profile cell at a rounding edge: read_ratio is printed to 0.01, so a recorded
 #      write-heavy frame at 0.299 reads back as 0.30 - the recorded cell must win
 if command -v python3 >/dev/null && grep -q '"cap.profile"' "$REC"; then
