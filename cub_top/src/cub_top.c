@@ -138,6 +138,13 @@ static struct {
     char note[256];
 } CAP;
 static int g_ascii=0;   /* --ascii: English canvas labels, for terminals whose input method follows Hangul rendering */   /* Korean/English label, toggled by l or --ascii */
+/* Replay shows times as the recorder's clock read: its UTC offset is taken from the recorded
+   "ts" string against ts_epoch (rp_apply), so -d, --json and the screens do not depend on
+   the viewer's TZ.  Live, or a frame without "ts", uses localtime. */
+static long g_rep_tzoff=0; static int g_rep_tzok=0;
+static void rep_localtime(time_t t,struct tm *o){
+    if(g_rep_tzok){ time_t u=t+(time_t)g_rep_tzoff; gmtime_r(&u,o); } else localtime_r(&t,o);
+}
 
 static int g_mem_fd = -1;   /* For the /proc/pid/mem fallback */
 static int g_mem_pid = -1;  /* The pid g_mem_fd belongs to: a switch or restart must not read the old process */
@@ -3693,7 +3700,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
         s->pg_span     = (PG.have_log&&PG.have_oldest) ? (double)(PG.log_append.pageid-PG.oldest_dirty.pageid) : 0;
         s->pg_lag      = PG.have_log ? (double)(PG.log_append.pageid-PG.log_nxio.pageid) : 0;
     }
-    time_t tt=(time_t)t; struct tm tmv; localtime_r(&tt,&tmv);
+    time_t tt=(time_t)t; struct tm tmv; rep_localtime(tt,&tmv);
     strftime(s->hh,sizeof s->hh,"%H:%M:%S",&tmv);        /* 24-hour clock; the date is in the top box */
 }
 /* Dump the last history sample to stderr, leaving the terse stdout contract clean.
@@ -5166,7 +5173,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     char t1[64],t2[160];
     /* During a replay the clock must show when the frame was RECORDED, not now. */
     time_t now=g_replaying&&g_rep_ts?g_rep_ts:time(NULL);
-    struct tm tv; localtime_r(&now,&tv);
+    struct tm tv; rep_localtime(now,&tv);
     int h12=tv.tm_hour%12; if(!h12)h12=12;
     snprintf(t1,sizeof t1,"%04d-%02d-%02d %02d:%02d:%02d %s",tv.tm_year+1900,tv.tm_mon+1,tv.tm_mday,
              h12,tv.tm_min,tv.tm_sec,tv.tm_hour<12?"AM":"PM");
@@ -6332,7 +6339,7 @@ static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
         char rt[200]; snprintf(rt,sizeof rt,"%s %d/%d · %s",g_ascii?"REPLAY":"재생",g_rep_i+1,g_rep_n,t1);
         snprintf(t1,sizeof t1,"%.*s",(int)sizeof t1-1,rt);
         char when[32]="--"; time_t rts=g_rep_ts;
-        if(rts){ struct tm tmv; localtime_r(&rts,&tmv); strftime(when,sizeof when,"%Y-%m-%d %H:%M:%S",&tmv); }
+        if(rts){ struct tm tmv; rep_localtime(rts,&tmv); strftime(when,sizeof when,"%Y-%m-%d %H:%M:%S",&tmv); }
         snprintf(t2,sizeof t2,"%s %s",g_ascii?"recorded":"기록",when);
     }
 
@@ -7087,7 +7094,12 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* Run state of the recording host: permissions */
     g_perm_limited=(int)rp_num(t,"perm.limited",0);
     rp_str(t,"perm.reason",g_perm_why,sizeof g_perm_why);
-    rp_str(t,"param.skipped_reason",g_pd_why,sizeof g_pd_why);   /* why this frame has no paramdump values */
+    rp_str(t,"param.skipped_reason",g_pd_why,sizeof g_pd_why);
+    { char ts[40]; struct tm tm; double ep=rp_num(t,"ts_epoch",-1); g_rep_tzok=0;
+      rp_str(t,"ts",ts,sizeof ts); memset(&tm,0,sizeof tm);
+      if(ep>0 && sscanf(ts,"%d-%d-%d %d:%d:%d",&tm.tm_year,&tm.tm_mon,&tm.tm_mday,&tm.tm_hour,&tm.tm_min,&tm.tm_sec)==6){
+          tm.tm_year-=1900; tm.tm_mon-=1;
+          g_rep_tzoff=(long)(timegm(&tm)-(time_t)ep); g_rep_tzok=1; } }   /* why this frame has no paramdump values */
     g_disk_dropped=(int)rp_num(t,"limits.disks_dropped",0);
     /* Parameters: the verdicts compare usage against these, so a replay without them
        would judge against nothing.  Only the rows terse emits are looked for. */
@@ -7140,12 +7152,27 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
     /* The whole recording is held so [,] can step backwards. */
     size_t cap=256,n=0; char **fr=malloc(cap*sizeof *fr);
     if(!fr){ free(line); fclose(f); return 1; }
+    /* A frame is taken only whole: '{' through '}' and its newline.  A line cut by SIGKILL,
+       a full disk or power loss would otherwise replay its missing keys as 0 (plots drop
+       to 0, verdicts change, a cut before ts gives 1970).  Cut lines are skipped and named. */
+    long ln=0, nbad=0, badl[4]={0};
     while(fgets(line,RP_MAXLINE,f)){
-        if(line[0]!='{') continue;
+        size_t l=strlen(line); int whole=l>0 && line[l-1]=='\n';
+        ln++;
+        if(!whole && !feof(f)){                     /* longer than RP_MAXLINE: drop all of it */
+            int c; while((c=fgetc(f))!=EOF && c!='\n'); }
+        while(l>0 && (line[l-1]=='\n'||line[l-1]=='\r'||line[l-1]==' '||line[l-1]=='\t')) line[--l]=0;
+        if(l==0) continue;
+        if(line[0]!='{' || line[l-1]!='}' || !whole){ if(nbad<4) badl[nbad]=ln; nbad++; continue; }
         if(n==cap){ cap*=2; char **t=realloc(fr,cap*sizeof *fr); if(!t) break; fr=t; }
         fr[n++]=strdup(line);
     }
     fclose(f); free(line);
+    if(nbad){
+        fprintf(stderr,g_ascii?"cub_top: --replay %s: skipped %ld incomplete line(s) (line":"cub_top: --replay %s: 불완전한 줄 %ld개 건너뜀 (줄",path,nbad);
+        for(long k=0;k<nbad && k<4;k++) fprintf(stderr," %ld",badl[k]);
+        fprintf(stderr,"%s)\n",nbad>4?" ...":"");
+    }
     if(!n){ fprintf(stderr,"cub_top: --replay %s: no frames\n",path); free(fr); return 1; }
 
     static proc_t P; static mem_t M; static tier_t T; static iod_t IO;
@@ -7154,8 +7181,8 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
     if(terse||jsonout){
         for(size_t j=0;j<n;j++){
             char ts[32]; time_t rt=(time_t)rp_num(fr[j],"ts_epoch",0); struct tm tmv;
-            localtime_r(&rt,&tmv); strftime(ts,sizeof ts,"%Y-%m-%d %H:%M:%S",&tmv);
-            rp_apply(fr[j],&P,&M,&T,&IO);
+            rp_apply(fr[j],&P,&M,&T,&IO);   /* sets the recorder's UTC offset */
+            rep_localtime(rt,&tmv); strftime(ts,sizeof ts,"%Y-%m-%d %H:%M:%S",&tmv);
             g_replaying=1; g_ts_frac=rp_time(fr[j]);
             if(jsonout){
                 FILE *tf=tmpfile(); if(!tf) continue;

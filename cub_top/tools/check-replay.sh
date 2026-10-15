@@ -163,6 +163,22 @@ PY
         && echo "  ok   param.skipped_reason replays" || { sed 's/^/  /' "$TMP/skip.res"; bad=1; }
 fi
 
+# 2c) a cut line (SIGKILL, full disk, power loss) is skipped with a warning, not replayed with
+#     its missing keys as 0; and the output does not depend on the viewer's TZ
+L1=$(head -1 "$REC")
+{ printf '%s\n' "$L1"; printf '%s' "$L1" | head -c 3000; echo; printf '%s' "$L1" | head -c 30; echo; printf '%s\n' "$L1"; printf '%s' "$L1" | head -c 4000; } >"$TMP/cut.jsonl"
+"$BIN" --replay "$TMP/cut.jsonl" -d --replay-speed 0 >"$TMP/cut.out" 2>"$TMP/cut.err"
+nf=$(grep -c '^ts=' "$TMP/cut.out"); n70=$(grep -c '^ts="1970' "$TMP/cut.out")
+if [ "$nf" = 2 ] && [ "$n70" = 0 ] && grep -q ' 3 ' "$TMP/cut.err" && grep -q '2 3 5)' "$TMP/cut.err"; then
+    echo "  ok   cut lines skipped: 2 whole frames of 5 lines, warning \"$(tail -1 "$TMP/cut.err" | sed 's/.*: //')\""
+else echo "  FAIL cut lines: $nf frame(s) replayed, $n70 at 1970; stderr: $(tail -1 "$TMP/cut.err")"; bad=1; fi
+a=$(TZ=UTC "$BIN" --replay "$REC" --dump-json --replay-speed 0 2>/dev/null | md5sum)
+b=$(TZ=Asia/Seoul "$BIN" --replay "$REC" --dump-json --replay-speed 0 2>/dev/null | md5sum)
+c=$(TZ=America/New_York "$BIN" --replay "$REC" -d --replay-speed 0 2>/dev/null | grep -m1 '^ts=' | sed 's/ ts_epoch=.*//')
+if [ "$a" = "$b" ] && [ "$c" = "ts=$(printf '%s' "$L1" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["ts"]))')" ]; then
+    echo "  ok   replay output is the same under UTC, Asia/Seoul and America/New_York ($c)"
+else echo "  FAIL replay depends on TZ ($c)"; bad=1; fi
+
 # 2b') a profile cell at a rounding edge: read_ratio is printed to 0.01, so a recorded
 #      write-heavy frame at 0.299 reads back as 0.30 - the recorded cell must win
 if command -v python3 >/dev/null && grep -q '"cap.profile"' "$REC"; then
