@@ -17,6 +17,8 @@
 # -d, --json and --record stay valid and round-trip.  A Korean reason cut by a fixed buffer
 # must not leave half a character (invalid UTF-8 in JSON); a value holding " \ or a tab
 # (a library path) must come back from a recording as it went in, not split into fake keys.
+# A bare token is a JSON number only by JSON's grammar: a database named 0123, 0x1f or 2024
+# stays a string (CUBRID allows names starting with a digit).
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"; BIN="$ROOT/cub_top"
 TMP=${TMPDIR:-/tmp}/cub_top-escape.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
@@ -48,6 +50,11 @@ int main(void){
     { char sm[8]; rp_find("{\"k\": \"가나다\"}","k",sm,sizeof sm);   /* 7 bytes of room: 가나 fits, 다 does not */
       ok = !strcmp(sm,"가나");
       printf("  %s   rp_find into a short buffer keeps whole characters: \"%s\"\n",ok?"ok  ":"FAIL",sm); bad|=!ok; }
+    { static const struct { const char *t; int num; } jn[]={{"0",1},{"-12",1},{"3.5",1},{"1e9",1},{"2.5E-3",1},
+          {"0123",0},{"0x1f",0},{"+5",0},{"inf",0},{"nan",0},{"1.",0},{".5",0},{"1e",0},{"--1",0},{"sda",0}};
+      int all=1; for(unsigned i=0;i<sizeof jn/sizeof jn[0];i++) if(json_number(jn[i].t,strlen(jn[i].t))!=jn[i].num){
+          all=0; printf("        json_number(\"%s\") != %d\n",jn[i].t,jn[i].num); }
+      printf("  %s   JSON number grammar: 0 -12 3.5 1e9 numbers; 0123 0x1f +5 inf nan 1. .5 not\n",all?"ok  ":"FAIL"); bad|=!all; }
     printf("%s",line);
     return bad;
 }
@@ -65,6 +72,25 @@ d["heapB.lib"]='/opt/a "b"\\c\td 가'; d["heapB.reason"]='사유 "인용" \\ 끝
 open(sys.argv[2],"w").write(json.dumps(d,ensure_ascii=False)+"\n")
 PY
     "$BIN" --replay "$TMP/rec.jsonl" --dump-json --replay-speed 0 > "$TMP/rp.json" 2>/dev/null
+    # Databases whose names look like numbers
+    for nm in 0123 0x1f 2024; do
+        python3 - "$ROOT/examples/10-recording.jsonl" "$TMP/n.jsonl" "$nm" <<'PY'
+import json,sys
+d=json.loads(open(sys.argv[1]).readline()); cur=d["instance.current"]; nm=sys.argv[3]
+e={}
+for k,v in d.items():
+    if k.startswith("instance."+cur+"."): k="instance."+nm+"."+k[len("instance."+cur+"."):]
+    e[k]=v
+e["instance.current"]=nm; e["server.db"]=nm
+open(sys.argv[2],"w").write(json.dumps(e,ensure_ascii=False)+"\n")
+PY
+        "$BIN" --replay "$TMP/n.jsonl" --dump-json --replay-speed 0 2>/dev/null | python3 -c '
+import json,sys
+nm=sys.argv[1]; d=json.loads(sys.stdin.read().splitlines()[0])
+assert d["server.db"]==nm and d["instance.current"]==nm, (d["server.db"],d["instance.current"])' "$nm" \
+          && echo "  ok     database \"$nm\": JSON parses, server.db and instance.current are the string" \
+          || { echo "  FAIL   database \"$nm\": invalid JSON or not a string"; rc=1; }
+    done
     python3 - "$TMP/rp.json" <<'PY' && echo "  ok     replay --dump-json parses and gives the values back" || { echo "  FAIL   replay round trip"; exit 1; }
 import json,sys
 t=open(sys.argv[1],encoding="utf-8").read().strip().splitlines()

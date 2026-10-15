@@ -6448,8 +6448,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     /* All instances.  The detailed keys (server, region) cover only the current one, so the
        other databases' totals are available nowhere else.  Keys are namespaced by db. */
     { char cs[64];
-      printf("instance.count=%d instance.current=%s\n",g_ninst,
-             g_ninst>0?inst_key(g_cur,cs,sizeof cs):"-"); }
+      printf("instance.count=%d instance.current=\"%s\"\n",g_ninst,
+             tq(g_ninst>0?inst_key(g_cur,cs,sizeof cs):"-")); }
     for(int i=0;i<g_ninst;i++){
         char k[64];
         inst_key(i,k,sizeof k);
@@ -6461,7 +6461,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     if(P->pid<0){
         for(int i=0;i<g_nprm;i++)
             printf("conf.%s=%lld\n",g_prm[i].name,g_prm[i].val);
-        if(devnm[0]) printf("hostdev.name=%s hostdev.util_pct=%.1f\n",devnm,devutil);
+        if(devnm[0]) printf("hostdev.name=\"%s\" hostdev.util_pct=%.1f\n",tq(devnm),devutil);
         printf("tier.server_rss_bytes=0 tier.master_rss_bytes=%.0f tier.broker_rss_bytes=%.0f"
                " tier.cas_rss_bytes=%.0f tier.cas_count=%d tier.pl_rss_bytes=%.0f tier.pl_count=%d\n",
                T->master,T->broker,T->cas,T->ncas,T->pl,T->npl);
@@ -6473,11 +6473,11 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         return;
     }
     { char ds[64]; terse_slug(P->db,ds,sizeof ds);
-    printf("server.db=%s server.pid=%d server.mapped_kb=%lu server.rss_kb=%lu "
+    printf("server.db=\"%s\" server.pid=%d server.mapped_kb=%lu server.rss_kb=%lu "
            "server.pss_kb=%lu server.swap_kb=%lu server.workers=%d"
            " server.minflt_per_s=%.0f server.majflt_per_s=%.0f"
            " server.cpu_pct=%.1f server.host_cores=%d\n",
-           ds,P->pid,P->vsize_kb,P->rss_kb,P->pss_kb,P->swap_kb,P->nthreads,
+           tq(ds),P->pid,P->vsize_kb,P->rss_kb,P->pss_kb,P->swap_kb,P->nthreads,
            minflt_ps,majflt_ps,cpu_pct,ncpu); }
     for(int i=0;i<NSR;i++){
         srg_t *r=&SR[i];
@@ -6599,8 +6599,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     /* io.* comes from /proc/<pid>/io and belongs to the current instance, while the device
        figures come from diskstats and are host-wide - separate key prefixes keep the
        two scopes from being confused. */
-    if(devnm[0]) printf("hostdev.name=%s hostdev.util_pct=%.1f hostdev.read_bps=%.0f\n",
-                        devnm,devutil,devr);
+    if(devnm[0]) printf("hostdev.name=\"%s\" hostdev.util_pct=%.1f hostdev.read_bps=%.0f\n",
+                        tq(devnm),devutil,devr);
     for(int i=0;i<NPRMROWS;i++){
         long long v=prm_get(PRMROWS[i].name);
         if(v>=0) printf("param.%s=%lld param.%s.observed=%d\n",
@@ -6654,6 +6654,20 @@ static void json_escape_out(FILE*o,const char*s,size_t n){
         if(c=='"'||c=='\\') fprintf(o,"\\%c",c);
         else if(c<0x20) fprintf(o,"\\u%04x",c);
         else fputc(c,o); }
+}
+/* JSON's number grammar: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?  - strtod would also
+   take 0123, 0x1f, +5, inf and nan, none of them a JSON number */
+static int json_number(const char *v,size_t n){
+    size_t i=0;
+    if(i<n && v[i]=='-') i++;
+    if(i>=n || !isdigit((unsigned char)v[i])) return 0;
+    if(v[i]=='0') i++; else while(i<n && isdigit((unsigned char)v[i])) i++;
+    if(i<n && v[i]=='.'){ i++; if(i>=n || !isdigit((unsigned char)v[i])) return 0;
+                          while(i<n && isdigit((unsigned char)v[i])) i++; }
+    if(i<n && (v[i]=='e'||v[i]=='E')){ i++; if(i<n && (v[i]=='+'||v[i]=='-')) i++;
+                          if(i>=n || !isdigit((unsigned char)v[i])) return 0;
+                          while(i<n && isdigit((unsigned char)v[i])) i++; }
+    return i==n;
 }
 /* A quoted terse value carries tq()'s escapes, which are JSON's: kept as they are, a stray
    backslash or control byte escaped */
@@ -7231,13 +7245,7 @@ static void json_from_terse(FILE*tf,FILE*o){
         if(!first) fputs(",\n",o);
         first=0;
         fputs("  \"",o); json_escape_out(o,k,kl); fputs("\": ",o);
-        int numeric=0;
-        if(!quoted && vl>0){                    /* Treated as numeric only when the whole token is a finite number */
-            char tmp[64];
-            if(vl<sizeof tmp){ memcpy(tmp,v,vl); tmp[vl]=0;
-                char*end; double d=strtod(tmp,&end);
-                if(end==tmp+vl && d==d && d<1e308 && d>-1e308) numeric=1; }
-        }
+        int numeric = !quoted && json_number(v,vl);   /* else a bare token becomes a string */
         if(numeric){ fwrite(v,1,vl,o); }
         else if(quoted){ fputc('"',o); json_copy_escaped(o,v,vl); fputc('"',o); }   /* tq() already escaped it */
         else { fputc('"',o); json_escape_out(o,v,vl); fputc('"',o); }
