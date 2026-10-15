@@ -1445,30 +1445,37 @@ static tgt_t TG[]={
    Returns the number of keys resolved (>0 on success); out[NTG] holds the values
    (-1 unresolved) and why the failure reason.  A full .debug_info scan takes
    seconds (8s / 125MB measured), so the caller should cache it. */
+/* s cut to at most n bytes without splitting a UTF-8 character (ring of 4) */
+static const char *u8n(const char *s,size_t n){
+    static char ring[4][512]; static int k=0; char *o=ring[k++&3];
+    size_t l=strlen(s); if(n>=sizeof ring[0]) n=sizeof ring[0]-1;
+    if(l>n){ l=n; while(l>0 && ((unsigned char)s[l]&0xC0)==0x80) l--; }
+    memcpy(o,s,l); o[l]=0; return o;
+}
 static int dwoff_extract(const char*so_path,long out[],char*why,size_t wn){
     /* Reset globals in case of re-entry */
     DI=AB=DS=NULL; DI_SZ=AB_SZ=DS_SZ=0; NCU=0; NTAB=0; G_desync=0;
     int fd=open(so_path,O_RDONLY);
-    if(fd<0){ snprintf(why,wn,"open 실패"); return 0; }
+    if(fd<0){ snprintf(why,wn,"%s",g_ascii?"open failed":"open 실패"); return 0; }
     struct stat st;
-    if(fstat(fd,&st)!=0 || st.st_size<(off_t)sizeof(Elf64_Ehdr)){ close(fd); snprintf(why,wn,"ELF 아님"); return 0; }
+    if(fstat(fd,&st)!=0 || st.st_size<(off_t)sizeof(Elf64_Ehdr)){ close(fd); snprintf(why,wn,"%s",g_ascii?"not ELF":"ELF 아님"); return 0; }
     unsigned char*m=mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0); close(fd);
-    if(m==MAP_FAILED){ snprintf(why,wn,"mmap 실패"); return 0; }
+    if(m==MAP_FAILED){ snprintf(why,wn,"%s",g_ascii?"mmap failed":"mmap 실패"); return 0; }
     size_t fsz=(size_t)st.st_size;
     #define DW_IN_FILE(off_,len_) ((uint64_t)(off_) <= (uint64_t)fsz && \
                                    (uint64_t)(len_) <= (uint64_t)fsz - (uint64_t)(off_))
     int got=0;
     TAB=(ab_t*)calloc(NTAB_MAX,sizeof(ab_t));
-    if(!TAB){ snprintf(why,wn,"TAB 할당 실패"); munmap(m,st.st_size); return 0; }
+    if(!TAB){ snprintf(why,wn,"%s",g_ascii?"table allocation failed":"TAB 할당 실패"); munmap(m,st.st_size); return 0; }
     Elf64_Ehdr*eh=(Elf64_Ehdr*)m;
     if(memcmp(eh->e_ident,ELFMAG,SELFMAG)||eh->e_ident[EI_CLASS]!=ELFCLASS64){
-        snprintf(why,wn,"ELF64 아님"); goto done; }
+        snprintf(why,wn,"%s",g_ascii?"not ELF64":"ELF64 아님"); goto done; }
     if(eh->e_shentsize!=sizeof(Elf64_Shdr) || eh->e_shnum==0 || eh->e_shstrndx>=eh->e_shnum ||
        !DW_IN_FILE(eh->e_shoff,(uint64_t)eh->e_shnum*sizeof(Elf64_Shdr))){
-        snprintf(why,wn,"섹션 표가 파일 밖"); goto done; }
+        snprintf(why,wn,"%s",g_ascii?"section table outside the file":"섹션 표가 파일 밖"); goto done; }
     { Elf64_Shdr*sh=(Elf64_Shdr*)(m+eh->e_shoff);
       Elf64_Shdr*ssh=&sh[eh->e_shstrndx];
-      if(!DW_IN_FILE(ssh->sh_offset,ssh->sh_size)){ snprintf(why,wn,"섹션 이름 표가 파일 밖"); goto done; }
+      if(!DW_IN_FILE(ssh->sh_offset,ssh->sh_size)){ snprintf(why,wn,"%s",g_ascii?"section name table outside the file":"섹션 이름 표가 파일 밖"); goto done; }
       const char*ss=(const char*)(m+ssh->sh_offset);
       for(int i=0;i<eh->e_shnum;i++){
           if(sh[i].sh_name>=ssh->sh_size || !memchr(ss+sh[i].sh_name,0,ssh->sh_size-sh[i].sh_name)) continue;
@@ -1478,7 +1485,7 @@ static int dwoff_extract(const char*so_path,long out[],char*why,size_t wn){
           else if(!strcmp(nm2,".debug_abbrev")){ AB=m+sh[i].sh_offset; AB_SZ=sh[i].sh_size; }
           else if(!strcmp(nm2,".debug_str")){    DS=m+sh[i].sh_offset; DS_SZ=sh[i].sh_size; }
       } }
-    if(!DI||!AB){ snprintf(why,wn,"디버그 섹션 없음(strip)"); goto done; }
+    if(!DI||!AB){ snprintf(why,wn,"%s",g_ascii?"no debug sections (stripped)":"디버그 섹션 없음(strip)"); goto done; }
     build_index();
     for(int i=0;i<NTG;i++){
         out[i]=-1;
@@ -1494,7 +1501,7 @@ static int dwoff_extract(const char*so_path,long out[],char*why,size_t wn){
             }
         }
     }
-    if(got==0) snprintf(why,wn,"키 0개 해소");
+    if(got==0) snprintf(why,wn,"%s",g_ascii?"no key resolved":"키 0개 해소");
 done:
     free(TAB); TAB=NULL; NTAB=0;
     if(CU){ free(CU); CU=NULL; NCU=0; }   /* The CU index has the same lifetime */
@@ -1544,7 +1551,7 @@ static void dw_cache_write(const char *path,const long out[]){
 }
 static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
     struct stat st;
-    if(stat(so,&st)!=0){ snprintf(why,wn,"stat 실패"); return 2; }
+    if(stat(so,&st)!=0){ snprintf(why,wn,"%s",g_ascii?"stat failed":"stat 실패"); return 2; }
     char cpath[256];
     snprintf(cpath,sizeof cpath,"/var/tmp/cub_top.dw-%d-%lld-%lld.tbl",
              (int)geteuid(),(long long)st.st_size,(long long)st.st_mtime);
@@ -2201,31 +2208,31 @@ static void method_b(proc_t *P){
        A table of another build without recorded sizes is never adopted. */
     long long want=prm_get("data_buffer_pages");
     long mxc=prm_get("max_clients");
-    int32_t nbuf=0; int tried=0; char lastwhy[96]; snprintf(lastwhy,sizeof lastwhy,"후보 없음");
+    int32_t nbuf=0; int tried=0; char lastwhy[96]; snprintf(lastwhy,sizeof lastwhy,g_ascii?"no candidate":"후보 없음");
     /* One candidate through the gates; exact_ = the table is of this very build.  Macro-
        internal names use tb_/tm_ so they cannot collide with the caller's argument. */
     #define TRY_BTAB(bt_,exact_) do{ const btab_t*tb_=(bt_); int tm_=(exact_); tried++; \
         memset(B.sym,0,sizeof B.sym); memset(B.ssz,0,sizeof B.ssz); \
         if(sym_lookup(so,tb_->syms,B.sym,S_NSYM,B.ssz)<=0){ \
-            snprintf(lastwhy,sizeof lastwhy,"[%s] 심볼 조회 실패",tb_->tag); break; } \
+            snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] symbol lookup failed":"[%s] 심볼 조회 실패",tb_->tag); break; } \
         if(!B.sym[S_PGBUF]){ \
-            snprintf(lastwhy,sizeof lastwhy,"[%s] pgbuf_Pool 심볼 없음",tb_->tag); break; } \
+            snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] no pgbuf_Pool symbol":"[%s] pgbuf_Pool 심볼 없음",tb_->tag); break; } \
         if(tb_->off_pgbuf_nbuf<0){ \
-            snprintf(lastwhy,sizeof lastwhy,"[%s] num_buffers 오프셋 없음",tb_->tag); break; } \
+            snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] no num_buffers offset":"[%s] num_buffers 오프셋 없음",tb_->tag); break; } \
         { const int offs[]={tb_->off_pgbuf_nbuf,tb_->off_xc_entries,tb_->off_xc_usage, \
                             tb_->off_xc_clone,tb_->off_qlist_npages,tb_->off_qpool_nent, \
                             tb_->off_lf_alloccnt,tb_->off_lk_ntran}; \
           int bad=0; \
           for(unsigned i2=0;i2<sizeof offs/sizeof offs[0];i2++) \
               if(offs[i2]>=0 && (offs[i2]&3)) bad=1; \
-          if(bad){ snprintf(lastwhy,sizeof lastwhy,"[%s] 오프셋 정렬 위반",tb_->tag); break; } } \
+          if(bad){ snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] offset misaligned":"[%s] 오프셋 정렬 위반",tb_->tag); break; } } \
         /* Root symbol sizes: a struct of another size is another layout */ \
         { int known_=0, bad_=-1; \
           for(int i2=0;i2<S_NSYM;i2++) if(tb_->ssz[i2]>0 && B.sym[i2]){ \
               known_++; if(B.ssz[i2]!=(unsigned long)tb_->ssz[i2]){ bad_=i2; break; } } \
-          if(bad_>=0){ snprintf(lastwhy,sizeof lastwhy,"[%s] 심볼 크기 불일치 %s %lu≠%d",tb_->tag, \
+          if(bad_>=0){ snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] symbol size mismatch %s %lu!=%d":"[%s] 심볼 크기 불일치 %s %lu≠%d",tb_->tag, \
                                 SYMN10[bad_],B.ssz[bad_],tb_->ssz[bad_]); break; } \
-          if(!tm_ && !known_){ snprintf(lastwhy,sizeof lastwhy,"[%s] 다른 빌드의 표 — 심볼 크기 기록 없음",tb_->tag); break; } } \
+          if(!tm_ && !known_){ snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] table of another build - no symbol sizes recorded":"[%s] 다른 빌드의 표 — 심볼 크기 기록 없음",tb_->tag); break; } } \
         nbuf=rd_i32(P->pid,B.base+B.sym[S_PGBUF]+tb_->off_pgbuf_nbuf); \
         if(want>0){ \
             if(nbuf!=(int32_t)want){ \
@@ -2233,22 +2240,22 @@ static void method_b(proc_t *P){
                          tb_->tag,nbuf,want); \
                 break; } \
         } else if(!tm_){ \
-            snprintf(lastwhy,sizeof lastwhy,"[%s] paramdump 없음 — 다른 빌드의 표는 미검증 채택 불가",tb_->tag); \
+            snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] no paramdump - a table of another build is not adopted unverified":"[%s] paramdump 없음 — 다른 빌드의 표는 미검증 채택 불가",tb_->tag); \
             break; } \
         /* Without paramdump, sanity-check the value instead: num_buffers is \
            preallocated at boot, so it cannot be 0 or implausibly large on a live server. */ \
         if(nbuf<=0 || nbuf>(1<<26)){ \
-            snprintf(lastwhy,sizeof lastwhy,"[%s] num_buffers=%d 위생 위반(paramdump 부재)",tb_->tag,nbuf); \
+            snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] num_buffers=%d implausible (no paramdump)":"[%s] num_buffers=%d 위생 위반(paramdump 부재)",tb_->tag,nbuf); \
             break; } \
         /* Secondary anchors, for every candidate: the conn max symbol and lk num_trans \
            against the range paramdump's max_clients implies */ \
         if(want>0 && mxc>0){ \
             if(B.sym[S_CONNMAX]){ int32_t mx_=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]); \
                 if(!(mx_>=mxc && mx_<=mxc*2+32)){ \
-                    snprintf(lastwhy,sizeof lastwhy,"[%s] 이차 앵커 불일치(conn max)",tb_->tag); break; } } \
+                    snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] secondary anchor mismatch (conn max)":"[%s] 이차 앵커 불일치(conn max)",tb_->tag); break; } } \
             if(tb_->off_lk_ntran>=0 && B.sym[S_LKGL]){ int32_t nt_=rd_i32(P->pid,B.base+B.sym[S_LKGL]+tb_->off_lk_ntran); \
                 if(!(nt_>=mxc && nt_<=mxc+16)){ \
-                    snprintf(lastwhy,sizeof lastwhy,"[%s] 이차 앵커 불일치(lk num_trans)",tb_->tag); break; } } \
+                    snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] secondary anchor mismatch (lk num_trans)":"[%s] 이차 앵커 불일치(lk num_trans)",tb_->tag); break; } } \
         } \
         g_bt=tb_; B.ok=1; }while(0)
     /* A file or DWARF table: symbol names differ by release family (11.2+ mangled vs 10.x
@@ -2258,7 +2265,7 @@ static void method_b(proc_t *P){
             (bt_)->syms = si_ ? (const char**)SYMN10 : (const char**)SYMN; \
             TRY_BTAB((bt_),(exact_)); \
             if(si_==0 && !B.ok) snprintf(why1_,sizeof why1_,"%s",lastwhy); } \
-        if(!B.ok && why1_[0] && strstr(lastwhy,"심볼 조회")) snprintf(lastwhy,sizeof lastwhy,"%s",why1_); }while(0)
+        if(!B.ok && why1_[0] && (strstr(lastwhy,"심볼 조회")||strstr(lastwhy,"symbol lookup"))) snprintf(lastwhy,sizeof lastwhy,"%s",why1_); }while(0)
 
     /* 1a. Builtin table of this very build */
     for(int ti=0; ti<NBTABS && !B.ok; ti++)
@@ -2291,8 +2298,8 @@ static void method_b(proc_t *P){
                 if(!stat(cand,&ds)&&S_ISDIR(ds.st_mode)){
                     if(offs_dir_pick(cand,g_cver,resolved,sizeof resolved)) rst=1;
                     else if(g_offs_file[0])   /* No matching table in the given directory leaves a reason */
-                        snprintf(lastwhy,sizeof lastwhy,
-                                 "--offsets 디렉터리에 %.20s 와 맞는 표 없음",g_cver);
+                        snprintf(lastwhy,sizeof lastwhy,g_ascii?"no table for %.20s in the --offsets directory"
+                                 :"--offsets 디렉터리에 %.20s 와 맞는 표 없음",g_cver);
                 } else { snprintf(resolved,sizeof resolved,"%s",cand); rst=1; r_explicit=(g_offs_file[0]!=0); }
             }
         }
@@ -2306,7 +2313,7 @@ static void method_b(proc_t *P){
             fst=2;
             if(rst==1 && offs_file_load(resolved,fv,fss)>0){
                 fst=1; if(!offs_tbl_version(resolved,fver,sizeof fver)) fver[0]=0; }
-            else if(rst==1) snprintf(lastwhy,sizeof lastwhy,"--offsets 파일을 읽을 수 없음");
+            else if(rst==1) snprintf(lastwhy,sizeof lastwhy,"%s",g_ascii?"--offsets file not readable":"--offsets 파일을 읽을 수 없음");
             if(fst!=1 && g_cver[0] && offs_embedded_load(g_cver,fv,embver,sizeof embver,fss)>0){
                 fst=1; rst=3; snprintf(fver,sizeof fver,"%s",embver); }
         }
@@ -2354,7 +2361,7 @@ static void method_b(proc_t *P){
             memset(dwbt.ssz,0,sizeof dwbt.ssz);   /* From this very .so: nothing to compare */
             TRY_BOTH(&dwbt,1);
         } else if(dwst==2 && dwwhy[0])
-            snprintf(lastwhy,sizeof lastwhy,"DWARF: %.56s",dwwhy);
+            snprintf(lastwhy,sizeof lastwhy,"DWARF: %s",u8n(dwwhy,56));
     }
 
     /* 3. Tables of another build, on recorded symbol sizes and paramdump */
@@ -2388,9 +2395,9 @@ static void method_b(proc_t *P){
     }
     if(!B.ok){
         snprintf(B.why,sizeof B.why,
-                 g_ascii?"%d tables+DWARF+probe rejected (detected %.12s) - %.48s"
-                        :"표 %d개+DWARF+탐사 탈락(감지 %.12s) — %.48s",
-                 tried,g_cver[0]?g_cver:"?",lastwhy);
+                 g_ascii?"%d tables+DWARF+probe rejected (detected %.12s) - %s"
+                        :"표 %d개+DWARF+탐사 탈락(감지 %.12s) — %s",
+                 tried,g_cver[0]?g_cver:"?",u8n(lastwhy,48));
         return;
     }
     if(!B.partial)   /* Do not overwrite the probing mode's own reason */
@@ -3927,6 +3934,7 @@ static int g_rep_i=0,g_rep_n=0;       /* Replay progress, shown in the status li
 static time_t g_rep_ts=0;             /* The frame's recorded time, shown instead of now */
 static double g_ts_frac=-1;           /* The frame's time in fractional seconds for ts_epoch_ms; <0 = ts_epoch */
 static char g_rp_tbl[32]="";          /* Replay: the recording's heapB.table, which this host never adopted */
+static const char *tq(const char *s);   /* quoted dump value: escaped, valid UTF-8 */
 static int  g_rp_have_a=0;            /* Replay: the frame carries method A (measured, possibly 0 chunks) */
 /* v as printf("%.*f") prints it: a key derived from printed keys then replays exactly */
 static double rnd_as_printed(double v,int dec){ char b[64]; snprintf(b,sizeof b,"%.*f",dec,v); return strtod(b,NULL); }
@@ -4895,7 +4903,8 @@ static void vd_capacity_shown(char*o,size_t n,const char**col){
 /* ---- Four-panel definition, shared by the plots and the dashboard ---- */
 static int g_plot_zoom=0;   /* 0 is the four-panel view; 1-4 give that panel the full height */
 static int g_sb_per=1;      /* Rows per cause-metric series when zoomed */
-static const pser_t PL_LOAD={HK_LOAD1,227,4,"load(1분)"};
+static const pser_t *pl_load(void){   /* the label follows the language toggle */
+    static pser_t p={HK_LOAD1,227,4,NULL}; p.lab=g_ascii?"load(1m)":"load(1분)"; return &p; }
 /* Host overlay on panels 3 and 4.  Its scope differs from the main series (this
    instance), so it is drawn as a secondary overlay; a solid line on the same axis
    confuses "my value" with "the environment".  The overlay is normalized to its
@@ -4987,7 +4996,7 @@ static void pl_panel(int idx,int y,int W,int ch,int ncores,
                                                :"1 호스트 리소스 · CPU 코어 · RAM · 장치 · load 겹침 (전체 프로세스)");
         if(hdr_r&&hdr_r[0]) snprintf(t2,sizeof t2,"%s",hdr_r);
         else snprintf(t2,sizeof t2,"%s",g_ascii?"host-wide":"호스트 전체");
-        cv_panel2(0,y,W,ch,t1,t2,s2,n,0,1,NULL,&PL_LOAD,vb,vc,1,NULL,0,1);
+        cv_panel2(0,y,W,ch,t1,t2,s2,n,0,1,NULL,pl_load(),vb,vc,1,NULL,0,1);
         break; }
     case 2: {   /* This instance's memory */
         n=pl_series_A(s2,1);
@@ -5001,7 +5010,7 @@ static void pl_panel(int idx,int y,int W,int ch,int ncores,
                  HN>0&&HS[HN-1].ram>0?HS[HN-1].cub/HS[HN-1].ram*100:0);
         snprintf(t1,sizeof t1,"%s",g_ascii?"2 instance memory · why and where does it grow · reserved(blue) vs resident · load overlay"
                                           :"2 인스턴스 메모리 · 왜, 어디서 느나 · 할당(청) vs 상주 · load 겹침");
-        cv_panel2(0,y,W,ch,t1,t2,s2,n,0,0,NULL,&PL_LOAD,vb,vc,1,bars,nb,bper);
+        cv_panel2(0,y,W,ch,t1,t2,s2,n,0,0,NULL,pl_load(),vb,vc,1,bars,nb,bper);
         break; }
     case 3: {   /* This instance: volume to buffer */
         s2[n].key=HK_RBPS;  s2[n].col=203; s2[n].fmt=2; s2[n].lab=g_ascii?"disk read":"디스크 읽기"; n++;
@@ -5449,7 +5458,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         double d=HN>1?HS[HN-1].srv-HS[0].srv:0, w=vd_win(), rate=w>0?d/w*3600:0;
         if(g_ascii) snprintf(t2,sizeof t2,"trend %s · [p]",wtxt); else snprintf(t2,sizeof t2,"메모리 추이 %s · [p]",wtxt);
         char rt[32]; snprintf(rt,sizeof rt,"%s%s/h",rate>=0?"+":"-",H(rate<0?-rate:rate));
-        cv_panel2(W/2,ty,W-W/2,3,t2,rt,s2,n,0,0,NULL,&PL_LOAD,NULL,NULL,1,NULL,0,1);
+        cv_panel2(W/2,ty,W-W/2,3,t2,rt,s2,n,0,0,NULL,pl_load(),NULL,NULL,1,NULL,0,1);
         /* The verdict takes one full-width row; in a half it would lose its conclusion */
         cv_put(2,y,cutf(vb,W-4),vc); y+=1;
     }
@@ -5771,7 +5780,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         char rt[64];
         if(mj>0) snprintf(rt,sizeof rt,"%s%s/h · mf%.0f/s",rate>=0?"+":"-",H(rate<0?-rate:rate),mj);
         else     snprintf(rt,sizeof rt,"%s%s/h",rate>=0?"+":"-",H(rate<0?-rate:rate));
-        cv_panel2(0,y,W,3,t2,rt,s2,n,0,0,NULL,&PL_LOAD,vb,vc,1,NULL,0,1);
+        cv_panel2(0,y,W,3,t2,rt,s2,n,0,0,NULL,pl_load(),vb,vc,1,NULL,0,1);
         y+=8;
     }
     /* ---- I/O; absolute gauge floors of 8MB/s and 200 IOPS stop idle flicker ---- */
@@ -6396,11 +6405,11 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                          double cpu_pct,int ncpu,int IO_dthr,int IO_nthr){
     double mt=M->total*1024.0, av=M->avail*1024.0;
     /* ts_epoch_ms: the sample interval is sub-second, so a recording needs more than ts_epoch */
-    printf("ts=\"%s\" ts_epoch=%ld ts_epoch_ms=%.0f\n",ts,tsec,(g_ts_frac>=0?g_ts_frac:(double)tsec)*1000.0);
+    printf("ts=\"%s\" ts_epoch=%ld ts_epoch_ms=%.0f\n",tq(ts),tsec,(g_ts_frac>=0?g_ts_frac:(double)tsec)*1000.0);
     printf("caps.vm_readv=%d caps.mem_pread=%d caps.rollup=%d caps.proc_io=%d\n",
            CAP.vm_readv,CAP.mem_pread,CAP.rollup,CAP.proc_io);
     printf("perm.limited=%d",g_perm_limited);
-    if(g_perm_why[0]) printf(" perm.reason=\"%s\"",g_perm_why);
+    if(g_perm_why[0]) printf(" perm.reason=\"%s\"",tq(g_perm_why));
     printf("\n");
     if(P->reg_dropped || g_disk_dropped)
         printf("limits.regions_dropped=%d limits.regions_max=%d limits.disks_dropped=%d limits.disks_max=%d\n",
@@ -6432,9 +6441,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     /* The detected CUBRID version and the adopted offset table - the only mechanical way to
        check support status on a foreign deployment. */
     printf("cubrid.version=\"%s\" heapB.table=\"%s\" heapB.lib=\"%s\"\n",
-           g_cver[0]?g_cver:"unknown",
-           !B.ok?"-":(g_replaying&&g_rp_tbl[0])?g_rp_tbl:(B.partial?"probe-runtime":g_bt->tag),
-           g_so_path[0]?g_so_path:"-");   /* A map_files path means the running inode was read */
+           tq(g_cver[0]?g_cver:"unknown"),
+           tq(!B.ok?"-":(g_replaying&&g_rp_tbl[0])?g_rp_tbl:(B.partial?"probe-runtime":g_bt->tag)),
+           tq(g_so_path[0]?g_so_path:"-"));   /* A map_files path means the running inode was read */
     printf("server.up=%d\n",P->pid<0?0:1);
     /* All instances.  The detailed keys (server, region) cover only the current one, so the
        other databases' totals are available nowhere else.  Keys are namespaced by db. */
@@ -6486,7 +6495,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         printf("\n");
     }
     printf("heapB.enabled=%d heapB.reason=\"%s\" heapB.total_bytes=%.0f heapB.excluded=%d\n",
-           B.ok,B.why,B.total,B.n_bad);
+           B.ok,tq(B.why),B.total,B.n_bad);
     for(int i=0;i<B.n;i++)
     {   const char *sl=slugify(B.it[i].name);
         char kb[64];
@@ -6497,7 +6506,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     /* Capacity axis: demand, ceiling, headroom.  Snapshot-based estimate. */
     printf("cap.aggregate_ms=%.1f cap.over_budget=%d cap.budget_ms=%.0f\n",CAP2.ms,CAP2.over_budget,(double)CAP_BUDGET_MS);
     printf("cap.perfmon_counters_running=%d cap.hit_source=\"%s\" cap.reason=\"%s\"\n",
-           CAP2.ps_ok,CAP2.hit_src,CAP2.ps_why);
+           CAP2.ps_ok,tq(CAP2.hit_src),tq(CAP2.ps_why));
     if(!CAP2.over_budget){
         if(CAP2.hit_pct>=0)       printf("cap.buffer_hit_pct=%.2f\n",CAP2.hit_pct);
         if(CAP2.turnover_pct>=0){ printf("cap.turnover_pct=%.2f cap.miss_pages_per_s=%.0f\n",CAP2.turnover_pct,CAP2.miss_pps);
@@ -6506,15 +6515,15 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         if(CAP2.await_ms>=0)      printf("cap.await_ms=%.2f cap.read_await_ms=%.2f cap.write_await_ms=%.2f\n",
                                          CAP2.await_ms,CAP2.r_await_ms<0?0:CAP2.r_await_ms,CAP2.w_await_ms<0?0:CAP2.w_await_ms);
         if(CAP2.qdepth>=0)        printf("cap.queue_depth=%.2f\n",CAP2.qdepth);
-        printf("cap.device=\"%s\" cap.device_via=\"%s\" cap.device_reason=\"%s\"\n",CAP2.dev,
-               g_dk_via==1?"st_dev":g_dk_via==2?"mount":g_dk_via==3?"statfs_fsid":"",CAP2.dev_why);
+        printf("cap.device=\"%s\" cap.device_via=\"%s\" cap.device_reason=\"%s\"\n",tq(CAP2.dev),
+               g_dk_via==1?"st_dev":g_dk_via==2?"mount":g_dk_via==3?"statfs_fsid":"",tq(CAP2.dev_why));
         printf("cap.dev_iops=%.0f cap.proc_iops=%.0f\n",CAP2.dev_iops,rnd_as_printed(CAP2.riops,0)+rnd_as_printed(CAP2.wiops,0));
         /* I/O profile: ceilings are compared only within this cell (block size x read share) */
         printf("cap.req_kb=%.1f cap.read_ratio=%.2f cap.profile=\"%s/%s\"\n",
                CAP2.req_kb,CAP2.read_ratio,CAP_BS_NAME[CAP2.prof_bs],CAP_RW_NAME[CAP2.prof_rw]);
         { int nc=0; for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++) if(g_cap_mtx[b][r].valid) nc++;
           printf("cap.ceiling_cells=%d\n",nc);
-          if(g_cap_devid[0]) printf("cap.ceiling_device_id=\"%s\"\n",g_cap_devid);
+          if(g_cap_devid[0]) printf("cap.ceiling_device_id=\"%s\"\n",tq(g_cap_devid));
           for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
               const cap_cell_t*cc=&g_cap_mtx[b][r]; if(!cc->valid) continue;
               printf("cap.cell%d%d.profile=\"%s/%s\" cap.cell%d%d.iops=%.0f cap.cell%d%d.util_pct=%.1f"
@@ -6532,9 +6541,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                                          CAP2.log_iowrite_ps,CAP2.commit_ps);
     }
     { char vb[320]; const char*vc=VD_INFO; vd_capacity_shown(vb,sizeof vb,&vc);
-      printf("cap.verdict=\"%s\"\n",vb); }
+      printf("cap.verdict=\"%s\"\n",tq(vb)); }
     /* BCB direct read, graded as an estimate (a latch-free snapshot).  The keys share their source (the dump) with volmap --bufmap. */
-    printf("pgbuf.enabled=%d pgbuf.reason=\"%s\"\n",PG.ok,PG.why);
+    printf("pgbuf.enabled=%d pgbuf.reason=\"%s\"\n",PG.ok,tq(PG.why));
     if(PG.ok){
         printf("pgbuf.num_buffers=%d pgbuf.resident=%d pgbuf.dirty=%d pgbuf.flushing=%d"
                " pgbuf.zone1_hot=%d pgbuf.zone2_warm=%d pgbuf.zone3_cold=%d pgbuf.zone_void=%d pgbuf.zone_free=%d"
@@ -6559,7 +6568,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
             printf("\n");
         }
     }
-    printf("pgbuf.engine.enabled=%d pgbuf.engine.reason=\"%s\"\n",AG.ok,AG.ok?(g_ascii?"engine aggregates":"엔진 집계"):AG.why);
+    printf("pgbuf.engine.enabled=%d pgbuf.engine.reason=\"%s\"\n",AG.ok,tq(AG.ok?(g_ascii?"engine aggregates":"엔진 집계"):AG.why));
     if(AG.ok)
         printf("pgbuf.engine.num_buffers=%d pgbuf.engine.lists=%d pgbuf.engine.lists_shared=%d pgbuf.engine.lru_pages=%ld"
                " pgbuf.engine.zone1=%ld pgbuf.engine.zone2=%ld pgbuf.engine.zone3=%ld pgbuf.engine.victim_candidates=%ld"
@@ -6586,7 +6595,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
        The same value that appears right of the iowait row on screen. */
     printf("server.d_threads=%d server.threads_total=%d\n",IO_dthr,IO_nthr);
     /* Why paramdump could not start - the only clue to why the parameter keys are empty. */
-    if(g_pd_why[0]) printf("param.skipped_reason=\"%s\"\n",g_pd_why);
+    if(g_pd_why[0]) printf("param.skipped_reason=\"%s\"\n",tq(g_pd_why));
     /* io.* comes from /proc/<pid>/io and belongs to the current instance, while the device
        figures come from diskstats and are host-wide - separate key prefixes keep the
        two scopes from being confused. */
@@ -6612,6 +6621,29 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     (void)av;
 }
 
+/* A quoted value for -d/--json/--record: \" \\ and control characters escaped (JSON's
+   escapes, so json_from_terse copies them through and rp_find undoes them), and any byte
+   that is not part of a valid UTF-8 sequence - a Korean reason cut mid-character by a fixed
+   buffer - replaced by '?', so the stream stays valid UTF-8.  Ring of 8 results. */
+static const char *tq(const char *s){
+    static char ring[8][4096]; static int k=0; char *o=ring[k++&7]; size_t n=0;
+    const unsigned char *u=(const unsigned char*)(s?s:"");
+    while(*u && n+8<sizeof ring[0]){
+        unsigned c=*u; int len = c<0x80?1 : (c&0xE0)==0xC0?2 : (c&0xF0)==0xE0?3 : (c&0xF8)==0xF0?4 : 0;
+        int ok = len>0 && !(len==2 && c<0xC2) && !(len==4 && c>0xF4);
+        for(int i=1;ok && i<len;i++) if((u[i]&0xC0)!=0x80) ok=0;
+        if(!ok){ o[n++]='?'; u++; continue; }
+        if(len>1){ memcpy(o+n,u,(size_t)len); n+=(size_t)len; u+=len; continue; }
+        if(c=='"'||c=='\\'){ o[n++]='\\'; o[n++]=(char)c; }
+        else if(c=='\n'){ o[n++]='\\'; o[n++]='n'; }
+        else if(c=='\t'){ o[n++]='\\'; o[n++]='t'; }
+        else if(c=='\r'){ o[n++]='\\'; o[n++]='r'; }
+        else if(c<0x20) n+=(size_t)snprintf(o+n,7,"\\u%04x",c);
+        else o[n++]=(char)c;
+        u++;
+    }
+    o[n]=0; return o;
+}
 /* ---- JSON output (--json) ----
  * terse (key=value) is the single source: producing the same content twice would
  * drift, so terse output is mechanically converted, keeping keys, values and order
@@ -6620,6 +6652,16 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
 static void json_escape_out(FILE*o,const char*s,size_t n){
     for(size_t i=0;i<n;i++){ unsigned char c=(unsigned char)s[i];
         if(c=='"'||c=='\\') fprintf(o,"\\%c",c);
+        else if(c<0x20) fprintf(o,"\\u%04x",c);
+        else fputc(c,o); }
+}
+/* A quoted terse value carries tq()'s escapes, which are JSON's: kept as they are, a stray
+   backslash or control byte escaped */
+static void json_copy_escaped(FILE*o,const char*s,size_t n){
+    for(size_t i=0;i<n;i++){ unsigned char c=(unsigned char)s[i];
+        if(c=='\\'){ if(i+1<n && strchr("\"\\/bfnrtu",s[i+1])){ fputc('\\',o); fputc(s[++i],o); }
+                      else fputs("\\\\",o); }
+        else if(c=='"') fputs("\\\"",o);
         else if(c<0x20) fprintf(o,"\\u%04x",c);
         else fputc(c,o); }
 }
@@ -6656,10 +6698,34 @@ static int rp_find(const char *txt,const char *key,char *out,size_t on){
     const char *v=p+pl;
     while(*v==' '||*v=='\t') v++;
     size_t vl;
-    if(*v=='"'){
-        v++; const char *e=v;
-        while(*e && *e!='"'){ if(*e=='\\' && e[1]) e++; e++; }
-        vl=(size_t)(e-v);
+    if(*v=='"'){                     /* a JSON string: its escapes undone */
+        v++; size_t n=0;
+        while(*v && *v!='"' && n+1<on){
+            if(*v!='\\' || !v[1]){              /* a whole UTF-8 character, or stop */
+                unsigned c=(unsigned char)*v; size_t l=c<0x80?1:(c&0xE0)==0xC0?2:(c&0xF0)==0xE0?3:(c&0xF8)==0xF0?4:1;
+                if(n+l>=on) break;
+                for(size_t i=0;i<l && *v;i++) out[n++]=*v++;
+                continue; }
+            if(n+3>=on) break;
+            v++;
+            switch(*v){
+            case 'n': out[n++]='\n'; v++; break;
+            case 't': out[n++]='\t'; v++; break;
+            case 'r': out[n++]='\r'; v++; break;
+            case 'b': out[n++]='\b'; v++; break;
+            case 'f': out[n++]='\f'; v++; break;
+            case 'u': { unsigned cp=0; int k=1;
+                        for(;k<=4 && isxdigit((unsigned char)v[k]);k++)
+                            cp=cp*16+(unsigned)(isdigit((unsigned char)v[k])?v[k]-'0':(tolower((unsigned char)v[k])-'a'+10));
+                        if(k<=4){ out[n++]='?'; v++; break; }
+                        if(cp<0x80) out[n++]=(char)cp;
+                        else if(cp<0x800){ out[n++]=(char)(0xC0|cp>>6); out[n++]=(char)(0x80|(cp&63)); }
+                        else { out[n++]=(char)(0xE0|cp>>12); out[n++]=(char)(0x80|((cp>>6)&63)); out[n++]=(char)(0x80|(cp&63)); }
+                        v+=5; break; }
+            default:  out[n++]=*v++; break;      /* \" \\ \/ */
+            }
+        }
+        out[n]=0; return 1;
     } else {
         const char *e=v;
         while(*e && *e!=',' && *e!='}' && *e!='\n' && *e!='\r') e++;
@@ -7158,7 +7224,7 @@ static void json_from_terse(FILE*tf,FILE*o){
         if(*p!='='){ continue; }               /* Tokens without '=' are discarded (there should be none) */
         size_t kl=(size_t)(p-k); p++;
         char *v=p; size_t vl; int quoted=0;
-        if(*p=='"'){ quoted=1; v=++p; while(*p && *p!='"') p++;
+        if(*p=='"'){ quoted=1; v=++p; while(*p && *p!='"'){ if(*p=='\\' && p[1]) p++; p++; }
                      vl=(size_t)(p-v); if(*p=='"') p++; }
         else       { while(*p && *p!=' ' && *p!='\n' && *p!='\r') p++;
                      vl=(size_t)(p-v); }
@@ -7173,6 +7239,7 @@ static void json_from_terse(FILE*tf,FILE*o){
                 if(end==tmp+vl && d==d && d<1e308 && d>-1e308) numeric=1; }
         }
         if(numeric){ fwrite(v,1,vl,o); }
+        else if(quoted){ fputc('"',o); json_copy_escaped(o,v,vl); fputc('"',o); }   /* tq() already escaped it */
         else { fputc('"',o); json_escape_out(o,v,vl); fputc('"',o); }
     }
     fputs("\n}\n",o); free(b);
@@ -8341,7 +8408,7 @@ int main(int argc,char **argv){
         return 1;
     }
     if(terse){ char ou[256]; opts_used_str(argc,argv,ou,sizeof ou);
-               printf("opts.used=\"%s\"\n",ou); }
+               printf("opts.used=\"%s\"\n",tq(ou)); }
     else    { print_opts_line(argc,argv); putchar('\n'); }   /* Blank line between the options and the body */
     if(terse){
         render_terse(&P,&M,&T,with_a,IO.rb,IO.wb,IO.ri,IO.wi,
