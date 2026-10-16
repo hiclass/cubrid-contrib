@@ -39,7 +39,8 @@ user_size = iopagesize - sizeof(prv) - sizeof(watermark)   (16KB 페이지 → 1
 자기발견 절차: 예약 섹터의 **첫 페이지**만 프로브(prv.ptype==PAGE_FTAB) →
 FILE_HEADER 파싱 → **self VFID == 자기 VPID** 일치 시 파일 확정. `file_create`의 할당
 순서상 파일 헤더는 자기 첫 예약 섹터의 첫 페이지에 위치하므로 섹터당 1페이지 프로브로
-충분하다 (`--full-sweep`은 예외 대비 안전망).
+대개 충분하다. 예외(vacuum 이 아직 dropped 로 보는 VFID 를 피해 헤더가 뒤 페이지에 놓인 파일)는
+1차 뒤 소유자 미상 섹터의 전 페이지를 보는 2차 패스가 찾는다 — 256개 이하면 자동, `--full-sweep` 이면 전부.
 
 ## 4. 파일 섹터 테이블 (extdata 체인)
 

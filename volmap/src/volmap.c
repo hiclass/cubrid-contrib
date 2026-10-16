@@ -228,6 +228,8 @@ struct volmap_ctx
   unsigned refresh_gen;
   char db_release[32];
   bool release_unsupported;	/* the log names a release before 10.1 (warned at start and at exit) */
+  int shutdown_state;		/* log header is_shutdown: 1 clean, 0 not clean, -1 unknown (no log) */
+  long sweep_left;		/* unowned sectors the automatic second pass did not probe (over the cap) */
   VOLMAP_FILE *files;
   int nfiles;
   int width;
@@ -371,9 +373,15 @@ volmap_path_from_vinf (const char *vinf_path, int want, char *out, size_t outsz)
 }
 
 /* Read the active log header and return its release string in rel[] ("" if not
-   found). */
+   found), and in *shut its is_shutdown flag: 1 shut down cleanly, 0 not (the server
+   is running, or stopped without a clean shutdown and recovery has not run yet),
+   -1 unknown (no log, or the fields do not check out).
+   From 10.1 to develop the fields after db_release are fixed: db_release[15],
+   float db_compatibility (at +16), PGLENGTH db_iopagesize and db_logpagesize (+20,
+   +22), then is_shutdown at +24 (an int in 10.1, a bool after).  The two page
+   sizes confirm the position before the flag is believed. */
 static bool
-volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
+volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz, int *shut)
 {
   char path[PATH_MAX];
   unsigned char buf[512];
@@ -382,6 +390,7 @@ volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
   FILE *fp;
 
   rel[0] = '\0';
+  *shut = -1;
   if (vinf_path == NULL || vinf_path[0] == '\0')
     {
       return false;
@@ -433,6 +442,18 @@ volmap_read_db_release (const char *vinf_path, char *rel, size_t relsz)
 	    }
 	  memcpy (rel, buf + i, len);
 	  rel[len] = '\0';
+	  if (i + 25 <= n)
+	    {
+	      INT16 iop, logp;
+
+	      memcpy (&iop, buf + i + 20, sizeof (iop));
+	      memcpy (&logp, buf + i + 22, sizeof (logp));
+	      if ((iop == 4096 || iop == 8192 || iop == 16384) && (logp == 4096 || logp == 8192 || logp == 16384)
+		  && buf[i + 24] <= 1)
+		{
+		  *shut = buf[i + 24];
+		}
+	    }
 	  return true;
 	}
     }
@@ -492,6 +513,34 @@ volmap_warn_unsupported (const VOLMAP_CTX * ctx)
     {
       fprintf (stderr, "volmap: WARNING: database release %s is not supported - volmap reads 10.1 and later;"
 	       " volumes of this release are listed as skipped, not as damaged\n", ctx->db_release);
+    }
+}
+
+/* What the log says about how the database last stopped.  Not a judgement of whether
+   it runs now: is_shutdown is 0 both while the server runs and after a crash. */
+static const char *
+volmap_shutdown_name (int st)
+{
+  return (st == 1) ? "clean" : (st == 0) ? "not_clean" : "unknown";
+}
+
+static void
+volmap_print_shutdown (const VOLMAP_CTX * ctx, FILE * fp)
+{
+  if (ctx->shutdown_state == 1)
+    {
+      fprintf (fp, "  log: release %s, shut down cleanly\n", ctx->db_release);
+    }
+  else if (ctx->shutdown_state == 0)
+    {
+      fprintf (fp, "  log: release %s, NOT shut down cleanly - the server is running, or it stopped without a clean"
+	       " shutdown and restart recovery has not run: volumes may lack changes that are only in the log, and"
+	       " may hold torn pages that restart replaces from the double write buffer\n", ctx->db_release);
+    }
+  else
+    {
+      fprintf (fp, "  log: %s - shutdown state unknown\n",
+	       ctx->db_release[0] != '\0' ? "header fields not recognised" : "active log not found or unreadable");
     }
 }
 
@@ -1889,26 +1938,45 @@ volmap_discover_step (VOLMAP_CTX * ctx, long budget, bool user_idle)
 	}
     }
   ctx->scan_active = false;
-  if (ctx->full_sweep)
-    {
-      (void) volmap_discover_files_from (ctx, 1);	/* pass 2 safety net; pass 0 already done incrementally */
-    }
+  (void) volmap_discover_files_from (ctx, 1);	/* pass B; pass A was done incrementally */
   return true;
 }
 
 /*
  * volmap_discover_files () - self-discovery without server/catalog.
  *
- * A file header page is the first page a file allocates from its freshly reserved sector, so pass A
- * probes only the first page of every reserved sector (prv is prefetched with posix_fadvise and read
- * in ascending offset order). --full-sweep adds pass B probing every page of still-unowned sectors.
+ * A file header page is usually the first page a file allocates from its freshly reserved sector, so
+ * pass A probes only the first page of every reserved sector (prv is prefetched with posix_fadvise and
+ * read in ascending offset order).  Not always: a heap or B-tree created while vacuum still holds a
+ * dropped file's VFID takes a later page.  Pass B therefore probes every page of the sectors pass A
+ * left without an owner - on its own when there are at most VOLMAP_AUTO_SWEEP_MAX of them (a few on a
+ * healthy database), all of them with --full-sweep.
  */
+#define VOLMAP_AUTO_SWEEP_MAX 256	/* sectors: at most 256MB read with 16KB pages */
+
+static long
+volmap_unowned_sectors (VOLMAP_CTX * ctx)
+{
+  long n = 0;
+  int vi;
+  DKNSECTS s;
+
+  for (vi = 0; vi < ctx->nvols; vi++)
+    {
+      for (s = 0; s < ctx->vols[vi].nsect_total; s++)
+	{
+	  n += (ctx->vols[vi].w_stab[s] && ctx->vols[vi].w_owner[s] < 0) ? 1 : 0;
+	}
+    }
+  return n;
+}
+
 static int
 volmap_discover_files_from (VOLMAP_CTX * ctx, int first_pass)
 {
   int vi, pass;
   char *iopage;
-  int npasses = ctx->full_sweep ? 2 : 1;
+  int npasses = 2;
 
   if (ctx->files == NULL)
     {
@@ -1921,6 +1989,16 @@ volmap_discover_files_from (VOLMAP_CTX * ctx, int first_pass)
 
   for (pass = first_pass; pass < npasses; pass++)
     {
+      if (pass == 1 && !ctx->full_sweep)
+	{
+	  long left = volmap_unowned_sectors (ctx);
+
+	  ctx->sweep_left = (left > VOLMAP_AUTO_SWEEP_MAX) ? left : 0;
+	  if (left == 0 || left > VOLMAP_AUTO_SWEEP_MAX)
+	    {
+	      break;		/* nothing to look for, or more than a quick look: --full-sweep */
+	    }
+	}
       for (vi = 0; vi < ctx->nvols; vi++)
 	{
 	  VOLMAP_VOLUME *vol = &ctx->vols[vi];
@@ -1965,6 +2043,42 @@ volmap_discover_files (VOLMAP_CTX * ctx)
   return volmap_discover_files_from (ctx, 0);
 }
 
+/* DONTNEED the 4KB OS pages in [o0, o1) that were not cached when the scan began
+   (prevec), in coalesced runs.  count: add to the returned/kept figures (the per-sector
+   pass); the closing whole-volume pass only mops up readahead and counts nothing. */
+static void
+volmap_deep_return (VOLMAP_VOLUME * vol, const unsigned char *prevec, size_t o0, size_t o1, bool count)
+{
+  size_t o, r0 = (size_t) -1;
+
+  if (prevec == NULL)
+    {
+      return;
+    }
+  for (o = o0; o <= o1; o++)
+    {
+      bool cold = (o < o1) && !(prevec[o] & 1);
+
+      if (cold && r0 == (size_t) -1)
+	{
+	  r0 = o;
+	}
+      else if (!cold && r0 != (size_t) -1)
+	{
+	  (void) posix_fadvise (volmap_vol_fd (vol), (off_t) r0 * 4096, (off_t) (o - r0) * 4096, POSIX_FADV_DONTNEED);
+	  if (count)
+	    {
+	      vol->deep_cache_returned += (INT64) (o - r0) * 4096;
+	    }
+	  r0 = (size_t) -1;
+	}
+      if (count && o < o1 && (prevec[o] & 1))
+	{
+	  vol->deep_cache_kept += 4096;
+	}
+    }
+}
+
 /*
  * volmap_deep_scan () - L4: sequential sector reads; record density from the persisted SPAGE_HEADER and
  *                       forwarding ratio from the slot array record types. No page buffer involved.
@@ -1985,44 +2099,47 @@ volmap_deep_scan (VOLMAP_CTX * ctx)
 	{
 	  continue;
 	}
-      unsigned char *prevec = NULL;	/* mincore snapshot (1B per 4KB OS page) taken BEFORE we scan */
-      size_t pre_os_pages = 0;
+      size_t sect_bytes = (size_t) VOLMAP_SECT_NPAGES * vol->iopagesize;
+      size_t os_per_sect = sect_bytes / 4096;
+      size_t maplen = (size_t) vol->nsect_total * sect_bytes;
+      size_t pre_os_pages = (maplen + 4095) / 4096;
+      unsigned char *prevec = NULL;	/* 1B per 4KB OS page: cached BEFORE the scan began */
 
-      sectbuf = (char *) malloc ((size_t) VOLMAP_SECT_NPAGES * vol->iopagesize);
-
-      if (sectbuf == NULL)
-	{
-	  return;
-	}
-      /* snapshot which sectors the OS already had cached (server warm set, prior runs):
-       * those we must not evict afterwards.  mmap+mincore reads kernel metadata only. */
+      /* What the OS had cached when the scan began (the server's warm set, the discovery
+         pass) is what stays.  The snapshot is not retaken right before each sector: the
+         kernel's readahead from the previous read would already have pulled the next
+         sectors in and they would look cached (measured on a 4MB readahead; FADV_RANDOM
+         did not stop it on overlayfs).  mmap+mincore reads kernel metadata only. */
       {
-	size_t len = (size_t) vol->nsect_total * VOLMAP_SECT_NPAGES * vol->iopagesize;
-	void *base = mmap (NULL, len, PROT_READ, MAP_SHARED, volmap_vol_fd (vol), 0);
+	void *base = mmap (NULL, maplen, PROT_READ, MAP_SHARED, volmap_vol_fd (vol), 0);
 
 	if (base != MAP_FAILED)
 	  {
-	    pre_os_pages = (len + 4095) / 4096;
 	    prevec = (unsigned char *) malloc (pre_os_pages);
-	    if (prevec == NULL || mincore (base, len, prevec) != 0)
+	    if (prevec == NULL || mincore (base, maplen, prevec) != 0)
 	      {
 		free (prevec);
 		prevec = NULL;	/* snapshot failed: keep everything (never evict blindly) */
 	      }
-	    munmap (base, len);
+	    munmap (base, maplen);
 	  }
       }
+      sectbuf = (char *) malloc (sect_bytes);
+      if (sectbuf == NULL)
+	{
+	  free (prevec);
+	  return;
+	}
       (void) posix_fadvise (volmap_vol_fd (vol), 0, 0, POSIX_FADV_SEQUENTIAL);
       for (s = 0; s < vol->nsect_total; s++)
 	{
 	  int pg;
+
 	  if (!vol->stab[s])
 	    {
 	      continue;
 	    }
-	  if (pread (volmap_vol_fd (vol), sectbuf, (size_t) VOLMAP_SECT_NPAGES * vol->iopagesize,
-		     (off_t) s * VOLMAP_SECT_NPAGES * vol->iopagesize)
-	      != (ssize_t) ((size_t) VOLMAP_SECT_NPAGES * vol->iopagesize))
+	  if (pread (volmap_vol_fd (vol), sectbuf, sect_bytes, (off_t) s * sect_bytes) != (ssize_t) sect_bytes)
 	    {
 	      continue;
 	    }
@@ -2076,35 +2193,14 @@ volmap_deep_scan (VOLMAP_CTX * ctx)
 		    }
 		}
 	    }
+	  /* Give this sector back now, not after the whole volume: the scan holds at most
+	     a sector (1MB at 16KB pages) plus readahead of cache it pulled in. */
+	  volmap_deep_return (vol, prevec, (size_t) s * os_per_sect, (size_t) (s + 1) * os_per_sect, true);
 	}
-      /* return the cache this scan pulled in: DONTNEED only 4KB OS pages that were NOT
-       * cached before, so the server's warm set (and the header pages the discovery pass
-       * uses again) stays intact.  Runs coalesce into few fadvise calls. */
-      if (prevec != NULL)
-	{
-	  size_t os_per_sect = ((size_t) VOLMAP_SECT_NPAGES * vol->iopagesize) / 4096;
-	  size_t o, r0 = (size_t) -1;
-
-	  for (o = 0; o <= pre_os_pages; o++)
-	    {
-	      bool cold = (o < pre_os_pages) && vol->stab[o / os_per_sect] && !(prevec[o] & 1);
-
-	      if (cold && r0 == (size_t) -1)
-		{
-		  r0 = o;
-		}
-	      else if (!cold && r0 != (size_t) -1)
-		{
-		  (void) posix_fadvise (volmap_vol_fd (vol), (off_t) r0 * 4096, (off_t) (o - r0) * 4096, POSIX_FADV_DONTNEED);
-		  vol->deep_cache_returned += (INT64) (o - r0) * 4096;
-		  r0 = (size_t) -1;
-		}
-	      if (o < pre_os_pages && vol->stab[o / os_per_sect] && (prevec[o] & 1))
-		{
-		  vol->deep_cache_kept += 4096;
-		}
-	    }
-	}
+      /* Readahead past the last sector read, or into sectors the scan skipped, is
+         returned by one more pass over the whole volume (nothing is counted twice:
+         pages already returned are no longer cached, and only cold ones are touched). */
+      volmap_deep_return (vol, prevec, 0, pre_os_pages, false);
       free (prevec);
       free (sectbuf);
     }
@@ -9571,6 +9667,7 @@ volmap_render (VOLMAP_CTX * ctx)
 	     ctx->plain ? "" : VM_RESET, ctx->db_label != NULL ? ctx->db_label : "?", ts,
 	     ctx->nvols, ctx->nfiles, h1);
   }
+  volmap_print_shutdown (ctx, fp);
   if (total_reserved_pages > 0)
     {
       {
@@ -10429,8 +10526,12 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
     char ts[32];
 
     strftime (ts, sizeof (ts), "%Y-%m-%d %H:%M:%S", localtime (&now));
-    fprintf (fp, "{\n  \"db\": \"%s\", \"tool\": \"volmap\", \"timestamp\": \"%s\",\n  \"volumes\": [\n",
-	     volmap_json_escape (db_name, edb, (int) sizeof (edb)), ts);
+    char erel[64];
+
+    fprintf (fp, "{\n  \"db\": \"%s\", \"tool\": \"volmap\", \"timestamp\": \"%s\",\n"
+	     "  \"release\": \"%s\", \"shutdown_state\": \"%s\",\n  \"volumes\": [\n",
+	     volmap_json_escape (db_name, edb, (int) sizeof (edb)), ts,
+	     volmap_json_escape (ctx->db_release, erel, (int) sizeof (erel)), volmap_shutdown_name (ctx->shutdown_state));
   }
   /* -V selects the volumes to report; the batch renderer honours it, so JSON must too
      or an automation asking for one volume gets the whole database.  The separator is
@@ -11002,7 +11103,7 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
       }
     rewind (fp);
 
-    (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
+    (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release), &ctx->shutdown_state);
     from_log = volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
     ctx->release_unsupported = volmap_release_before_101 (ctx->db_release);
     volmap_warn_unsupported (ctx);	/* before the run starts */
@@ -11068,7 +11169,8 @@ volmap_usage (const char *argv0)
 	   "      --check              append an integrity findings report\n"
 	   "      --format=json        machine-readable output (volumes, files, findings)\n"
 	   "      --deep               full scan: record density + forwarding ratio\n"
-	   "      --full-sweep         probe every page of unowned sectors\n"
+	   "      --full-sweep         probe every page of every unowned sector (by default only when\n"
+	   "                           there are at most 256 of them)\n"
 	   "      --plain              ASCII output without ANSI colors\n"
 	   "      --tick=SEC           interactive auto-refresh period in seconds (default 2)\n"
 	   "      --warn-idle=PCT      report volumes whose idle space >= PCT%% as a finding (exit 2)\n"
@@ -11266,6 +11368,11 @@ volmap (UTIL_FUNCTION_ARG * arg)
   else
     {
       error = volmap_discover_files (&ctx);
+      if (error == NO_ERROR && ctx.sweep_left > 0)
+	{
+	  fprintf (stderr, "volmap: %ld reserved sectors still have no owner after the first pass - more than %d,"
+		   " so their pages were not probed; --full-sweep probes them\n", ctx.sweep_left, VOLMAP_AUTO_SWEEP_MAX);
+	}
     }
   if (error != NO_ERROR)
     {

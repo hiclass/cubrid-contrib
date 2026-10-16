@@ -20,14 +20,19 @@ cub_volmap [옵션] <database-name | vinf-경로>
                        인터랙티브는 b 토글, 틱(--tick)·r 마다 파일이 바뀌었으면 자동 재읽기. db 이름 불일치 스냅샷은 거부
                        (DB 이름·`<db>_vinf` 경로 어느 쪽으로 실행해도 `_vinf` 를 뗀 DB 이름으로 대조)
       --deep           전수 스캔: 레코드 밀도·포워딩 비율 (+ TUI 패널 L0 del/dead 집계).
-                       스캔이 끌어들인 페이지 캐시는 볼륨 스캔이 끝날 때마다 OS에 자동 반납(FADV_DONTNEED) —
-                       볼륨마다 스캔 직전에 찍은 mincore 스냅샷과 대조해 4KB 단위로 원래 캐시에 없던 구간만 반납한다.
+                       예약 공간 전체를 읽으므로 운영 중 I/O 에 영향을 줄 수 있다 — 조사할 볼륨만 -V 로 좁힐 수 있다.
+                       스캔이 끌어들인 페이지 캐시는 섹터(16KB 페이지에서 1MB)를 읽을 때마다 바로 OS에 반납
+                       (FADV_DONTNEED)한다 — 볼륨 스캔 직전에 찍은 mincore 스냅샷과 대조해 4KB 단위로 원래 캐시에
+                       없던 구간만 반납하고, 볼륨 끝에서 readahead 로 더 들어온 부분을 한 번 더 반납한다. 실행 중
+                       캐시 점유는 섹터 하나와 readahead 정도다(볼륨 단위로 반납하던 때는 볼륨 하나만큼 쌓였다).
                        스캔 도중 서버가 읽어 들인 페이지도 함께 반납될 수 있다. deep 요약줄에 returned/kept로 표기.
                        mincore 를 믿을 수 없는 계정(소유자·쓰기 권한자·root 가 아님)에서는 반납 대상을 가릴 수 없어
                        거부한다(종료코드 1) — DB 소유 계정으로 실행
-      --check          무결성 소견(findings) 리포트 — 소견 존재 시 종료코드 2 (CI 연동)
+      --check          무결성 소견(findings) 리포트 — 소견 존재 시 종료코드 2
       --format=json    JSON 출력 (volumes/files/findings)
-      --full-sweep     파일 자기발견 2차 전 페이지 스윕 (안전망)
+      --full-sweep     소유자 미상 섹터 전부의 전 페이지를 본다. 지정하지 않아도 1차 탐색 뒤 소유자 미상 섹터가
+                       256개 이하면 그 섹터들의 전 페이지를 자동으로 본다(16KB 페이지에서 최대 256MB 읽기).
+                       넘으면 자동으로 보지 않고 stderr 에 개수를 알린다
       --plain          ANSI 없이 ASCII
       --tick=SEC       인터랙티브 자동 새로고침 주기 (기본 2초)
       --warn-idle=PCT  볼륨 idle 공간이 PCT% 이상이면 소견(finding)으로 보고 — 종료코드 2 (용량 경보)
@@ -60,9 +65,6 @@ cub_volmap [옵션] <database-name | vinf-경로>
 점진 스캔 순서: **보고 있는 볼륨 → 나머지는 양끝 교차**(첫 볼륨, 마지막 볼륨, 둘째, 뒤에서 둘째, …).
 최신 데이터가 몰리는 마지막 볼륨이 두 번째로 완성되므로 `>`로 끝 볼륨에 바로 가도 곧 채워진다.
 볼륨 내부는 순차 유지(리드어헤드 run 병합 효율).
-
-**혼잡 자동 양보**: 백업·loaddb 등 대량 I/O와 겹치면 스캔이 스스로 감지해 물러난다(헤더에
-`scanning N% (yielding)`) — 백업 처리량 보호가 스캔 속도보다 우선한다.
 
 **3스레드 구조**: 스캔·새로고침(r/자동)·상주 재읽기는 배치 워커에서, 콜드 섹터의 오버레이 1MB
 읽기는 저지연 워커의 캐시 워밍으로 돈다 — 콜드 디스크에서도 키 입력·화면은 수십 ms 안에
@@ -144,7 +146,8 @@ volmap: WARNING: database release 10.0.0 is not supported - volmap reads 10.1 an
 volmap --format json cbench | python3 -m json.tool
 ```
 
-최상위에 `db`(이름)·`timestamp`(생성 시각) 메타, `volumes[]`(볼륨별 예약/할당, `purpose`=permanent/temporary, `tde_pages_probed`=프로브된 페이지 중 TDE 암호 페이지 수,
+최상위에 `db`(이름)·`timestamp`(생성 시각)·`release`(로그의 릴리스)·`shutdown_state`(로그 헤더의 마지막 종료 상태:
+`clean`/`not_clean`/`unknown` — `not_clean` 은 실행 중이거나 비정상 종료 후 복구 전) 메타, `volumes[]`(볼륨별 예약/할당, `purpose`=permanent/temporary, `tde_pages_probed`=프로브된 페이지 중 TDE 암호 페이지 수,
 `--bufmap` 시 `buffered_pages`/`dirty_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
 `skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`cause`(`unreadable`/`damaged`/`unrecognized`/`unsupported_release`)·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
 
