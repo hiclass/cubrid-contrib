@@ -112,7 +112,8 @@ FINDINGS
 
 | 소견 | 의미 |
 |---|---|
-| volume_header_damaged | vinf 에 있는 볼륨의 헤더가 볼륨 헤더가 아님(bad magic, 자기검증 실패, 한 페이지보다 짧음, 섹터 테이블 읽기 실패) — 그 볼륨은 지도에 없다 |
+| volume_header_damaged | vinf 에 있는 볼륨의 헤더가 볼륨 헤더가 아님(bad magic, 자기검증 실패, 한 페이지보다 짧음, 섹터 테이블 읽기 실패) — 로그가 10.1 이상 릴리스를 가리킬 때. 그 볼륨은 지도에 없다 |
+| volume_header_unrecognized | magic 은 CUBRID 볼륨인데 자기검증 실패, 로그에서 릴리스를 못 읽음 — 10.1 미만 구포맷인지 손상인지 가릴 수 없다. 그 볼륨은 지도에 없다 |
 | unknown_owner_sectors | 예약·사용 중인데 소유 파일 미발견(볼륨 메타 영역 제외 — 지도·요약·JSON 모두 동일 정의) — 트래커/페이지 불일치 의심 |
 | alloc_exceeds_reserved | 라이브 볼륨 스냅샷 시차 — 재실행/새로고침 권고 |
 | tde_encrypted_pages | TDE 암호 페이지 존재 — 키 없이 내용 해석 불가 |
@@ -124,6 +125,15 @@ FINDINGS
 헤더 손상은 소견(`volume_header_damaged`, 종료코드 2)이고, 파일을 열 수 없는 경우(권한, 파일 없음)는 보고가
 불완전하다는 뜻으로 종료코드 3 을 낸다.
 
+**10.1 미만 DB**: 로그(`_lgat`) 헤더의 릴리스가 10.0 이하(9.x·8.x 포함)면 볼륨 헤더 실패를 손상으로 보지 않는다.
+실행은 그대로 하되 시작 전과 종료 시 stderr 에 경고를 내고, 볼륨은 `unsupported release <rel> (volmap reads 10.1+)`
+사유로 `SKIPPED VOLUMES` 에 나열한다(소견 아님, 종료코드 3). 10.0 은 magic 은 같고 레이아웃만 달라 자기검증에서,
+9.x 는 페이지 헤더 길이가 달라 magic 위치부터 어긋난다 — 둘 다 같은 처리다.
+
+```
+volmap: WARNING: database release 10.0.0 is not supported - volmap reads 10.1 and later; volumes of this release are listed as skipped, not as damaged
+```
+
 ## 4. --format json
 
 ```bash
@@ -132,7 +142,7 @@ volmap --format json cbench | python3 -m json.tool
 
 최상위에 `db`(이름)·`timestamp`(생성 시각) 메타, `volumes[]`(볼륨별 예약/할당, `purpose`=permanent/temporary, `tde_pages_probed`=프로브된 페이지 중 TDE 암호 페이지 수,
 `--bufmap` 시 `buffered_pages`/`dirty_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
-`skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
+`skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`cause`(`unreadable`/`damaged`/`unrecognized`/`unsupported_release`)·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
 
 - **stdout 은 JSON 문서만 담는다.** 볼륨 열기 실패·레이아웃 판별 경고 같은 진단 메시지는 stderr 로만 나간다
   (`-o` 파일도 같다). 라이브 서버에서 spill 볼륨이 스캔 도중 사라져도 문서는 깨지지 않는다.

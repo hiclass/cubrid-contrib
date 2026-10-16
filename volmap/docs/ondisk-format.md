@@ -93,7 +93,7 @@ volmap이 파싱하는 볼륨 포맷의 성립·변화 이력. 근거는 CUBRID 
 
 | 버전 | 볼륨 포맷 변화 | volmap 영향 |
 |---|---|---|
-| ~10.0 (9.x 포함) | **구포맷** — 페이지 할당 비트테이블(`page_alloctb`), 볼륨 purpose 4종(DATA/INDEX/GENERIC/TEMP), `used_data/index_npages` 카운터, 파일은 allocset 체인(extdata 없음) | **미지원.** 자기검증이 거부 — 신포맷의 `sect_npgs`(=64) 오프셋이 구포맷에선 `purpose`(0~3)라 값 검사에서 탈락 |
+| ~10.0 (9.x 포함) | **구포맷** — 페이지 할당 비트테이블(`page_alloctb`), 볼륨 purpose 4종(DATA/INDEX/GENERIC/TEMP), `used_data/index_npages` 카운터, 파일은 allocset 체인(extdata 없음) | **미지원.** 자기검증이 거부 — 10.0 은 magic 은 같고 그 자리 값이 달라(`sect_npgs=128` 실측) 탈락, 9.x 는 페이지 헤더가 짧아 magic 부터 어긋난다. 로그 릴리스가 10.1 미만이면 손상이 아닌 미지원으로 보고하고 경고 |
 | **10.1** (2016-11) | **현행 포맷 성립** — 디스크/파일 매니저 재설계(CBRD-20185, cc368329d). 섹터(64페이지=1MB) 예약 비트테이블 `stab`, purpose 2종(PERMANENT/TEMPORARY), `FILE_HEADER`+extdata 파일 구조. 페이지 prv 끝 8B는 미사용 reserved | 지도·요약·자기발견·--check 전부 동작하는 최소 버전 |
 | **10.2** | **페이지 워터마크 도입** — 페이지 끝에 `FILEIO_PAGE_WATERMARK` 8B 추가(CBRD-22231, d81b071e8). 사용자 영역이 그만큼 줄어든다 | 실측 검증 버전 |
 | **11.0** | **TDE 도입** — prv의 reserved 1B가 `pflag`(암호화 비트)로, reserved 8B가 `tde_nonce`로 전환 (**prv 32B 크기 불변**). 워터마크는 이미 10.2 에 있다 → **사용자 영역 8B 감소**(`iopagesize − prv − 8`) | `E` 표기·TDE 소견의 근거. 사용자 영역 크기 기준 변화(아래 캐비엇) |
@@ -189,8 +189,9 @@ volmap이 파싱하는 볼륨 포맷의 성립·변화 이력. 근거는 CUBRID 
 ### 10.0 은 대상 밖
 
 10.0 은 10.1 이전 구포맷이라 **자기검증 단계에서 거부**된다(섹션 §8 첫 행).
-실측에서도 `header self-check failed (sect_npgs=640)` 로 걸러졌다 — 버전 판별
-이전에 막히므로 이 보정의 대상이 아니다.
+공식 10.0.0.1376 배포본으로 만든 DB 에서 `sect_npgs=128` 로 걸러졌다 — 버전 판별
+이전에 막히므로 이 보정의 대상이 아니다. 로그 릴리스가 10.1 미만이면 그 실패는
+`unsupported release` 로 보고된다(손상 소견 아님).
 
 | 판별 결과 | 처리 |
 |---|---|

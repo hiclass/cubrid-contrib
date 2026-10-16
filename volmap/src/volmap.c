@@ -182,14 +182,23 @@ struct volmap_bufrec
 #define VOLMAP_BUFREC_DIRTY 0x80000000u
 #define VOLMAP_LSA_NULL (~(UINT64) 0)
 
-/* A volume listed in the vinf that could not be shown.  damaged: its header is not
-   a valid volume header (a finding); otherwise it could not be read at all and the
-   report is incomplete. */
+/* Why a volume listed in the vinf could not be shown.  DAMAGED and UNRECOGNIZED are
+   findings; UNREADABLE and UNSUPPORTED only make the report incomplete. */
+typedef enum
+{
+  VOLMAP_SKIP_UNREADABLE = 0,	/* cannot be opened or read (permission, missing, out of memory) */
+  VOLMAP_SKIP_DAMAGED,		/* not a volume header, though the release is one volmap reads */
+  VOLMAP_SKIP_UNRECOGNIZED,	/* CUBRID magic but the layout fails the self-check, release unknown:
+				   a damaged header or a release before 10.1 - cannot tell which */
+  VOLMAP_SKIP_UNSUPPORTED	/* the log names a release before 10.1: an older format, not damage */
+} VOLMAP_SKIP_CAUSE;
+
+/* A volume listed in the vinf that could not be shown, and why */
 typedef struct volmap_skip
 {
   char *path;
   int listed_volid;
-  bool damaged;
+  int cause;			/* VOLMAP_SKIP_CAUSE */
   char reason[200];
 } VOLMAP_SKIP;
 
@@ -202,7 +211,7 @@ struct volmap_ctx
   VOLMAP_SKIP *skipped;		/* vinf volumes that could not be shown (volmap_skip_add) */
   int nskipped;
   char open_err[200];		/* why the last volmap_open_volume () failed */
-  bool open_err_damaged;	/* ... and whether the cause is a damaged header */
+  int open_err_cause;		/* ... and its VOLMAP_SKIP_CAUSE */
   /* Temp volumes (<db>_t<NNNNN>) are absent from the vinf and short-lived - they
      exist only while a query spills.  [r] rescans the same directory to add new
      ones and drop those that vanished, which needs the vinf path kept here. */
@@ -218,6 +227,7 @@ struct volmap_ctx
      no frame is in progress, or by the UI thread itself, so frames read it safely. */
   unsigned refresh_gen;
   char db_release[32];
+  bool release_unsupported;	/* the log names a release before 10.1 (warned at start and at exit) */
   VOLMAP_FILE *files;
   int nfiles;
   int width;
@@ -455,6 +465,34 @@ volmap_vlayout_of (const char *rel)
       return VOLMAP_VLAY_101;	/* 10.0 never gets this far - the header self-check rejects it */
     }
   return VOLMAP_VLAY_PRE_114;
+}
+
+/* A release before the 10.1 disk redesign (CBRD-20185): 10.0, 9.x, 8.x (2008 R4.x).
+   Those volumes carry the same magic in an older layout.  Lower majors are not
+   CUBRID releases, so a digits.digits run that binary bytes made by chance is not
+   taken for one. */
+static bool
+volmap_release_before_101 (const char *rel)
+{
+  int maj = 0, min = 0;
+
+  if (rel == NULL || sscanf (rel, "%d.%d", &maj, &min) != 2 || min < 0 || min > 99)
+    {
+      return false;
+    }
+  return (maj >= 8 && maj <= 9) || (maj == 10 && min == 0);
+}
+
+/* Said before the volumes are read and again when the run ends, so it is the last
+   thing on the terminal after a long report or the interactive screen. */
+static void
+volmap_warn_unsupported (const VOLMAP_CTX * ctx)
+{
+  if (ctx->release_unsupported)
+    {
+      fprintf (stderr, "volmap: WARNING: database release %s is not supported - volmap reads 10.1 and later;"
+	       " volumes of this release are listed as skipped, not as damaged\n", ctx->db_release);
+    }
 }
 
 static const char *
@@ -1219,7 +1257,7 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
 		   VOLMAP_MAX_VOLID + 1);
 	}
       snprintf (ctx->open_err, sizeof (ctx->open_err), "more than %d volumes", VOLMAP_MAX_VOLID + 1);
-      ctx->open_err_damaged = false;
+      ctx->open_err_cause = VOLMAP_SKIP_UNREADABLE;
       return ER_FAILED;
     }
   if (ctx->nvols >= ctx->nvols_alloc)
@@ -1239,7 +1277,7 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
 	{
 	  fprintf (stderr, "volmap: out of memory for %d volumes\n", want);
 	  snprintf (ctx->open_err, sizeof (ctx->open_err), "out of memory");
-	  ctx->open_err_damaged = false;
+	  ctx->open_err_cause = VOLMAP_SKIP_UNREADABLE;
 	  return ER_FAILED;
 	}
       memset (grown + ctx->nvols_alloc, 0, (size_t) (want - ctx->nvols_alloc) * sizeof (*grown));
@@ -1268,7 +1306,7 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   memset (vol, 0, sizeof (*vol));
   vol->fd = -1;
   snprintf (ctx->open_err, sizeof (ctx->open_err), "out of memory");
-  ctx->open_err_damaged = false;
+  ctx->open_err_cause = VOLMAP_SKIP_UNREADABLE;
   vol->path = strdup (path);
   if (vol->path == NULL)
     {
@@ -1301,7 +1339,7 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
 	else
 	  {
 	    snprintf (ctx->open_err, sizeof (ctx->open_err), "shorter than one page (%ld bytes)", (long) got);
-	    ctx->open_err_damaged = true;
+	    ctx->open_err_cause = VOLMAP_SKIP_DAMAGED;
 	  }
 	fprintf (stderr, "volmap: %s: %s\n", path, ctx->open_err);
 	free (iopage);
@@ -1311,19 +1349,47 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   vhdr = (DISK_VOLUME_HEADER *) (iopage + prv);
   if (strncmp (vhdr->magic, CUBRID_MAGIC_DATABASE_VOLUME, strlen (CUBRID_MAGIC_DATABASE_VOLUME)) != 0)
     {
-      fprintf (stderr, "volmap: %s is not a CUBRID volume (bad magic)\n", path);
-      snprintf (ctx->open_err, sizeof (ctx->open_err), "not a CUBRID volume (bad magic)");
-      ctx->open_err_damaged = true;
+      /* Before 10.0 the page header is shorter, so even the magic is not where this
+         build looks: an old release, not damage, when the log says so */
+      if (ctx->release_unsupported)
+	{
+	  snprintf (ctx->open_err, sizeof (ctx->open_err),
+		    "unsupported release %s (volmap reads 10.1+) - older volume layout", ctx->db_release);
+	  ctx->open_err_cause = VOLMAP_SKIP_UNSUPPORTED;
+	}
+      else
+	{
+	  snprintf (ctx->open_err, sizeof (ctx->open_err), "not a CUBRID volume (bad magic)");
+	  ctx->open_err_cause = VOLMAP_SKIP_DAMAGED;
+	}
+      fprintf (stderr, "volmap: %s: %s\n", path, ctx->open_err);
       free (iopage);
       goto error;
     }
   if (vhdr->sect_npgs != VOLMAP_SECT_NPAGES || vhdr->iopagesize < 1024 || vhdr->nsect_total <= 0)
     {
-      fprintf (stderr, "volmap: %s header self-check failed (sect_npgs=%d iopagesize=%d)\n",
-	       path, vhdr->sect_npgs, vhdr->iopagesize);
-      snprintf (ctx->open_err, sizeof (ctx->open_err), "header self-check failed (sect_npgs=%d iopagesize=%d)",
-		vhdr->sect_npgs, vhdr->iopagesize);
-      ctx->open_err_damaged = true;
+      /* The magic is the same before 10.1, only the layout differs, so a failed
+         self-check alone cannot tell an old format from damage: the log decides. */
+      if (ctx->release_unsupported)
+	{
+	  snprintf (ctx->open_err, sizeof (ctx->open_err),
+		    "unsupported release %s (volmap reads 10.1+) - older volume layout", ctx->db_release);
+	  ctx->open_err_cause = VOLMAP_SKIP_UNSUPPORTED;
+	}
+      else if (ctx->db_release[0] == '\0')
+	{
+	  snprintf (ctx->open_err, sizeof (ctx->open_err),
+		    "header self-check failed (sect_npgs=%d iopagesize=%d) - unsupported format (before 10.1)"
+		    " or damaged; the log gives no release to tell which", vhdr->sect_npgs, vhdr->iopagesize);
+	  ctx->open_err_cause = VOLMAP_SKIP_UNRECOGNIZED;
+	}
+      else
+	{
+	  snprintf (ctx->open_err, sizeof (ctx->open_err), "header self-check failed (sect_npgs=%d iopagesize=%d)",
+		    vhdr->sect_npgs, vhdr->iopagesize);
+	  ctx->open_err_cause = VOLMAP_SKIP_DAMAGED;
+	}
+      fprintf (stderr, "volmap: %s: %s\n", path, ctx->open_err);
       free (iopage);
       goto error;
     }
@@ -1362,7 +1428,7 @@ volmap_open_volume (VOLMAP_CTX * ctx, const char *path)
   if (volmap_read_stab (vol) != NO_ERROR)
     {
       snprintf (ctx->open_err, sizeof (ctx->open_err), "sector table unreadable");
-      ctx->open_err_damaged = true;
+      ctx->open_err_cause = VOLMAP_SKIP_DAMAGED;
       goto error;
     }
 
@@ -1408,7 +1474,7 @@ volmap_print_skipped (VOLMAP_CTX * ctx, FILE * fp)
 	  continue;
 	}
       fprintf (fp, "  [vol %d] %s: %s%s\n", ctx->skipped[i].listed_volid, ctx->skipped[i].path, ctx->skipped[i].reason,
-	       ctx->skipped[i].damaged ? " (damaged header)" : "");
+	       ctx->skipped[i].cause == VOLMAP_SKIP_DAMAGED ? " (damaged header)" : "");
     }
   fprintf (fp, "\n");
 }
@@ -1426,7 +1492,7 @@ volmap_skip_add (VOLMAP_CTX * ctx, const char *path, int listed_volid)
   ctx->skipped = grown;
   grown[ctx->nskipped].path = strdup (path);
   grown[ctx->nskipped].listed_volid = listed_volid;
-  grown[ctx->nskipped].damaged = ctx->open_err_damaged;
+  grown[ctx->nskipped].cause = ctx->open_err_cause;
   snprintf (grown[ctx->nskipped].reason, sizeof (grown[ctx->nskipped].reason), "%s", ctx->open_err);
   ctx->nskipped++;
 }
@@ -10127,14 +10193,24 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
     {
       char ep[2 * PATH_MAX], er[512];
 
-      if (!ctx->skipped[vi].damaged || !volmap_vol_selected (ctx, ctx->skipped[vi].listed_volid))
+      if (!volmap_vol_selected (ctx, ctx->skipped[vi].listed_volid))
 	{
 	  continue;
 	}
-      VM_FINDING ("{\"finding\": \"volume_header_damaged\", \"listed_volid\": %d, \"path\": \"%s\", \"reason\": \"%s\"}",
-		  "[vol %d] %s: %s - volume not shown, its header is not a valid volume header",
-		  ctx->skipped[vi].listed_volid, volmap_json_escape (ctx->skipped[vi].path, ep, (int) sizeof (ep)),
-		  volmap_json_escape (ctx->skipped[vi].reason, er, (int) sizeof (er)));
+      if (ctx->skipped[vi].cause == VOLMAP_SKIP_DAMAGED)
+	{
+	  VM_FINDING ("{\"finding\": \"volume_header_damaged\", \"listed_volid\": %d, \"path\": \"%s\", \"reason\": \"%s\"}",
+		      "[vol %d] %s: %s - volume not shown, its header is not a valid volume header",
+		      ctx->skipped[vi].listed_volid, volmap_json_escape (ctx->skipped[vi].path, ep, (int) sizeof (ep)),
+		      volmap_json_escape (ctx->skipped[vi].reason, er, (int) sizeof (er)));
+	}
+      else if (ctx->skipped[vi].cause == VOLMAP_SKIP_UNRECOGNIZED)
+	{
+	  VM_FINDING ("{\"finding\": \"volume_header_unrecognized\", \"listed_volid\": %d, \"path\": \"%s\", \"reason\": \"%s\"}",
+		      "[vol %d] %s: %s - volume not shown, a CUBRID volume header volmap cannot read",
+		      ctx->skipped[vi].listed_volid, volmap_json_escape (ctx->skipped[vi].path, ep, (int) sizeof (ep)),
+		      volmap_json_escape (ctx->skipped[vi].reason, er, (int) sizeof (er)));
+	}
     }
   for (vi = 0; vi < ctx->nvols; vi++)
     {
@@ -10544,10 +10620,12 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	{
 	  continue;
 	}
-      fprintf (fp, "%s\n    {\"listed_volid\": %d, \"path\": \"%s\", \"damaged\": %s, \"reason\": \"%s\"}",
+      static const char *const cause_name[] = { "unreadable", "damaged", "unrecognized", "unsupported_release" };
+
+      fprintf (fp, "%s\n    {\"listed_volid\": %d, \"path\": \"%s\", \"damaged\": %s, \"cause\": \"%s\", \"reason\": \"%s\"}",
 	       sn++ ? "," : "", ctx->skipped[si].listed_volid,
 	       volmap_json_escape (ctx->skipped[si].path, ep, (int) sizeof (ep)),
-	       ctx->skipped[si].damaged ? "true" : "false",
+	       ctx->skipped[si].cause == VOLMAP_SKIP_DAMAGED ? "true" : "false", cause_name[ctx->skipped[si].cause],
 	       volmap_json_escape (ctx->skipped[si].reason, er, (int) sizeof (er)));
     }
   fprintf (fp, "%s],\n", volmap_skipped_selected (ctx) ? "\n  " : "");
@@ -10926,10 +11004,16 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
 
     (void) volmap_read_db_release (ctx->vinf_path, ctx->db_release, sizeof (ctx->db_release));
     from_log = volmap_vlayout_of (ctx->db_release[0] != '\0' ? ctx->db_release : NULL);
+    ctx->release_unsupported = volmap_release_before_101 (ctx->db_release);
+    volmap_warn_unsupported (ctx);	/* before the run starts */
 
     if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
       {
 	ctx->vlayout = (int) from_log;
+      }
+    else if (ctx->release_unsupported)
+      {
+	;			/* no 10.1+ layout applies; the warning above says so */
       }
     else if (from_log != VOLMAP_VLAY_UNKNOWN && from_log != (VOLMAP_VLAYOUT) ctx->vlayout)
       {
@@ -10940,7 +11024,7 @@ volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf)
 		 ctx->db_release);
       }
 
-    if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
+    if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN && !ctx->release_unsupported)
       {
 	/* The watermark layout is assumed (every release from 10.2 has it), but on a
 	   10.1 volume that is wrong by 8 bytes - say so rather than be quietly off. */
@@ -11164,11 +11248,13 @@ volmap (UTIL_FUNCTION_ARG * arg)
   error = volmap_resolve_volumes (&ctx, db_name);
   if (error != NO_ERROR)
     {
+      volmap_warn_unsupported (&ctx);
       return EXIT_FAILURE;
     }
   if (ctx.interactive && ctx.nvols == 0)
     {
       fprintf (stderr, "volmap: no volume could be opened - nothing to browse\n");
+      volmap_warn_unsupported (&ctx);
       return 3;
     }
   if (ctx.interactive)
@@ -11267,6 +11353,7 @@ volmap (UTIL_FUNCTION_ARG * arg)
     {
       fclose (ctx.outfp);
     }
+  volmap_warn_unsupported (&ctx);	/* and once more as the run ends */
   if (error != NO_ERROR)
     {
       return EXIT_FAILURE;
