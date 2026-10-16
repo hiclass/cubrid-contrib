@@ -4080,6 +4080,42 @@ static void bg_dark_leave(void){
     g_bg_set=0;
     printf("\033]10;%s\007\033]11;%s\007",g_fg_orig,g_bg_orig);
 }
+/* The terminal state is restored from signal handlers too, so the sequences are built once
+   in tui_enter and written with write(2) and tcsetattr, both async-signal-safe */
+static char g_seq_leave[256], g_seq_enter[256]; static int g_seq_leave_n, g_seq_enter_n;
+static struct termios g_tio_raw;
+static void tui_seq_build(void){
+    g_seq_leave_n=0; g_seq_enter_n=0;
+    if(g_bg_set){
+        g_seq_leave_n=snprintf(g_seq_leave,sizeof g_seq_leave,"\033]10;%s\007\033]11;%s\007",g_fg_orig,g_bg_orig);
+        g_seq_enter_n=snprintf(g_seq_enter,sizeof g_seq_enter,"\033]10;#d8d8d8\007\033]11;#1c1c1c\007"); }
+    g_seq_leave_n+=snprintf(g_seq_leave+g_seq_leave_n,sizeof g_seq_leave-(size_t)g_seq_leave_n,"%s","\033[?25h\033[0m\033(B\017\033[?2004h\033[?2026l");
+    g_seq_enter_n+=snprintf(g_seq_enter+g_seq_enter_n,sizeof g_seq_enter-(size_t)g_seq_enter_n,"%s","\033(B\017\033[2J\033[H\033[?25l\033[?2004l\033[?2026l");
+}
+static void tui_raw_restore(void){
+    if(g_raw) tcsetattr(STDIN_FILENO,TCSANOW,&g_tio);
+    if(write(STDOUT_FILENO,g_seq_leave,(size_t)g_seq_leave_n)<0){}
+}
+static void tui_raw_reenter(void){
+    if(g_raw) tcsetattr(STDIN_FILENO,TCSANOW,&g_tio_raw);
+    if(write(STDOUT_FILENO,g_seq_enter,(size_t)g_seq_enter_n)<0){}   /* clears: the next frame redraws everything */
+}
+/* Ctrl-Z: hand the terminal back as it was, stop; on fg the raw mode, colours and hidden
+   cursor come back and the screen is cleared for the next frame */
+/* Re-raise a signal with its default action from inside its own handler: it is blocked
+   there, so it must be unblocked or it only pends (the handler would run again and again) */
+static void raise_default(int s){
+    sigset_t m; sigemptyset(&m); sigaddset(&m,s);
+    signal(s,SIG_DFL); sigprocmask(SIG_UNBLOCK,&m,NULL); raise(s);
+}
+static void on_tstp(int s){
+    int e=errno; tui_raw_restore();
+    raise_default(SIGTSTP);                      /* stops here until fg */
+    signal(SIGTSTP,on_tstp); (void)s; errno=e;
+}
+static void on_cont(int s){ int e=errno; (void)s; tui_raw_reenter(); errno=e; }
+/* abort() and crashes: the terminal first, then the default action (core, status) */
+static void on_fatal(int s){ tui_raw_restore(); raise_default(s); }
 static void tui_leave(void){
     static int done=0;
     if(g_raw){ tcsetattr(STDIN_FILENO,TCSADRAIN,&g_tio); g_raw=0; }
@@ -4108,8 +4144,13 @@ static void tui_enter(void){
        tui_leave() restores both. */
     bg_dark_enter();                 /* Query under raw mode; no reply means no action */
     printf("\033(B\017\033[2J\033[H\033[?25l\033[?2004l\033[?2026l"); fflush(stdout);
+    if(g_raw) tcgetattr(STDIN_FILENO,&g_tio_raw);
+    tui_seq_build();
     atexit(tui_leave);
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
+    signal(SIGQUIT,on_sig); signal(SIGHUP,on_sig);       /* the normal way out, which restores */
+    signal(SIGTSTP,on_tstp); signal(SIGCONT,on_cont);
+    signal(SIGABRT,on_fatal); signal(SIGSEGV,on_fatal); signal(SIGBUS,on_fatal); signal(SIGFPE,on_fatal);
 }
 /* Map Hangul typed on a 2-set layout back to the ASCII keys on the same physical
    keys, so a key pressed with the IME still in Hangul mode does what was intended.
@@ -4156,6 +4197,26 @@ static int key_byte(unsigned char *c){
     if(g_kqn>0){ *c=g_kq[g_kqh]; g_kqh=(g_kqh+1)%(int)sizeof g_kq; g_kqn--; return 1; }
     return read(STDIN_FILENO,c,1)==1;
 }
+/* After ESC ]: a terminal's reply ("10;rgb:..." up to BEL or ESC \\) arriving after the
+   query gave up - over a slow link r, g, a or 1 in it would act as keys.  It comes as one
+   burst, so the next bytes are waited for briefly; only "<digits>;" makes it a reply,
+   anything else is put back and read as keys. */
+static int osc_reply_skip(void){
+    unsigned char b[300]; int n=0, digits=0; struct pollfd pf={STDIN_FILENO,POLLIN,0};
+    for(;;){
+        if(n>=(int)sizeof b) break;
+        unsigned char c;
+        if(!key_byte(&c)){ if(poll(&pf,1,50)<=0) break; if(!key_byte(&c)) break; }
+        b[n++]=c;
+        if(n==1+digits && c>='0' && c<='9'){ digits++; continue; }
+        if(n==1+digits){ if(c!=';' || !digits) break; continue; }   /* "<digits>;" or not a reply */
+        if(c==0x07 || c==0x9c) return 1;
+        if(c=='\\' && n>=2 && b[n-2]==0x1b) return 1;
+    }
+    if(n>1+digits && digits && b[digits]==';') return 1;   /* cut short: still a reply, the rest is dropped */
+    kq_unget(b,n);
+    return 0;
+}
 static int tui_key(void){
     unsigned char c;
     if(!key_byte(&c)) return -1;
@@ -4165,6 +4226,7 @@ static int tui_key(void){
         unsigned char b[3]; int n=0;
         if(!key_byte(&b[n])) return 0x1b;
         n++;
+        if(b[0]==']' && osc_reply_skip()) return -1;   /* a colour reply arriving late is not keys */
         if(b[0]=='[' || b[0]=='O'){
             if(key_byte(&b[n])){
                 n++;
@@ -5462,8 +5524,10 @@ static void sat_cell(char *dst,size_t n,int sat,int cap){
     if(disp_w(dst)>cap) snprintf(dst,n,"%d",sat);
 }
 
+static int tui_too_small(const char *what,const char *keys_en,const char *keys_ko);
 static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
                         double work_ms,double a_age,int with_a){
+    if(tui_too_small(g_ascii?"dashboard":"대시보드","[p] plots  [q] quit","[p] 플롯  [q] 종료")) return;
     int W=term_w();
     double mt=M->total*1024.0, av=M->avail*1024.0, used=mt-av;
     double swt=M->swtotal*1024.0, swu=(M->swtotal-M->swfree)*1024.0;
@@ -6195,7 +6259,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     /* Fill the screen: the canvas draws only above the last two rows (overflow would clip
        the lower boxes) and those two always carry the key hints.  No newline is used,
        so there is no scrolling or flicker. */
-    int trows=term_h(); if(trows<8) trows=CV.h+2;
+    int trows=term_h(); if(trows<=0) trows=CV.h+2;   /* unknown (not a tty); too small was refused above */
     int clipped=cv_flush_rows(1,trows-2);
     printf("\033[%d;1H\033[J",(CV.h<trows-2?CV.h:trows-2)+1);   /* Clear leftovers below the canvas */
     /* The status line is outside the canvas and unbounded, so it is cut to avoid wrapping
@@ -6570,20 +6634,23 @@ static const char *slugify(const char *s){
 }
 
 #define PLOT_MIN_COLS 60
+#define TUI_MIN_ROWS  10
+/* A terminal too narrow or too short to draw in: drawing anyway wraps or scrolls every frame,
+   so say why and what to do.  Unknown sizes (not a tty) draw at the defaults. */
+static int tui_too_small(const char *what,const char *keys_en,const char *keys_ko){
+    int c=term_cols_raw(), r=term_h();
+    if(!((c>0 && c<PLOT_MIN_COLS) || (r>0 && r<TUI_MIN_ROWS))) return 0;
+    printf("\033[H\033[2J");
+    printf(g_ascii?"%s needs at least %d x %d.\n":"%s 은(는) 최소 %d칸 x %d줄이 필요합니다.\n",what,PLOT_MIN_COLS,TUI_MIN_ROWS);
+    printf(g_ascii?"  now %d x %d - enlarge the terminal.\n":"  현재 %d칸 x %d줄 — 터미널을 키우세요.\n",c,r);
+    printf("  %s\n",g_ascii?keys_en:keys_ko);
+    fflush(stdout);
+    return 1;
+}
 static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
     (void)IO; (void)T;
     int raw=term_cols_raw();
-    if(raw>0 && raw<PLOT_MIN_COLS){
-        /* Better to say why it cannot draw than to present a broken screen. */
-        printf("\033[H\033[2J");
-        printf("%s\n", g_ascii?"plot view needs at least 60 columns."
-                              :"플롯 화면은 최소 60칸이 필요합니다.");
-        printf(g_ascii?"  now %d — widen it, or press p.\n"
-                      :"  현재 %d칸 — 넓히거나 p 를 누르세요.\n", raw);
-        printf(g_ascii?"  [p] dashboard  [q] quit\n":"  [p] 대시보드  [q] 종료\n");
-        fflush(stdout);
-        return;
-    }
+    if(tui_too_small(g_ascii?"plot view":"플롯 화면","[p] dashboard  [q] quit","[p] 대시보드  [q] 종료")) return;
     int W=term_w(); if(W>CV_W)W=CV_W;
     if(raw>0 && W>raw) W=raw;
     char t1[160],t2[160];
@@ -6681,7 +6748,7 @@ static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
     cv_put(0,y,cutf(t1,W),paused?"38;5;178":"38;5;244"); y+=1;
 
     CV.h=y;
-    { int trows=term_h(); if(trows<8) trows=CV.h;
+    { int trows=term_h(); if(trows<=0) trows=CV.h;
       printf("\033[?2026h\033[?25l\033[H");
       (void)cv_flush_rows(1,trows);          /* Absolute coordinates, no newline: no scroll flicker */
       if(CV.h<trows) printf("\033[%d;1H\033[J",CV.h+1);
