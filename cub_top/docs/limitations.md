@@ -10,13 +10,13 @@
 |---|---|
 | OS | Linux 전용. `/proc/<pid>/smaps`, `/proc/<pid>/pagemap`, `process_vm_readv` 의존 |
 | 아키텍처 | x86_64 · i386 에서 `process_vm_readv` 시스템콜 번호를 직접 정의(구 glibc 대비). 그 외 아키텍처는 `pread` 폴백으로 동작 |
-| 권한 | **서버를 띄운 계정이면 충분**(root 불필요 — 실측 확인). `process_vm_readv`·`smaps`·`pagemap` 은 커널 ptrace 검사를 받으므로 **동일 UID** 여야 한다. 다른 계정이면 55개 키가 빠지고 `perm.limited=1` 로 표기된다 → §15. Yama `ptrace_scope>=1`(Ubuntu 기본 1)이면 같은 계정이어도 메모리 읽기만 막힌다 → §15 |
+| 실행 계정 | **서버를 띄운 계정**(보통 `cubrid`)으로 실행한다. `smaps`·`pagemap`·`process_vm_readv` 는 커널 ptrace 검사를 받으므로 **동일 UID** 여야 하고, 다른 계정이면 55개 키가 빠지고 `perm.limited=1` 로 표기된다 → §15 |
+| Yama `ptrace_scope` | **0 일 때만 전 기능**. 1(Ubuntu 기본)이면 같은 계정이어도 `process_vm_readv`·`/proc/<pid>/mem` 이 막혀 엔진 직독(방법 B·버퍼풀 페이지 슬롯·로그 LSA)이 꺼지고, 2·3 이면 마찬가지다. `smaps`·`io` 기반 축은 그대로 나온다. 사유는 `perm.reason` 에 나온다 → §15 |
 | 할당자 | glibc malloc 청크 포맷 가정. 다른 malloc(jemalloc/tcmalloc) 사용 빌드에서는 방법 A 무효 |
 | 검증 범위 | CUBRID 11.5, DB 페이지 16KB 환경에서만 실측 검증 |
 | 메모리 영역 수 | 대상 프로세스의 매핑을 **4096개**까지 분류한다(스레드 약 700개부터 해당). 넘는 영역은 분류하지 않아 구성 합계가 총량보다 작아지며, 그 개수를 `limits.regions_dropped` 와 트리 출력 경고로 알린다 |
 | 블록 장치 수 | 전체 장치를 **256개**까지 읽는다. 넘으면 `limits.disks_dropped` 와 트리 출력 경고로 알린다 |
 
-비-root 환경에서는 `CAP_PERFMON` 또는 `perf_event_paranoid<=0`이 필요하며, 없으면 CPU 캐시 측정이 자동 강등됩니다.
 
 ## 2. 방법 B — 바이너리 종속성 (가장 중요)
 
@@ -66,7 +66,7 @@
 
 ## 4. 비침습성의 정확한 범위
 
-원칙: cub_top 은 **root 가 아닌 CUBRID 설치 계정**으로 돌며, 그 권한으로 보이는 범위를 **비침습·최소 리소스**로
+원칙: cub_top 은 **서버를 띄운 CUBRID 설치 계정**으로 돌며, 그 권한으로 보이는 범위를 **비침습·최소 리소스**로
 보여준다. 모니터링을 위해 대상에 부하를 만드는 기능은 두지 않는다 — 부하 없이 정확히 보여줄 수 없는 값은 내지 않는다.
 
 | 동작 | 침습도 |
@@ -101,7 +101,7 @@
 모두 지워야 하는데, 이는 대상 페이지 테이블 전수 순회(4K 페이지 상주 1GB 당 약 27ms)와 TLB 무효화를 일으키고,
 메모리 집약 대역 실측에서 처리량이 52% 떨어졌다(73→35 Mpages/s). 4.2 미만 커널에서는 더 나쁘다 — `clear_refs` 가
 `split_huge_page_pmd` 로 대상의 THP 를 4K 로 쪼개고, 순회 내내 `mmap_sem`(read)을 잡아 대상의 mmap/munmap 과 그 뒤의 fault 가 기다린다. 지우지 않고 `Referenced` 를 읽으면 우리 읽기와
-커널 회수 주기가 섞인 값이 된다. 비 root 로 접근 비트를 건드리지 않고 재는 방법(`page_idle`·DAMON)은 root 전용이다.
+커널 회수 주기가 섞인 값이 된다. 접근 비트를 건드리지 않고 재는 방법(`page_idle`·DAMON)은 설치 계정 권한으로는 쓸 수 없다.
 부하 없이 정확히 잴 수 없으므로 **핫은 제공하지 않는다**. 버퍼풀의 쓰임새는 엔진이 스스로 유지하는 값 — LRU 존 분포,
 victim 후보 수, dirty 수 — 과 회전율·재적재율로 본다.
 
@@ -112,19 +112,19 @@ victim 후보 수, dirty 수 — 과 회전율·재적재율로 본다.
 `popen()` 으로 명령 문자열을 조립하면 위험합니다. DB 이름은 `/proc/<pid>/cmdline` 에서 읽은
 값이고 CUBRID 의 이름 검증(`check_database_name_local`)은 공백·`/`·`\`·`@` 만 거부할 뿐
 **작은따옴표·세미콜론·`$`·백틱을 허용**합니다. 따라서 따옴표로 감싸도 셸 탈출이 가능했습니다
-(PoC 로 root 임의 명령 실행 실증). `execvp` 는 셸 메타문자를 해석하지 않으므로 주입이
+(PoC 로 임의 명령 실행 실증). `execvp` 는 셸 메타문자를 해석하지 않으므로 주입이
 성립하지 않습니다.
 
-실행 파일은 **서버가 매핑한 `libcubrid.so` 의 설치본**(`<root>/bin/cubrid`)이고, `CUBRID`·`CUBRID_DATABASES` 는
+실행 파일은 **서버가 매핑한 `libcubrid.so` 의 설치본**(`<설치>/bin/cubrid`)이고, `CUBRID`·`CUBRID_DATABASES` 는
 서버 프로세스의 환경(`/proc/<pid>/environ`, 같은 계정이면 읽힘)에서 가져옵니다. 다른 버전의 클라이언트는 핸드셰이크에서
 응답 없이 기다리기 때문입니다(11.4.5 클라이언트 → 11.5 서버: 20초 무출력 실측). 서버 라이브러리가 디스크에서 교체됐으면
 (`(deleted)`) 버전을 보장할 수 없어 실행하지 않습니다. 항상 `-C`(클라이언트-서버)로 실행해 정지된 DB 를 단독 모드로 여는 일이 없습니다.
 
 | 항목 | 동작 |
 |---|---|
-| 설치 위치 | 서버의 매핑(`<root>/lib/libcubrid.so.N`), 없으면 `/proc/<pid>/exe` 가 `<root>/bin/cub_server` 일 때 그 `<root>`. 둘 다 못 읽으면 실행하지 않는다 — cub_top 을 띄운 셸의 `$CUBRID` 는 쓰지 않는다(다른 설치본의 `databases.txt`·`cub_master` 로 같은 이름의 다른 서버에 질의할 수 있어서) |
+| 설치 위치 | 서버의 매핑(`<설치>/lib/libcubrid.so.N`), 없으면 `/proc/<pid>/exe` 가 `<설치>/bin/cub_server` 일 때 그 `<설치>`. 둘 다 못 읽으면 실행하지 않는다 — cub_top 을 띄운 셸의 `$CUBRID` 는 쓰지 않는다(다른 설치본의 `databases.txt`·`cub_master` 로 같은 이름의 다른 서버에 질의할 수 있어서) |
 | 환경 | `CUBRID`·`CUBRID_DATABASES` 는 서버 프로세스의 것만. 못 읽으면 실행하지 않는다 |
-| 실행 계정 | root 로 띄웠으면 자식이 `setgroups`·`setgid`·`setuid` 로 **서버의 계정**이 된 뒤 실행한다. 그 계정이 쓸 수 있는 `<root>/bin/cubrid` 를 root 로 실행하는 권한 상승 경로가 없고, `$CUBRID/log` 에 root 소유 파일도 생기지 않는다 |
+| 실행 계정 | 서버를 띄운 계정으로 실행하므로 paramdump 도 그 계정·그 설치본으로 돈다 |
 | 디스크립터 | 자식은 표준 입출력 외의 fd 를 모두 닫고 실행한다. `/proc/<pid>/mem`·pagemap 등 오래 여는 fd 는 `O_CLOEXEC` 로 연다 |
 | 재시작 시 `cubrid.conf` | 다시 뜬 서버의 `CUBRID`(없으면 설치 위치)의 `conf/cubrid.conf` 를 읽는다 |
 
@@ -272,7 +272,7 @@ list cache·conn entries 는 실 바이트로 측정된다.
 ## 라이브러리 교체(재빌드) 직후의 실행 중 서버
 서버가 매핑한 libcubrid.so 가 디스크에서 교체되면 maps 에 "(deleted)" 가 붙는다. cub_top 은 심볼·DWARF 를
 `/proc/<pid>/map_files/<range>`(서버가 실제 실행 중인 옛 inode)에서 읽으므로 힙 B 가 그대로 살아 있다.
-map_files 를 못 여는 환경(커널 < 3.3, 그리고 4.3 미만 — RHEL7 의 3.10 포함 — 의 비root)에서는 디스크 경로를 쓰되,
+map_files 를 못 여는 환경(커널 < 4.3 — RHEL7 의 3.10 포함 — 에서는 설치 계정이 열 수 없다)에서는 디스크 경로를 쓰되,
 **그 파일이 아직 실행 중인 inode 일 때만** 쓴다. "(deleted)" 이거나 inode 가 다르면 다른 빌드의 심볼을 읽게 되고 게이트로는
 가려낼 수 없으므로 방법 B 를 거부하고 사유를 낸다(`heapB.reason`). 경로는 maps 줄의 나머지 전체라 공백이 든 설치 경로도
 그대로 읽는다. `-d` 의 `heapB.lib` 로 어느 파일을 읽었는지 확인할 수 있다.
@@ -290,7 +290,7 @@ map_files 를 못 여는 환경(커널 < 3.3, 그리고 4.3 미만 — RHEL7 의
 | 취합 예산 | 0.5초를 넘으면 그 프레임을 포기한다 — 값이 비는 것이 오래 끄는 것보다 안전하다는 판단이며, 화면·`-d` 출력에 사유가 남는다 |
 | 누적 히트율 | watcher 가 방금 붙어 fetch 표본이 1만 건 미만이면 내지 않는다(수십 건에서 0% 가 나오는 거짓 표기 방지) |
 
-## 15. 일반 유저(비 root) 실행 범위
+## 15. 실행 계정과 보이는 범위
 
 대상 프로세스가 **다른 사용자 소유**면 커널의 ptrace 접근 검사로 일부 `/proc` 항목이 막힙니다.
 cub_top 은 막힌 것을 0 으로 내보내지 않고 `perm.limited=1` 과 사유를 함께 표기합니다
@@ -298,7 +298,7 @@ cub_top 은 막힌 것을 0 으로 내보내지 않고 `perm.limited=1` 과 사�
 
 ### 관측 영역별 대조표
 
-| 관측 영역 | 서버 소유자 · root | 다른 계정 | 차단 원인 |
+| 관측 영역 | 서버를 띄운 계정 | 다른 계정 | 차단 원인 |
 |---|---|---|---|
 | OS 전체(RAM·CPU 코어 점유·load·swap) | ○ | **○** | — |
 | 장치 I/O(IOPS·await·큐 깊이·util) | ○ | **○** | — (용량 축은 DB 디스크, I/O 박스는 호스트 최다사용 장치) |
@@ -312,31 +312,31 @@ cub_top 은 막힌 것을 0 으로 내보내지 않고 `perm.limited=1` 과 사�
 | 로그 LSA·flush 부채 | ○ | ✗ | 위와 같음 |
 | 용량 축의 버퍼 지표(히트율·회전율) | ○ | ✗ | 위와 같음 |
 | 프로세스 귀속 I/O(`cap.proc_iops`·blkio) | ○ | ✗ | `/proc/<pid>/io` 차단 |
-| CPU 캐시 PMU(IPC·L3 미스) | ○ | 강등 | `perf_event_paranoid` 정책 |
 
 정리하면 **"이 호스트가 어떤 상태인가"와 "서버가 총 얼마를 쓰나"는 일반 계정으로도 보이고,
-"그 안이 어떻게 쓰이나"는 서버 소유자여야 보입니다.** root 일 필요는 없습니다 — 서버를 띄운 계정(보통 `cubrid`)이면 전 기능이 동작합니다.
+"그 안이 어떻게 쓰이나"는 서버를 띄운 계정(보통 `cubrid`)이어야 보입니다.** 그 계정이면 전 기능이 동작합니다(아래 Yama 제한이 없을 때).
 
-**비 root 에서도 나오는 것**: 호스트 전체(RAM·CPU·load·장치 IOPS·await·큐), 서버 **총량 RSS/VmSize**,
+**다른 계정의 서버에서도 나오는 것**: 호스트 전체(RAM·CPU·load·장치 IOPS·await·큐), 서버 **총량 RSS/VmSize**,
 스레드 수, 프로세스 CPU, 인스턴스 목록, 용량 축의 장치 측 지표와 판정문 일부.
 
 **나오지 않는 것**: 영역별 분해(data_buffer/log_buffer 구분), PSS, 동적 메모리 상세 A/B,
 버퍼풀 페이지 슬롯, 엔진 통계, 프로세스 귀속 IOPS.
 
-전체를 보려면 **서버와 같은 계정**(보통 `cubrid`)이나 root 로 실행하십시오. 같은 계정이면 root 없이도 전 기능이 동작합니다
-(아래 Yama 제한이 없을 때).
+전체를 보려면 **서버를 띄운 계정**(보통 `cubrid`)으로 실행하십시오.
 
 ### 같은 계정인데 엔진 직독만 꺼질 때 — Yama `ptrace_scope`
 
 `kernel.yama.ptrace_scope` 가 1 이상이면 커널이 **메모리 읽기(attach 모드)만** 추가로 검사한다.
 `smaps`·`maps`·`io` 는 read 모드 검사라 그대로 열리므로, 위 표에서 `process_vm_readv` 가 원인인 행만 빠진다.
 
-| `ptrace_scope` | 메모리 읽기 | 해결 |
+| `ptrace_scope` | 서버를 띄운 계정에서의 메모리 읽기 | 엔진 직독(방법 B·버퍼풀 페이지 슬롯·로그 LSA) |
 |---|---|---|
-| 0 | 같은 계정이면 허용 | — |
-| 1 (Ubuntu 기본) | 자기 자식 프로세스만 허용 | root 또는 `CAP_SYS_PTRACE`, 또는 `sysctl kernel.yama.ptrace_scope=0` |
-| 2 | `CAP_SYS_PTRACE` 만 허용 | root 또는 `CAP_SYS_PTRACE` |
-| 3 | 전면 금지(root 포함), 재부팅 전 변경 불가 | 재부팅 |
+| 0 | 허용 | 동작 |
+| 1 (Ubuntu 기본) | 자기 자식 프로세스만 허용 — 서버는 cub_top 의 자식이 아니므로 거부 | 꺼짐 |
+| 2 | 관리 권한 전용 | 꺼짐 |
+| 3 | 전면 금지, 재부팅 전 변경 불가 | 꺼짐 |
+
+엔진 직독이 필요하면 호스트가 `ptrace_scope=0` 이어야 한다. 그 밖의 축(영역 분해·PSS·프로세스 I/O·용량·CPU)은 값에 상관없이 나온다.
 
 cub_top 은 시작 시(대상 전환·재시작 시에도) 대상의 매핑된 주소 1바이트를 실제로 읽어 본다. EPERM/EACCES 면 읽기를 끄고
 `perm.limited=1` 과 사유(`perm.reason`, 예: `메모리 읽기 거부(EPERM): kernel.yama.ptrace_scope=1 …`)를 표기하며,

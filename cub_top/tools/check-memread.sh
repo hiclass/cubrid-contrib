@@ -14,6 +14,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+# Reasons speak to the account that started the server: never "run as root" or a capability.
 # Reading the server's memory touches it (the kernel marks read pages accessed and swaps
 # swapped ones back in), and a read can be denied.  cub_top runs as the server's owner,
 # not root, and must stay non-invasive and light.
@@ -124,9 +125,9 @@ probe(){ # label want-regex reject-regex env...
 }
 echo "1. probe reads the target"
 probe "no restriction"  'vm_readv=1 .*perm.limited=0'                       ''                X=1
-probe "denied"          'vm_readv=0 mem_pread=0 perm.limited=1 why=.*EPERM' 'ptrace_scope'    LD_PRELOAD="$TMP/yama.so"
-probe "scope 1"         'ptrace_scope=1.*ptrace_scope=0'                    ''                LD_PRELOAD="$TMP/yama.so" YAMA_SCOPE=1
-probe "scope 3"         'perm.limited=1 .*ptrace_scope=3'                   'CAP_SYS_PTRACE'  LD_PRELOAD="$TMP/yama.so" YAMA_SCOPE=3
+probe "denied"          'vm_readv=0 mem_pread=0 perm.limited=1 why=.*EPERM' 'ptrace_scope|root|CAP_' LD_PRELOAD="$TMP/yama.so"
+probe "scope 1"         'ptrace_scope=1.*ptrace_scope=0'                    'root|CAP_'       LD_PRELOAD="$TMP/yama.so" YAMA_SCOPE=1
+probe "scope 3"         'perm.limited=1 .*ptrace_scope=3'                   'root|CAP_'       LD_PRELOAD="$TMP/yama.so" YAMA_SCOPE=3
 echo "2. page headers: recent sample only, resident only; large buffer on request"
 "$TMP/t" || bad=1
 

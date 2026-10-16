@@ -226,16 +226,16 @@ static void perm_vm_denied(int err){
     int sc=-1; FILE *f=fopen("/proc/sys/kernel/yama/ptrace_scope","r");
     if(f){ if(fscanf(f,"%d",&sc)!=1) sc=-1; fclose(f); }
     g_perm_limited=1;
-    if(sc>=3)      /* no attach at all, root included, until reboot */
+    if(sc>=3)      /* no attach at all until reboot */
         snprintf(g_perm_why,sizeof g_perm_why,
                  g_ascii?"memory read denied (%s): kernel.yama.ptrace_scope=%d - engine view off (no process may attach; fixed until reboot)"
-                        :"메모리 읽기 거부(%s): kernel.yama.ptrace_scope=%d - 엔진 직독 꺼짐 (root 포함 전면 금지, 재부팅 전 변경 불가)",
+                        :"메모리 읽기 거부(%s): kernel.yama.ptrace_scope=%d - 엔진 직독 꺼짐 (어떤 프로세스도 붙을 수 없음, 재부팅 전 변경 불가)",
                  err==EACCES?"EACCES":"EPERM",sc);
-    else if(sc>=1)
+    else if(sc>=1)   /* 1: a process's own children only, even under the same account; 2: admins only */
         snprintf(g_perm_why,sizeof g_perm_why,
-                 g_ascii?"memory read denied (%s): kernel.yama.ptrace_scope=%d - engine view off (needs root/CAP_SYS_PTRACE%s)"
-                        :"메모리 읽기 거부(%s): kernel.yama.ptrace_scope=%d - 엔진 직독 꺼짐 (root/CAP_SYS_PTRACE%s 필요)",
-                 err==EACCES?"EACCES":"EPERM",sc,sc==1?(g_ascii?" or ptrace_scope=0":" 또는 ptrace_scope=0"):"");
+                 g_ascii?"memory read denied (%s): kernel.yama.ptrace_scope=%d - engine view off even for the server's account (works where ptrace_scope=0)"
+                        :"메모리 읽기 거부(%s): kernel.yama.ptrace_scope=%d - 서버를 띄운 계정이어도 엔진 직독 꺼짐 (ptrace_scope=0 인 호스트에서 동작)",
+                 err==EACCES?"EACCES":"EPERM",sc);
     else if(kernel_before(2,6,39))   /* no process_vm_readv (3.2) and /proc/pid/mem for the tracer only */
         snprintf(g_perm_why,sizeof g_perm_why,
                  g_ascii?"memory read denied (%s): kernel before 2.6.39 lets only a tracer read /proc/<pid>/mem (and has no process_vm_readv) - engine view off on this kernel"
@@ -243,8 +243,8 @@ static void perm_vm_denied(int err){
                  err==EACCES?"EACCES":"EPERM");
     else
         snprintf(g_perm_why,sizeof g_perm_why,
-                 g_ascii?"memory read denied (%s) - engine view off (run as the server owner or root)"
-                        :"메모리 읽기 거부(%s) - 엔진 직독 꺼짐 (서버 소유자 또는 root 로 실행)",
+                 g_ascii?"memory read denied (%s) - engine view off (run as the account that started the server)"
+                        :"메모리 읽기 거부(%s) - 엔진 직독 꺼짐 (서버를 띄운 계정으로 실행)",
                  err==EACCES?"EACCES":"EPERM");
 }
 static void cap_probe(int pid){
@@ -539,8 +539,8 @@ static void parse_rollup(proc_t *P){
         if(!g_perm_limited){
             g_perm_limited=1;
             snprintf(g_perm_why,sizeof g_perm_why,
-                     g_ascii?"target owned by another user: maps/smaps/io blocked - totals from status only (run as the server owner or root for the full view)"
-                            :"대상이 다른 사용자 소유: maps/smaps/io 차단 - status 기반 총량만 (전체는 서버 소유자 또는 root 로 실행)");
+                     g_ascii?"target owned by another user: maps/smaps/io blocked - totals from status only (run as the account that started the server for the full view)"
+                            :"대상이 다른 사용자 소유: maps/smaps/io 차단 - status 기반 총량만 (전체는 서버를 띄운 계정으로 실행)");
         }
         return;
     }
