@@ -104,6 +104,9 @@ cub_volmap [옵션] <database-name | vinf-경로>
 
 ## 3. --check 소견 리포트
 
+소견은 **참고 자료**다. 이상해 보이는 구조의 위치를 알려 줄 뿐 손상 여부를 판정하지 않으며, 실행 중 DB 의 시차나
+찢어진 페이지 읽기로도 생길 수 있다. 판정은 `checkdb` 등 엔진 도구로 한다.
+
 ```
 FINDINGS
   [vol 0] reserved sectors with no owning file: 2 (first sectid 2185) - tracker/page mismatch?
@@ -123,7 +126,8 @@ FINDINGS
 
 열지 못한 볼륨은 소견과 별도로 지도 아래 `SKIPPED VOLUMES` 에 이유와 함께 나열한다(`--check` 와 무관).
 헤더 손상은 소견(`volume_header_damaged`, 종료코드 2)이고, 파일을 열 수 없는 경우(권한, 파일 없음)는 보고가
-불완전하다는 뜻으로 종료코드 3 을 낸다.
+불완전하다는 뜻으로 종료코드 3 을 낸다. 둘이 겹치면 2 가 나오므로 종료 코드만으로는 불완전한지 알 수 없다 —
+자동화에서는 JSON 의 `skipped_volumes` 가 비어 있는지로 보고가 완전한지 판단한다.
 
 **10.1 미만 DB**: 로그(`_lgat`) 헤더의 릴리스가 10.0 이하(9.x·8.x 포함)면 볼륨 헤더 실패를 손상으로 보지 않는다.
 실행은 그대로 하되 시작 전과 종료 시 stderr 에 경고를 내고, 볼륨은 `unsupported release <rel> (volmap reads 10.1+)`
