@@ -123,6 +123,24 @@ env CUBRID_DATABASES=/srv/databases $SU "$TMP/srv" "$R/lib/libcubrid.so.11.5" & 
 sleep 600 & s3=$!
 "$TMP/srv" "$TMP/root2/lib/libcubrid.so.11.5" unlink & s2=$!
 sleep 0.3
+# fdopen failing after the fork: the child and the pipe must not be left behind
+sed -e 's|FILE \*pf=fdopen(fd\[0\],"r");|FILE *pf=(errno=EMFILE,(FILE*)0);|' "$TMP/src.c" > "$TMP/src2.c"
+grep -q 'errno=EMFILE' "$TMP/src2.c" || { echo "→ FAIL (fdopen not found in the source)"; exit 1; }
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/src2.c" > "$TMP/f.c"
+cat >> "$TMP/f.c" <<'C'
+static int nfd(void){ int n=0; DIR*d=opendir("/proc/self/fd"); struct dirent*e; while(d&&(e=readdir(d))) n++; if(d) closedir(d); return n; }
+int main(int c,char**v){
+    setenv("PD_MODE","hang",1);
+    int f0=nfd(); FILE *pd=paramdump_start(atoi(v[1]),"db"); int f1=nfd();
+    usleep(300000); pd_reap_zombies();
+    int ok = !pd && g_pd_state==PD_SKIPPED && strstr(g_pd_why,"fdopen") && f1==f0 && g_pd_nz==0 && g_pd_pid<0;
+    printf("  %s   fdopen failing: none returned, state %d, \"%s\", fds %d -> %d, child reaped (%d left)\n",
+           ok?"ok  ":"FAIL",g_pd_state,g_pd_why,f0,f1,g_pd_nz);
+    return !ok;
+}
+C
+gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/f" "$TMP/f.c" -lm -lpthread 2>"$TMP/cc2.err" || { cat "$TMP/cc2.err"; echo "→ FAIL (compile failed)"; exit 1; }
 CUBRID="$R" PD_LOG="$TMP/logs/log" WANT_UID="$(echo $SU | sed -n 's/SRV_UID=\([0-9]*\).*/\1/p')" "$TMP/t" $s1 $s2 $s3; rc=$?
+CUBRID="$R" PD_LOG="$TMP/logs/log" "$TMP/f" $s1 || rc=1
 kill $s1 $s2 $s3 2>/dev/null; wait $s1 $s2 $s3 2>/dev/null
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi

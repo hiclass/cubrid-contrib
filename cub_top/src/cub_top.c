@@ -328,6 +328,7 @@ typedef struct {
    with the servers found: none is left out. */
 typedef struct {
     int pid; char db[64];
+    int uid;              /* The account the server runs as: the same db name may run under several */
     /* top/ps-level figures, for every instance (the analysed one in detail elsewhere) */
     double rss;           /* Resident (VmRSS) */
     double filemap;       /* File-backed resident (RssFile): the share resident in the page cache */
@@ -392,6 +393,10 @@ static int proc_name(const char *pid,char *out,size_t on){
     size_t n=(size_t)(r-l-1); if(n>=on) n=on-1;
     memcpy(out,l+1,n); out[n]=0; return 1;
 }
+static int proc_uid(int pid){
+    char p[32]; struct stat st; snprintf(p,sizeof p,"/proc/%d",pid);
+    return stat(p,&st)==0 ? (int)st.st_uid : -1;
+}
 static int enum_instances(void){
     g_ninst=0; g_inst_lost=0;
     DIR *d=opendir("/proc"); if(!d) return 0;
@@ -404,9 +409,10 @@ static int enum_instances(void){
             char db[64]; cmd_db(pid,db,sizeof db);
             if(!db[0]) snprintf(db,sizeof db,"-");
             inst_t *x=NULL;
-            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid<0 && !strcmp(g_inst[i].db,db)){ x=&g_inst[i]; break; }
+            int uid=proc_uid(pid);
+            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid<0 && !strcmp(g_inst[i].db,db) && g_inst[i].uid==uid){ x=&g_inst[i]; break; }
             if(!x){ x=inst_add(); if(!x) continue; snprintf(x->db,sizeof x->db,"%s",db); }
-            x->pid=pid;
+            x->pid=pid; x->uid=uid;
             status_mem(pid,&x->rss,&x->filemap,&x->swap);
             continue;
         }
@@ -415,9 +421,9 @@ static int enum_instances(void){
             int cur = g_enum_T && (!g_cur_db[0] || !strcmp(db,g_cur_db));
             double pl=0, cpu = cur ? tcpu_delta(pid,g_enum_dt,&pl) : 0;
             if(!cur) pl=stat_rss(pid);
-            inst_t *x=NULL;
-            for(int i=0;i<g_ninst;i++) if(!strcmp(g_inst[i].db,db)){ x=&g_inst[i]; break; }
-            if(!x && (x=inst_add())!=NULL){ x->pid=-1; snprintf(x->db,sizeof x->db,"%s",db); }
+            inst_t *x=NULL; int uid=proc_uid(pid);   /* the PL of this account's server of that name */
+            for(int i=0;i<g_ninst;i++) if(!strcmp(g_inst[i].db,db) && g_inst[i].uid==uid){ x=&g_inst[i]; break; }
+            if(!x && (x=inst_add())!=NULL){ x->pid=-1; x->uid=uid; snprintf(x->db,sizeof x->db,"%s",db); }
             if(x){ x->pl_rss+=pl; x->pl_n++; }
             /* Only the current DB's PL is counted in the tiers */
             if(cur){ g_enum_T->pl+=pl; g_enum_T->npl++; g_enum_T->cpu_pl+=cpu; }
@@ -441,9 +447,20 @@ static int enum_instances(void){
             inst_t t=g_inst[i]; g_inst[i]=g_inst[j]; g_inst[j]=t; }
     return g_ninst;
 }
-static int inst_find(const char*db){
-    for(int i=0;i<g_ninst;i++) if(!strcmp(g_inst[i].db,db)) return i;
+/* The server to follow after the watched one went away: the same db name under the same
+   account (uid -1: any, when nothing was being watched).  -1 if none. */
+static int restart_pick(const char *db,int uid){
+    for(int i=0;i<g_ninst;i++)
+        if(!strcmp(g_inst[i].db,db) && (uid<0 || g_inst[i].uid==uid)) return g_inst[i].pid;
     return -1;
+}
+/* A db name held by several accounts: this account's server first */
+static int inst_find(const char*db){
+    int first=-1;
+    for(int i=0;i<g_ninst;i++) if(!strcmp(g_inst[i].db,db)){
+        if(g_inst[i].uid==(int)geteuid()) return i;
+        if(first<0) first=i; }
+    return first;
 }
 
 /* Full smaps parse: regions plus Rss/Pss */
@@ -972,7 +989,13 @@ static FILE *paramdump_start(int spid,const char *db){
     { int fl=fcntl(fd[0],F_GETFL,0); if(fl>=0) fcntl(fd[0],F_SETFL,fl|O_NONBLOCK);
       fcntl(fd[0],F_SETFD,FD_CLOEXEC); }
     g_pd_pid=pid; g_pd_used=0; g_pd_state=PD_RUNNING; g_pd_deadline=now_ms()+PD_WAIT_MS;
-    return fdopen(fd[0],"r");
+    FILE *pf=fdopen(fd[0],"r");
+    if(!pf){                                     /* nobody would read or reap it: stop it here */
+        int e=errno; close(fd[0]); kill(-pid,SIGKILL); pd_forget_child(); pd_reap_zombies();
+        g_pd_state=PD_SKIPPED;
+        snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"fdopen failed: %s - paramdump skipped":"fdopen 실패: %s — paramdump 생략",strerror(e));
+    }
+    return pf;
 }
 /* Stop an attempt now: the group is killed and reaped later without waiting */
 static void paramdump_abort(FILE **pd){
@@ -6754,9 +6777,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     for(int i=0;i<g_ninst;i++){
         char k[64];
         inst_key(i,k,sizeof k);
-        printf("instance.%s.pid=%d instance.%s.rss_bytes=%.0f instance.%s.file_bytes=%.0f instance.%s.swap_bytes=%.0f"
+        printf("instance.%s.pid=%d instance.%s.uid=%d instance.%s.rss_bytes=%.0f instance.%s.file_bytes=%.0f instance.%s.swap_bytes=%.0f"
                " instance.%s.pl_rss_bytes=%.0f instance.%s.pl_count=%d instance.%s.tracked=%d\n",
-               k,g_inst[i].pid,k,g_inst[i].rss,k,g_inst[i].filemap,k,g_inst[i].swap,
+               k,g_inst[i].pid,k,g_inst[i].uid,k,g_inst[i].rss,k,g_inst[i].filemap,k,g_inst[i].swap,
                k,g_inst[i].pl_rss,k,g_inst[i].pl_n,k,i==g_cur?1:0);
     }
     if(P->pid<0){
@@ -7452,6 +7475,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
         snprintf(k,sizeof k,"instance.%s.rss_bytes",x->db);    x->rss=rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.file_bytes",x->db);   x->filemap=rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.swap_bytes",x->db);   x->swap=rp_num(t,k,0);
+        snprintf(k,sizeof k,"instance.%s.uid",x->db);          x->uid=(int)rp_num(t,k,-1);
         snprintf(k,sizeof k,"instance.%s.pl_rss_bytes",x->db); x->pl_rss=rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.pl_count",x->db);     x->pl_n=(int)rp_num(t,k,0);
         snprintf(k,sizeof k,"instance.%s.tracked",x->db);      if(rp_num(t,k,0)>0) g_cur=g_ninst-1;
@@ -7672,16 +7696,18 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
     {
         /* The check must run even at pid<0 (not running), or a restart is never noticed and the
            instance stays down forever once it has died. */
+        /* The account of the server being watched: a restart is followed to the same account's
+           database of that name, never to another user's database that happens to share it */
+        static int track_uid=-1;
         int alive=0;
         if(P->pid>=0)
-            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P->pid){ alive=1; break; }
+            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P->pid){ alive=1; track_uid=g_inst[i].uid; break; }
         if(!alive){
             /* Keep the db name: clearing it with memset loses the name while waiting for a restart,
                so the server can never be picked up again when it returns. */
             char keep[64]; snprintf(keep,sizeof keep,"%s",P->db[0]?P->db:g_cur_db);
             int newpid=-1;
-            for(int i=0;i<g_ninst;i++)
-                if(keep[0] && !strcmp(g_inst[i].db,keep)){ newpid=g_inst[i].pid; break; }
+            if(keep[0]) newpid=restart_pick(keep,track_uid);
             /* Started with no server and no db named: take the first, as at startup */
             if(newpid<0 && (!keep[0] || !strcmp(keep,"-")) && g_ninst>0){
                 newpid=g_inst[0].pid; snprintf(keep,sizeof keep,"%s",g_inst[0].db); }
