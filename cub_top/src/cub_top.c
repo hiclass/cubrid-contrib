@@ -4435,6 +4435,9 @@ static double cap_prev_t=0;
    extra contact with the server), used only when the two are 0.2-60s apart: shorter
    is noise, longer is meaningless. */
 static int cap_turnover_from_dump(void){
+    /* One-shot only: live keeps its baseline in memory (cap_turnover, which also has the
+       eviction history), so re-reading and sorting the last dump every frame is waste */
+    if(g_pd_async) return 0;
     if(!g_bcb_dump[0]||!PG.ok||PG.degraded||PG.nrec<=0) return 0;
     FILE*f=fopen(g_bcb_dump,"rb"); if(!f) return 0;
     struct { char magic[8]; uint32_t version,reclen; int64_t ts_sec,ts_nsec;
@@ -4444,7 +4447,8 @@ static int cap_turnover_from_dump(void){
     /* Another database's snapshot (one-shot over several instances) is no baseline */
     h.db[sizeof h.db-1]=0;
     if(strncmp(h.db,g_cur_db,sizeof h.db-1)){ fclose(f); return 0; }
-    double dt=(double)PG.when.tv_sec-(double)h.ts_sec;
+    /* With nanoseconds: runs 0.2-1s apart gave 0 (refused) or 1 (a wrong rate) in seconds */
+    double dt=(double)(PG.when.tv_sec-h.ts_sec)+(double)(PG.when.tv_nsec-h.ts_nsec)/1e9;
     if(dt<0.2||dt>60.0){ fclose(f); return 0; }
     uint64_t *prev=NULL,*cur=NULL,*tmp=NULL; int pcap=0,ccap=0,tcap=0,np=0;
     if(!vp_grow((void**)&prev,&pcap,h.nrec,sizeof *prev)){ fclose(f); return 0; }
