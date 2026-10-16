@@ -240,6 +240,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-dwarf.sh` | `-flto` 의 `.lto_priv.N` 루트 심볼(실제 LTO 빌드 포함)을 찾고 모호한 둘·함수는 거절 · `strip -s` 는 사유로 · 압축(-gz/.zdebug)·`.gnu_debuglink`·split DWARF·dwz 는 정확한 사유 · build-id 캐시 키 · 라이브 추출은 백그라운드 |
 | `check-oldkernel.sh` | 구 커널: 프로세스 이름은 `/proc/<pid>/stat` 의 `(comm)`(2.6.33 미만엔 `comm` 파일 없음, `)`·공백이 든 이름 포함) · 2.6.39 미만 판정(그 커널의 `/proc/pid/mem` 거부는 권한이 아니라 커널 사유로 표시) |
 | `check-histreset.sh` | 히스토리는 한 프로세스의 것: 재시작(새 pid)·대상 세대 변경·서버 다운에서 비워져, 죽은 서버와 새 서버를 비교한 "서버 −X GB 반납" 같은 판정이 나오지 않음 |
+| `check-libpath.sh` | maps 의 라이브러리 경로는 줄의 나머지 전체(공백 든 설치 경로) · 교체돼 "(deleted)" 인데 map_files 를 못 열면 방법 B 거부 · map_files 가 열리면 실행 중인 바이트를 읽음 |
 | `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 일반 계정으로 열린 파일·`databases.txt` 에서 찾고, 일반 블록 마운트는 st_dev 로·overlay 는 fsid 로, 호스트의 더 바쁜 장치를 고르지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |
 | `check-ceiling.sh` | 관측 상한을 장치 고유 ID 별로 기억·보존: 빠른 장치의 상한으로 느린 장치를 판정하지 않음 · 큐 ≈1 직렬 스트림은 상한으로 학습하지 않고 "지연 병목(직렬)" · 커널 이름으로 저장된 줄은 다른 디스크에 붙지 않음 |
 | `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴. degraded 모드에서는 검증된 레코드만 집계하고 덤프를 덮어쓰지 않음. 인스턴스 전환·BCB 크기 변화에 안전, `--bcb-dump` 종료 코드 |

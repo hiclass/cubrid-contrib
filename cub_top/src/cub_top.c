@@ -1874,36 +1874,55 @@ static void detect_cubrid_ver(const char *so_path){
    segment (whose file offset is non-zero).  Symbol st_value is relative to the
    file virtual address, so a wrong base shifts every address and disables
    method B.  Fall back to the file's lowest start. */
+/* One /proc/<pid>/maps line: range, offset, inode and the path - the rest of the line, which
+   may hold spaces; a trailing " (deleted)" is removed and reported.  0 if not a mapping line. */
+static int maps_line(const char *line,unsigned long *s,unsigned long *e,unsigned long *off,
+                     unsigned long *ino,char *path,size_t pn,int *deleted){
+    char perm[8]; unsigned mj,mn; *deleted=0; path[0]=0;
+    if(sscanf(line,"%lx-%lx %7s %lx %x:%x %lu",s,e,perm,off,&mj,&mn,ino)<7) return 0;
+    const char *q=line; int fld=0;
+    while(*q && fld<5){ while(*q==' ')q++; while(*q && *q!=' ')q++; fld++; }
+    while(*q==' ') q++;
+    size_t n=0; while(*q && *q!='\n' && n+1<pn) path[n++]=*q++;
+    path[n]=0;
+    if(n>10 && !strcmp(path+n-10," (deleted)")){ path[n-10]=0; *deleted=1; }
+    return 1;
+}
+/* Why lib_base gave no path to read: the library was replaced and the running bytes
+   (map_files) cannot be opened - a 3.10 kernel opens map_files for root only */
+static char g_lib_why[200]="";
 static unsigned long lib_base(int pid,const char *needle,char *path,size_t plen){
     char f[64]; snprintf(f,sizeof f,"/proc/%d/maps",pid);
+    g_lib_why[0]=0;
     FILE *fp=fopen(f,"r"); if(!fp) return 0;
-    char line[1024]; unsigned long base=0, first=0, s0=0,e0=0;
-    char pth0[512]={0};
+    char line[PATH_MAX+256]; unsigned long base=0, first=0, s0=0,e0=0, ino0=0; int del0=0;
+    char pth0[PATH_MAX]={0};
     while(fgets(line,sizeof line,fp)){
         if(!strstr(line,needle)) continue;
-        unsigned long s,e=0,off=0; char perm[8],pth[512];
-        pth[0]=0;
-        if(sscanf(line,"%lx-%lx %7s %lx %*s %*s %511s",&s,&e,perm,&off,pth)<4) continue;
+        unsigned long s,e=0,off=0,ino=0; int del=0; char pth[PATH_MAX];
+        if(!maps_line(line,&s,&e,&off,&ino,pth,sizeof pth,&del)) continue;
+        if(!strstr(pth,needle)) continue;                 /* the name in the path, not elsewhere on the line */
         if(!first || s<first){ first=s; }                 /* Lowest start address (fallback) */
-        if(off==0 && !base){ base=s; s0=s; e0=e; snprintf(pth0,sizeof pth0,"%s",pth); }
-        if(!s0){ s0=s; e0=e; snprintf(pth0,sizeof pth0,"%s",pth); }   /* Path and map_files candidates */
+        if(off==0 && !base){ base=s; s0=s; e0=e; ino0=ino; del0=del; snprintf(pth0,sizeof pth0,"%s",pth); }
+        if(!s0){ s0=s; e0=e; ino0=ino; del0=del; snprintf(pth0,sizeof pth0,"%s",pth); }   /* Path and map_files candidates */
     }
     fclose(fp);
     if(!base) base=first;
-    if(base){
-        {
-            unsigned long s=s0,e=e0; const char*pth=pth0;
-            if(path){
-                /* Read symbols from the bytes the server is running: a rebuild leaves maps
-                   showing "(deleted)" while the old inode stays in use.
-                   map_files/<range> opens that inode; failing that the path is
-                   used and the gate catches a replaced file. */
-                char mf[96]; snprintf(mf,sizeof mf,"/proc/%d/map_files/%lx-%lx",pid,s,e);
-                int tfd=open(mf,O_RDONLY);
-                if(tfd>=0){ close(tfd); snprintf(path,plen,"%s",mf); }
-                else snprintf(path,plen,"%s",pth);
-            }
+    if(base && path){
+        /* Read symbols from the bytes the server is running: map_files/<range> opens that inode
+           even after a rebuild.  Without it the disk file is used only if it still is that inode;
+           a replaced library would give another build's symbols the gates cannot tell apart. */
+        char mf[96]; snprintf(mf,sizeof mf,"/proc/%d/map_files/%lx-%lx",pid,s0,e0);
+        int tfd=open(mf,O_RDONLY|O_CLOEXEC);
+        struct stat ps;
+        if(tfd>=0){ close(tfd); snprintf(path,plen,"%s",mf); }
+        else if(del0 || stat(pth0,&ps)!=0 || (unsigned long)ps.st_ino!=ino0){
+            path[0]=0;
+            snprintf(g_lib_why,sizeof g_lib_why,"%s",g_ascii
+                ?"libcubrid.so was replaced on disk and the running copy (map_files) cannot be opened - method B refused"
+                :"libcubrid.so 가 디스크에서 교체됐고 실행 중인 사본(map_files)을 열 수 없음 — 방법 B 거부");
         }
+        else snprintf(path,plen,"%s",pth0);
     }
     return base;
 }
@@ -2392,6 +2411,7 @@ static void method_b(proc_t *P){
        so there is no false match. */
     snprintf(g_so_path,sizeof g_so_path,"%s",so);        /* terse heapB.lib: the file actually read (the running inode via map_files) */
     if(!B.base){ snprintf(B.why,sizeof B.why,g_ascii?"libcubrid.so not mapped":"libcubrid.so 매핑 없음"); return; }
+    if(!so[0]){ snprintf(B.why,sizeof B.why,"%s",g_lib_why); return; }
     /* Version and table choices belong to the library file, not to this run.  Switching
        to a server of another release kept the first one's version and tables, and a
        table that passed the gates by chance would be adopted with the wrong sizes. */
