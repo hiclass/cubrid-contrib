@@ -25,6 +25,9 @@
 #   -w DIR    작업 디렉터리 (기본 임시 디렉터리, 끝나면 지움)
 #   -j DIR    JAVA_HOME (CUBRID build.sh 의 -j 와 같다; 생략 시 build.sh 기본값)
 #   -k        작업 디렉터리를 지우지 않는다 (빌드 재사용·디버깅)
+#             재사용하면 시작할 때 origin 의 브랜치·태그를 모두 fetch 하고, 실패하면 중단한다.
+#             브랜치 이름은 origin/<브랜치> 를, 태그는 태그를 detached 로 체크아웃하고
+#             빌드한 커밋을 출력·표(#meta source=)에 남긴다
 #   -f        이미 있는 .tbl 을 덮어쓴다 (기본: 덮어쓰지 않고 건너뜀)
 #
 # 왜 빌드가 필요한가
@@ -97,6 +100,12 @@ ok=0; fail=0; skip=0
 if [ ! -d "$SRC/.git" ]; then
     echo "clone   $REPO"
     git clone --quiet "$REPO" "$SRC" || { echo "clone failed" >&2; exit 1; }
+else
+    # A reused work tree (-w/-k): bring every branch and tag up to the remote.  A failed fetch
+    # stops the run - building from what is left would report a table of old sources as OK.
+    echo "fetch   $(cd "$SRC" && git remote get-url origin 2>/dev/null)"
+    ( cd "$SRC" && git fetch --quiet --force --tags origin '+refs/heads/*:refs/remotes/origin/*' ) \
+        || { echo "fetch failed - stopping rather than building old sources" >&2; exit 1; }
 fi
 
 for REF in "$@"; do
@@ -113,9 +122,18 @@ for REF in "$@"; do
         fi
     fi
 
-    ( cd "$SRC" && git fetch --quiet --tags origin 2>/dev/null; \
-      git -c advice.detachedHead=false checkout --quiet "$REF" ) \
-        || { echo "  FAIL checkout $REF"; fail=$((fail+1)); continue; }
+    # A tag as such, a branch as the remote's tip (a local branch of that name is never
+    # fast-forwarded and would build old sources), else a commit.  Checked out detached.
+    TARGET=$( cd "$SRC" || exit 1
+        if   git rev-parse -q --verify "refs/tags/$REF^{commit}" >/dev/null; then echo "refs/tags/$REF"
+        elif git rev-parse -q --verify "refs/remotes/origin/$REF^{commit}" >/dev/null; then echo "refs/remotes/origin/$REF"
+        elif git rev-parse -q --verify "$REF^{commit}" >/dev/null; then echo "$REF"
+        fi )
+    [ -n "$TARGET" ] || { echo "  FAIL $REF 는 태그·origin 브랜치·커밋 어느 것도 아님"; fail=$((fail+1)); continue; }
+    ( cd "$SRC" && git -c advice.detachedHead=false checkout --quiet --detach "$TARGET" ) \
+        || { echo "  FAIL checkout $TARGET"; fail=$((fail+1)); continue; }
+    SHA=$(cd "$SRC" && git rev-parse HEAD)
+    echo "  source $TARGET = $SHA"
 
     # 디버그 정보가 있어야 DWARF 를 읽을 수 있다. build.sh 의 debug 모드를 쓴다.
     # debug 모드여야 .debug_info 가 들어간다. 병렬도는 build.sh 가 아니라 생성기가 정하므로
@@ -153,7 +171,7 @@ for REF in "$@"; do
     TMP="$F.tmp.$$"
     if "$DWOFF" "$LIB" --emit-tbl >"$TMP" 2>/dev/null && [ -s "$TMP" ]; then
         # 버전 메타를 머리에 넣는다 — cub_top 이 디렉터리에서 표를 고를 때 이 줄을 본다.
-        { head -1 "$TMP"; echo "#meta version=$VER"; tail -n +2 "$TMP"; } >"$F"
+        { head -1 "$TMP"; echo "#meta version=$VER"; echo "#meta source=$REF@$SHA"; tail -n +2 "$TMP"; } >"$F"
         rm -f "$TMP"
         N=$(grep -c '^[A-Z]' "$F" 2>/dev/null || echo 0)
         echo "  OK     $(basename "$F")  (항목 $N)"
