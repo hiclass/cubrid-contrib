@@ -112,6 +112,27 @@ int main(int c,char**v){
     bad|=!(!pd&&g_pd_state==PD_SKIPPED);
     st=run("ok",spid,PD_WAIT_MS,&w,&np);
     printf("  %s   one-shot waits for the answer in one poll: %d poll(s), state %d\n",np==1&&st==PD_OK?"ok  ":"FAIL",np,st); bad|=!(np==1&&st==PD_OK);
+    /* A server without CUBRID_DATABASES in its environment: the engine defaults to
+       $CUBRID/databases, so the client gets that directory - not a skip, not this shell's */
+    int npid=atoi(v[4]);
+    setenv("CUBRID_DATABASES","/not/the/servers",1);
+    snprintf(b,sizeof b,"%s.dbs",log); unlink(b);
+    st=run("ok",npid,PD_WAIT_MS,&w,&np);
+    f=fopen(b,"r"); dbs[0]=0; if(f){ if(!fgets(dbs,sizeof dbs,f)) dbs[0]=0; fclose(f); } dbs[strcspn(dbs,"\n")]=0;
+    { char want[600]; snprintf(want,sizeof want,"%s/databases",getenv("CUBRID"));
+      ok = st==PD_OK && !strcmp(dbs,want);
+      printf("  %s   CUBRID_DATABASES unset in the server: run with $CUBRID/databases (%s), state %d\n",ok?"ok  ":"FAIL",dbs,st); bad|=!ok; }
+    /* cubrid.conf is read before paramdump is asked, so a refused (or skipped, hung) attempt
+       still leaves the configured values: the startup path, as after a restart */
+    g_nprm=0; params_preload(npid,"db");
+    long long c0=prm_get("data_buffer_size");
+    st=run("refuse",npid,PD_WAIT_MS,&w,&np); usleep(300000); pd_reap_zombies();
+    ok = c0==268435456 && st==PD_REFUSED && prm_get("data_buffer_size")==268435456 && !g_pd_applied;
+    printf("  %s   preloaded cubrid.conf (data_buffer_size %lld) kept through a refusal (now %lld, state %d)\n",
+           ok?"ok  ":"FAIL",c0,prm_get("data_buffer_size"),st); bad|=!ok;
+    st=run("ok",npid,PD_WAIT_MS,&w,&np);
+    ok = st==PD_OK && prm_get("data_buffer_size")==536870912 && g_pd_applied;
+    printf("  %s   an answer replaces them (data_buffer_size %lld)\n",ok?"ok  ":"FAIL",prm_get("data_buffer_size")); bad|=!ok;
     return bad;
 }
 C
@@ -122,6 +143,9 @@ SU=""; if [ "$(id -u)" = 0 ] && id hiclass >/dev/null 2>&1; then SU="SRV_UID=$(i
 env CUBRID_DATABASES=/srv/databases $SU "$TMP/srv" "$R/lib/libcubrid.so.11.5" & s1=$!
 sleep 600 & s3=$!
 "$TMP/srv" "$TMP/root2/lib/libcubrid.so.11.5" unlink & s2=$!
+# A server of this account with CUBRID set and no CUBRID_DATABASES, and a cubrid.conf to preload
+mkdir -p "$R/conf"; printf '[common]\ndata_buffer_size=256M\n' > "$R/conf/cubrid.conf"
+env -u CUBRID_DATABASES CUBRID="$R" "$TMP/srv" "$R/lib/libcubrid.so.11.5" & s4=$!
 sleep 0.3
 # fdopen failing after the fork: the child and the pipe must not be left behind
 sed -e 's|FILE \*pf=fdopen(fd\[0\],"r");|FILE *pf=(errno=EMFILE,(FILE*)0);|' "$TMP/src.c" > "$TMP/src2.c"
@@ -140,7 +164,7 @@ int main(int c,char**v){
 }
 C
 gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/f" "$TMP/f.c" -lm -lpthread 2>"$TMP/cc2.err" || { cat "$TMP/cc2.err"; echo "→ FAIL (compile failed)"; exit 1; }
-CUBRID="$R" PD_LOG="$TMP/logs/log" WANT_UID="$(echo $SU | sed -n 's/SRV_UID=\([0-9]*\).*/\1/p')" "$TMP/t" $s1 $s2 $s3; rc=$?
+CUBRID="$R" PD_LOG="$TMP/logs/log" WANT_UID="$(echo $SU | sed -n 's/SRV_UID=\([0-9]*\).*/\1/p')" "$TMP/t" $s1 $s2 $s3 $s4; rc=$?
 CUBRID="$R" PD_LOG="$TMP/logs/log" "$TMP/f" $s1 || rc=1
-kill $s1 $s2 $s3 2>/dev/null; wait $s1 $s2 $s3 2>/dev/null
+kill $s1 $s2 $s3 $s4 2>/dev/null; wait $s1 $s2 $s3 $s4 2>/dev/null
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi

@@ -237,25 +237,25 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-mmchunk.sh` | 방법 A 가 단독 mmapped 청크를 셈: malloc(100MB)·20MB×3(병합 VMA)·20MB×5·900MB(순회 상한 초과), 앞뒤로 익명 이웃이 합쳐진 VMA, 0 으로 찬 익명 영역은 0 |
 | `check-escape.sh` | `-d`·`--json`·`--record` 의 따옴표 값: 고정 버퍼에서 잘린 한글은 `?` 로 바뀌어 유효한 UTF-8, `"` `\` 탭이 든 값(라이브러리 경로)은 기록→재생에서 그대로 돌아오고 가짜 키로 쪼개지지 않음 |
 | `check-flushing.sh` | flush 중(flushing) 페이지는 clean 이 아님: dirty·flushing 을 한 번씩 센 `pgbuf.unflushed`, 가장 오래된 dirty LSA 가 놓치는 flush 중 페이지 수, DWB 가 담을 수 있는 "clean 이지만 볼륨 미반영" 페이지 상한 |
-| `check-dwarf.sh` | `-flto` 의 `.lto_priv.N` 루트 심볼(실제 LTO 빌드 포함)을 찾고 모호한 둘·함수는 거절 · `strip -s` 는 사유로 · 압축(-gz/.zdebug)·`.gnu_debuglink`·split DWARF·dwz 는 정확한 사유 · build-id 캐시 키 · 라이브 추출은 백그라운드 |
-| `check-oldkernel.sh` | 구 커널: 프로세스 이름은 `/proc/<pid>/stat` 의 `(comm)`(2.6.33 미만엔 `comm` 파일 없음, `)`·공백이 든 이름 포함) · 2.6.39 미만 판정(그 커널의 `/proc/pid/mem` 거부는 권한이 아니라 커널 사유로 표시) |
+| `check-dwarf.sh` | `-flto` 의 `.lto_priv.N` 루트 심볼(실제 LTO 빌드 포함)을 찾고 모호한 둘·함수는 거절 · `strip -s` 는 사유로 · 압축(-gz/.zdebug)·`.gnu_debuglink`·split DWARF·dwz 는 정확한 사유 · build-id 캐시 키 · 라이브 추출은 백그라운드, 끝난 자식은 캐시가 먼저 답해도 회수 |
+| `check-oldkernel.sh` | 구 커널: 프로세스 이름은 `/proc/<pid>/stat` 의 `(comm)`(2.6.33 미만엔 `comm` 파일 없음, `)`·공백이 든 이름 포함) · 2.6.39 미만 판정(그 커널의 `/proc/pid/mem` 거부는 권한이 아니라 커널 사유로 표시) · `RssFile`(4.5) 없으면 statm 으로 측정(0 아님) |
 | `check-histreset.sh` | 히스토리는 한 프로세스의 것: 재시작(새 pid)·대상 세대 변경·서버 다운에서 비워져, 죽은 서버와 새 서버를 비교한 "서버 −X GB 반납" 같은 판정이 나오지 않음 |
 | `check-libpath.sh` | maps 의 라이브러리 경로는 줄의 나머지 전체(공백 든 설치 경로) · 교체돼 "(deleted)" 인데 map_files 를 못 열면 방법 B 거부 · map_files 가 열리면 실행 중인 바이트를 읽음 |
 | `check-samedb.sh` | 같은 DB 이름이 두 계정에서 돌 때: 계정별로 구분, PL 은 자기 계정 서버에, 시작 시 실행 계정 우선, 보던 서버가 내려가도 다른 계정의 같은 이름 DB 로 넘어가지 않음 |
 | `check-tui.sh` | 늦게 온 OSC 색 응답은 키가 아님(손으로 친 Esc ] 는 키) · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort 에서 터미널 복원 |
 | `check-dumpbase.sh` | 1회 실행의 회전율 기준선(직전 `--bcb-dump`) 간격을 나노초로: 0.5초·0.2초 간격이 정확한 초당 적재로 · 라이브는 파일을 다시 읽지 않음 |
 | `check-buildoffsets.sh` | `offsets/build-offsets.sh` 가 작업 디렉터리를 재사용해도 원격의 최신 브랜치를 빌드(낡은 로컬 브랜치 아님) · 태그는 태그 · fetch 실패면 빌드하지 않고 중단 |
-| `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 일반 계정으로 열린 파일·`databases.txt` 에서 찾고, 일반 블록 마운트는 st_dev 로·overlay 는 fsid 로, 호스트의 더 바쁜 장치를 고르지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |
+| `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 일반 계정으로 열린 파일·`databases.txt`(로그 경로 없는 3필드 항목 포함)에서 찾고, 일반 블록 마운트는 st_dev 로·overlay 는 fsid 로, 호스트의 더 바쁜 장치를 고르지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |
 | `check-ceiling.sh` | 관측 상한을 장치 고유 ID 별로 기억·보존: 빠른 장치의 상한으로 느린 장치를 판정하지 않음 · 큐 ≈1 직렬 스트림은 상한으로 학습하지 않고 "지연 병목(직렬)" · 커널 이름으로 저장된 줄은 다른 디스크에 붙지 않음 |
 | `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴. degraded 모드에서는 검증된 레코드만 집계하고 덤프를 덮어쓰지 않음. 인스턴스 전환·BCB 크기 변화에 안전, `--bcb-dump` 종료 코드 |
 | `check-bitems.sh` | 동적 메모리 B 항목: catalog 는 자기 오프셋, `new_lfhash` 에서는 세션·카탈로그·락 자원을 0 이 아닌 `?`(합산 제외), 객체 락 자원·엔트리 집계, 플랜 캐시 측정/클론 추정 분리, vacuum data 항목 없음 · 결과 캐시의 temp 페이지는 개수만(B 합계 제외), 힙은 엔트리 풀+해시(추정) |
 | `check-permswitch.sh` | 대상 전환 시 다른 계정의 smaps 가 거부돼도 직전 대상의 영역이 남지 않고, `perm.limited` 는 그 대상에만 서며 대상이 사라지면 내려감(일반 계정으로 실행) |
-| `check-outfile.sh` | `--record` 는 새 파일(0600)만 만들고 기존 파일·심볼릭 링크를 거부, `--record-overwrite` 도 링크·다른 계정 파일은 거부 · `--bcb-dump` 경로가 링크여도 대상 파일 미접촉 · 기록 쓰기 실패(ENOSPC·EFBIG)는 화면·stderr 경고와 종료 코드 1 |
-| `check-paramdump.sh` | paramdump 를 서버 설치본·환경으로 `-C` 실행 · 우리 fd(`/proc/<pid>/mem`·pagemap) 미전달 · 설치 위치를 못 읽으면 자기 `$CUBRID` 로 실행하지 않음 · 무응답이어도 라이브 회수가 막히지 않고 기한 뒤 프로세스 그룹째 종료·회수 · 접속 거부는 서버의 오류 줄을 사유로 남기고 다시 시도하지 않음 · 라이브러리 교체 시 실행 안 함 · fork 뒤 `fdopen` 이 실패해도 자식·pipe 가 남지 않음 |
+| `check-outfile.sh` | `--record` 는 새 파일(0600)만 만들고 기존 파일·심볼릭 링크를 거부, `--record-overwrite` 도 링크·다른 계정 파일은 거부 · `--bcb-dump` 경로가 링크여도 대상 파일 미접촉 · 같은 pid 의 임시 파일 잔재는 교체, 링크면 거부 · 기록 쓰기 실패(ENOSPC·EFBIG)는 화면·stderr 경고와 종료 코드 1 |
+| `check-paramdump.sh` | paramdump 를 서버 설치본·환경으로 `-C` 실행 · 우리 fd(`/proc/<pid>/mem`·pagemap) 미전달 · 설치 위치를 못 읽으면 자기 `$CUBRID` 로 실행하지 않음 · 무응답이어도 라이브 회수가 막히지 않고 기한 뒤 프로세스 그룹째 종료·회수 · 접속 거부는 서버의 오류 줄을 사유로 남기고 다시 시도하지 않음 · 라이브러리 교체 시 실행 안 함 · fork 뒤 `fdopen` 이 실패해도 자식·pipe 가 남지 않음 · 서버에 `CUBRID_DATABASES` 가 없으면 `$CUBRID/databases` 로 실행 · 먼저 읽은 `cubrid.conf` 값은 거부돼도 남고 응답이 오면 교체 |
 | `check-readmit.sh` | 재적재율 미측정(-1)이 히스토리에 -1 로 남고 판정이 버퍼 부족·스캔 어느 쪽도 내지 않음 · 정확한 LRU 하네스에서 재적재율이 2배 버퍼의 미스 감소를 따라가고, 낮은 재적재율로 "증설 무효"를 단정하지 않음 · 요청한 대형 버퍼(30만 BCB)는 매 프레임 스캔해 재적재율이 매 프레임 측정됨 |
 | `check-memread.sh` | 대상 메모리 읽기 거부(Yama 재현 shim)를 프로브가 잡아 `perm.limited` 와 `ptrace_scope` 사유를 냄 · 페이지 헤더는 존 1·2 표본만·상주 확인 후 읽음(차가운 페이지·비상주 페이지 미접촉) · 대형 버퍼는 요청 시만 스캔 · 엔진 집계가 BCB 스캔과 일치 · `--hot` 거부·`clear_refs` 미오픈 |
 | `check-enum.sh` | 인스턴스 탐색에 개수 한도가 없음: CAS 600개·서버 10개의 가짜 `/proc` 에서 모든 서버·PL·CPU 를 빠짐없이 집계 |
-| `check-ascii.sh` | `--ascii` 6개 출력모드와 대시보드·플롯 화면(기록 재생을 pty 로 캡처)에 한글 0, 한글 모드는 보존 |
+| `check-ascii.sh` | `--ascii` 6개 출력모드와 대시보드·플롯 화면(기록 재생을 pty 로 캡처)에 한글 0, 한글 모드는 보존 · 여기서 못 띄우는 앵커 탐사 모드의 노트는 소스에서 `g_ascii` 분기 확인 |
 | `check-json.sh` | `--dump-json` 이 `-d` 와 키 집합·순서 동일 |
 | `check-offsets.sh` | 소스 오프셋 상수가 골든 표와 일치 |
 | `check-librt.sh` | 바이너리가 librt 전용 함수(`clock_*` 등)를 쓰지 않음 → `legacy` 빌드가 glibc < 2.17 에서 링크됨 |

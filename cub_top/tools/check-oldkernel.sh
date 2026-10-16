@@ -22,7 +22,9 @@
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
 TMP=${TMPDIR:-/tmp}/cub_top-oldkernel.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
-printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$SRC" > "$TMP/t.c"
+# The status key misspelt in a copy of the source, so the parse misses RssFile as a 3.10 kernel would
+sed 's/"RssFile:"/"RssFilX:"/' "$SRC" > "$TMP/src.c"; grep -q '"RssFilX:"' "$TMP/src.c" || { echo "→ FAIL (RssFile key not found)"; exit 1; }
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/src.c" > "$TMP/t.c"
 cat >> "$TMP/t.c" <<'C'
 #include <sys/prctl.h>
 int main(void){
@@ -47,6 +49,16 @@ int main(void){
         {"2.6.32-754.35.1.el6.x86_64",1},{"2.6.38",1},{"2.6.39",0},{"3.10.0-1160.el7.x86_64",0},{"4.18.0-553.el8",0},{"6.1",0}};
     int all=1; for(unsigned i=0;i<sizeof kr/sizeof kr[0];i++) if(release_before(kr[i].r,2,6,39)!=kr[i].before){ all=0; printf("        %s\n",kr[i].r); }
     printf("  %s   older than 2.6.39: el6 2.6.32 and 2.6.38 yes; 2.6.39, el7, el8, 6.1 no\n",all?"ok  ":"FAIL"); bad|=!all;
+    /* RssFile is a 4.5 field: without it the file-backed share comes from statm, not a 0
+       (the source copy above has the key misspelt; the real status is read here) */
+    { double r,f,w; status_mem(getpid(),&r,&f,&w);
+      char st[4096]; unsigned long rf=0,rs=0; char *q;
+      if(read_file("/proc/self/status",st,sizeof st)>0){
+          if((q=strstr(st,"RssFile:"))) sscanf(q+8,"%lu",&rf);
+          if((q=strstr(st,"RssShmem:"))) sscanf(q+9,"%lu",&rs); }
+      double want=(rf+rs)*1024.0;
+      ok = f>0 && want>0 && f>=want*0.8 && f<=want*1.2;
+      printf("  %s   no RssFile line: file-backed %.0fKB from statm (status RssFile+RssShmem %.0fKB)\n",ok?"ok  ":"FAIL",f/1024,want/1024); bad|=!ok; }
     return bad;
 }
 C

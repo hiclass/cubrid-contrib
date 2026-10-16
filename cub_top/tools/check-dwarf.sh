@@ -128,6 +128,17 @@ int main(void){
     while(st==0 && polls<200){ usleep(50000); polls++; st=dw_load_or_extract("other.so",o,w,sizeof w); }
     ok = st==2 && strstr(w,"stripped");
     printf("  %s   live failure comes back with its reason: \"%s\"\n",ok?"ok  ":"FAIL",w); bad|=!ok;
+    /* A frame that adopted another build's table while the child ran asks dw_kid_done()
+       each frame: 0 while it runs, 1 once it has exited - without collecting it, so the
+       next dw_load_or_extract still reads its result and reaps it */
+    unlink(cp1);
+    st=dw_load_or_extract("lib.so",o,w,sizeof w); int d0=dw_kid_done(); pid_t kid=g_dw_kid;
+    polls=0; while(!dw_kid_done() && polls<200){ usleep(50000); polls++; }
+    int d1=dw_kid_done(), still=g_dw_kid==kid && kill(kid,0)==0;
+    st=dw_load_or_extract("lib.so",o,w,sizeof w);
+    int wp=waitpid(kid,NULL,WNOHANG); ok = st==1 && d0==0 && d1==1 && still && g_dw_kid==0 && wp<0; if(!ok) printf("        st=%d still=%d g_dw_kid=%d wp=%d w=%s\n",st,still,(int)g_dw_kid,wp,w);
+    printf("  %s   finished child noticed (%d then %d after %d poll(s)) without being reaped early; then adopted and reaped\n",
+           ok?"ok  ":"FAIL",d0,d1,polls); bad|=!ok;
     return bad;
 }
 C

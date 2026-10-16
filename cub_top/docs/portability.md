@@ -53,6 +53,7 @@ caps: vm_readv=no(pread 폴백) rollup=no(smaps 합산) proc_io=yes … ← 구 
 | `/proc/pid/io` | `CONFIG_TASK_IO_ACCOUNTING` | I/O 섹션 생략 | I/O 지표 없음 |
 | `/proc/pid/pagemap` | 커널 2.6.25 | 상주 확인 없이 헤더 표본을 읽음 | `pgbuf.hdr_pagemap_unchecked` 로 표기, 스왑된 표본 페이지가 다시 적재될 수 있음 |
 | `MemAvailable` | 커널 3.14 | `MemFree` 사용 | 가용량이 보수적으로 표시 |
+| `RssFile`(`/proc/pid/status`) | 커널 4.5 | `/proc/pid/statm` 의 shared 필드(파일 상주 페이지; 최신 커널에서는 shmem 포함, cub_server 는 0) | 인스턴스 행의 `cache` 열·`instance.<db>.file_bytes` 가 0 이 아니라 측정값 |
 
 `process_vm_readv` 와 `/proc/pid/mem` 은 시작 시(대상 전환·재시작 때도) 대상의 매핑된 주소 1바이트를 실제로 읽어 시험합니다.
 EPERM/EACCES(Yama `ptrace_scope>=1`, 2.6.39 미만의 tracer 전용 mem)는 폴백이 아니라 권한 제한이므로 `perm.limited=1` 과 사유를 내고

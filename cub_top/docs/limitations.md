@@ -123,10 +123,10 @@ victim 후보 수, dirty 수 — 과 회전율·재적재율로 본다.
 | 항목 | 동작 |
 |---|---|
 | 설치 위치 | 서버의 매핑(`<설치>/lib/libcubrid.so.N`), 없으면 `/proc/<pid>/exe` 가 `<설치>/bin/cub_server` 일 때 그 `<설치>`. 둘 다 못 읽으면 실행하지 않는다 — cub_top 을 띄운 셸의 `$CUBRID` 는 쓰지 않는다(다른 설치본의 `databases.txt`·`cub_master` 로 같은 이름의 다른 서버에 질의할 수 있어서) |
-| 환경 | `CUBRID`·`CUBRID_DATABASES` 는 서버 프로세스의 것만. 못 읽으면 실행하지 않는다 |
+| 환경 | `CUBRID`·`CUBRID_DATABASES` 는 서버 프로세스의 것만. 환경을 못 읽으면 실행하지 않는다. 서버에 `CUBRID_DATABASES` 가 없으면 엔진 기본값과 같은 `$CUBRID/databases` 를 준다(cub_top 을 띄운 셸의 값이 아니라) |
 | 실행 계정 | 서버를 띄운 계정으로 실행하므로 paramdump 도 그 계정·그 설치본으로 돈다 |
 | 디스크립터 | 자식은 표준 입출력 외의 fd 를 모두 닫고 실행한다. `/proc/<pid>/mem`·pagemap 등 오래 여는 fd 는 `O_CLOEXEC` 로 연다 |
-| 재시작 시 `cubrid.conf` | 다시 뜬 서버의 `CUBRID`(없으면 설치 위치)의 `conf/cubrid.conf` 를 읽는다 |
+| `cubrid.conf` 선행 | 시작·대상 선택·재시작 때마다 paramdump 를 묻기 **전에** 서버의 `CUBRID`(없으면 설치 위치, 그것도 못 읽으면 cub_top 셸의 `$CUBRID`)의 `conf/cubrid.conf` 를 읽는다. paramdump 가 답하면 그 값으로 바뀌고, 생략·거부·무응답이면 conf 값이 남는다(`param.source`: `paramdump`/`cubrid.conf`/`none`) |
 
 라이브에서는 **비동기**입니다 — 매 프레임 파이프를 논블로킹으로 거두고 자식은 `WNOHANG` 으로 회수하므로, `paramdump` 가
 멈춰도 화면은 멈추지 않습니다. 10초(`PD_WAIT_MS`) 안에 끝나지 않으면 프로세스 그룹째 `SIGKILL` 하고(`setpgid` 로 손자까지),
@@ -144,7 +144,7 @@ victim 후보 수, dirty 수 — 과 회전율·재적재율로 본다.
 구동 직후에는 최대 2회(시작 1회 + 실패 후 전환 1회)입니다. 실패 종류(접속 거부 — 부팅 중·`max_clients`·접근 거부,
 무응답 10초, 실행 생략 — pids 여유 부족·라이브러리 교체·설치본 미상)는 모두 같은 규칙이며, 그동안 `cubrid.conf` 값을 씁니다.
 
-실패 사유는 `param.skipped_reason` 과 화면 귀속률 자리에 남습니다.
+실패 사유는 `param.skipped_reason` 과 화면 귀속률 자리에 남고, 그때 `param.*` 가 어디서 왔는지는 `param.source` 가 말합니다.
 
 ## 5. 도달 불가 / 미분리 항목
 

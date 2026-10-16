@@ -313,7 +313,7 @@ typedef struct {
     unsigned long rss_kb,pss_kb,swap_kb,vsize_kb;
     /* Whole-process totals summed from this frame's smaps, every region included (even past
        MAXREG): the same figures smaps_rollup gives, without reading it again */
-    int smaps_ok; unsigned long s_rss_kb,s_pss_kb,s_swap_kb,s_clean_kb;
+    int smaps_ok; unsigned long s_rss_kb,s_pss_kb,s_swap_kb;
     unsigned long minflt,majflt,blkio_ticks;
     unsigned long utime,stime;     /* Cumulative CPU in clock ticks; utilization comes from the delta */
     int nthreads;
@@ -349,15 +349,23 @@ static inst_t *inst_add(void){
 static char g_cur_db[64]="";       /* The db scan_tiers attributes PL to */
 
 /* top/ps-level memory of a process: VmRSS, RssFile and VmSwap from /proc/PID/status, in
-   bytes.  No page-table walk, so the cost does not grow with the process's size. */
+   bytes.  No page-table walk, so the cost does not grow with the process's size.
+   RssFile exists from kernel 4.5; before that the file-backed resident share is the
+   "shared" field of /proc/PID/statm (file pages, plus shmem on newer kernels - none in
+   cub_server), present on every kernel, so the column is measured rather than a false 0. */
 static void status_mem(int pid,double *rss,double *file,double *swap){
     char p[64],buf[4096]; snprintf(p,sizeof p,"/proc/%d/status",pid);
-    double r=0,f=0,w=0;
+    double r=0,f=0,w=0; int have_file=0;
     if(read_file(p,buf,sizeof buf)>0){
         char*q; unsigned long v;
         if((q=strstr(buf,"VmRSS:"))&&sscanf(q+6,"%lu",&v)==1) r=v*1024.0;
-        if((q=strstr(buf,"RssFile:"))&&sscanf(q+8,"%lu",&v)==1) f=v*1024.0;
+        if((q=strstr(buf,"RssFile:"))&&sscanf(q+8,"%lu",&v)==1){ f=v*1024.0; have_file=1; }
         if((q=strstr(buf,"VmSwap:"))&&sscanf(q+7,"%lu",&v)==1) w=v*1024.0;
+    }
+    if(!have_file){
+        unsigned long sz,res,sh; snprintf(p,sizeof p,"/proc/%d/statm",pid);
+        if(read_file(p,buf,sizeof buf)>0 && sscanf(buf,"%lu %lu %lu",&sz,&res,&sh)==3)
+            f=sh*(double)sysconf(_SC_PAGESIZE);
     }
     if(rss) *rss=r;
     if(file) *file=f;
@@ -466,7 +474,7 @@ static int inst_find(const char*db){
 /* Full smaps parse: regions plus Rss/Pss */
 static void parse_smaps(proc_t *P){
     char f[64]; snprintf(f,sizeof f,"/proc/%d/smaps",P->pid);
-    P->smaps_ok=0; P->s_rss_kb=P->s_pss_kb=P->s_swap_kb=P->s_clean_kb=0;
+    P->smaps_ok=0; P->s_rss_kb=P->s_pss_kb=P->s_swap_kb=0;
     P->nreg=0; P->reg_dropped=0;       /* before the open: a refused smaps must not leave the last target's regions */
     FILE *fp=fopen(f,"re"); if(!fp) return;
     char line[1024]; region_t *cur=NULL;
@@ -495,8 +503,6 @@ static void parse_smaps(proc_t *P){
             if(!strncmp(line,"Rss:",4)){ v=strtoul(line+4,NULL,10); P->s_rss_kb+=v; if(cur) cur->rss_kb=v; }
             else if(!strncmp(line,"Pss:",4)){ v=strtoul(line+4,NULL,10); P->s_pss_kb+=v; if(cur) cur->pss_kb=v; }
             else if(!strncmp(line,"Swap:",5))           P->s_swap_kb +=strtoul(line+5,NULL,10);
-            else if(!strncmp(line,"Shared_Clean:",13))  P->s_clean_kb+=strtoul(line+13,NULL,10);
-            else if(!strncmp(line,"Private_Clean:",14)) P->s_clean_kb+=strtoul(line+14,NULL,10);
         }
     }
     fclose(fp);
@@ -870,12 +876,14 @@ static int pids_headroom_ok(char *why,size_t wn){
     return 1;                                              /* Unknown: proceed */
 }
 
-/* The server's own environment value (same owner only); 1 if found */
+/* The server's own environment value (same owner only): 1 found, 0 not set, -1 unreadable.
+   The two zeros differ: a variable the server never set has the engine's default. */
 static int srv_env(int pid,const char *name,char *out,size_t on){
     char p[64]; snprintf(p,sizeof p,"/proc/%d/environ",pid);
-    int fd=open(p,O_RDONLY|O_CLOEXEC); if(fd<0) return 0;
+    int fd=open(p,O_RDONLY|O_CLOEXEC); if(fd<0) return -1;
     static char e[65536]; ssize_t n=read(fd,e,sizeof e-1); close(fd);
-    if(n<=0) return 0;
+    if(n<0) return -1;
+    if(n==0) return 0;
     e[n]=0;
     size_t nl=strlen(name);
     for(char *q=e;q<e+n;q+=strlen(q)+1)
@@ -904,6 +912,18 @@ static int srv_root(int pid,char *root,size_t rn){
     }
     if(root[0]){ char b[600]; snprintf(b,sizeof b,"%s/bin/cubrid",root); if(access(b,X_OK)!=0) root[0]=0; }
     return root[0]?1:0;
+}
+/* cubrid.conf of the server's own install, read before paramdump is asked: the frame has
+   configured values at once, and keeps them when paramdump never answers (skipped, refused,
+   hung).  An answer replaces them (paramdump_apply).  Falls back to this shell's $CUBRID
+   only when the server's install cannot be read, as the server-down path does. */
+static void params_preload(int pid,const char *db){
+    char cub[512]="";
+    g_pagesize=0;
+    if(pid>=0 && srv_env(pid,"CUBRID",cub,sizeof cub)<=0) (void)srv_root(pid,cub,sizeof cub);
+    if(!cub[0]){ const char *own=getenv("CUBRID"); if(own && *own) snprintf(cub,sizeof cub,"%s",own); }
+    if(cub[0]) params_from_conf(cub,db);
+    if(g_pagesize<=0) g_pagesize=16384;
 }
 /* paramdump runs from the install the server itself mapped libcubrid.so from, so the
    client and the server are the same build: a client of another version waits on the
@@ -938,10 +958,15 @@ static FILE *paramdump_start(int spid,const char *db){
                   ?(g_ascii?"server library replaced on disk - paramdump skipped":"서버 라이브러리가 디스크에서 교체됨 — paramdump 생략")
                   :(g_ascii?"server install not readable (another account) - paramdump skipped":"서버 설치 위치를 읽을 수 없음(다른 계정) — paramdump 생략"));
               g_pd_state=PD_SKIPPED; return NULL; }
-    if(!srv_env(spid,"CUBRID",cub,sizeof cub)) snprintf(cub,sizeof cub,"%s",root);
-    if(!srv_env(spid,"CUBRID_DATABASES",dbs,sizeof dbs)){
-        snprintf(g_pd_why,sizeof g_pd_why,"%s",g_ascii?"server environment not readable - paramdump skipped":"서버 환경을 읽을 수 없음 — paramdump 생략");
-        g_pd_state=PD_SKIPPED; return NULL; }
+    { int ec=srv_env(spid,"CUBRID",cub,sizeof cub);
+      int ed=srv_env(spid,"CUBRID_DATABASES",dbs,sizeof dbs);
+      if(ec<0 || ed<0){
+          snprintf(g_pd_why,sizeof g_pd_why,"%s",g_ascii?"server environment not readable - paramdump skipped":"서버 환경을 읽을 수 없음 — paramdump 생략");
+          g_pd_state=PD_SKIPPED; return NULL; }
+      if(ec==0) snprintf(cub,sizeof cub,"%s",root);
+      /* Not set in the server: the engine then uses $CUBRID/databases, so the client is
+         given that same directory rather than whatever this shell has */
+      if(ed==0) snprintf(dbs,sizeof dbs,"%s/databases",cub); }
     /* Run as the server's account: root running the install's own binary would execute
        whatever that account can write, and leave root-owned logs in $CUBRID/log */
     uid_t suid=(uid_t)-1; gid_t sgid=(gid_t)-1;
@@ -978,7 +1003,7 @@ static FILE *paramdump_start(int spid,const char *db){
         if(geteuid()==0 && suid!=0){
             if(setgroups(0,NULL)!=0 || setgid(sgid)!=0 || setuid(suid)!=0 || getuid()!=suid) _exit(126);
         }
-        putenv(envc); if(dbs[0]) putenv(envd); putenv(envl);
+        putenv(envc); putenv(envd); putenv(envl);
         /* -C: client-server only, never opening a stopped database stand-alone */
         char *av[5]; av[0]=bin; av[1]=(char*)"paramdump"; av[2]=(char*)"-C"; av[3]=(char*)db; av[4]=NULL;
         execvp(bin,av);
@@ -1775,25 +1800,35 @@ static int dw_cache_load(const char*cpath,long out[]){
    One-shot modes wait, as they report this very frame. */
 static pid_t g_dw_kid=0; static int g_dw_kfd=-1; static char g_dw_kso[PATH_MAX];
 static void dw_kid_stop(void){ if(g_dw_kid>0){ kill(g_dw_kid,SIGKILL); waitpid(g_dw_kid,NULL,0); g_dw_kid=0; } }
+/* The child has finished and waits to be collected (not collected here: dw_load_or_extract
+   reads its reason and reaps it).  A frame that adopted another build's table meanwhile
+   asks this to go back through the ladder, where this build's own offsets now win. */
+static int dw_kid_done(void){
+    if(g_dw_kid<=0) return 0;
+    siginfo_t si; si.si_pid=0;
+    return waitid(P_PID,(id_t)g_dw_kid,&si,WEXITED|WNOHANG|WNOWAIT)==0 && si.si_pid==g_dw_kid;
+}
 /* 1 = offsets in out, 2 = failed (why), 0 = extracting in the background */
 static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
     char cpath[256]; dw_cache_path(so,cpath,sizeof cpath);
     if(!cpath[0]){ snprintf(why,wn,"%s",g_ascii?"stat failed":"stat 실패"); return 2; }
+    /* A finished child is collected before the cache is looked at: its cache file would
+       otherwise answer first and leave it a zombie until exit */
+    char kw[160]=""; int kid_ended=0;
+    if(g_dw_kid>0){
+        int stt=0; pid_t r=waitpid(g_dw_kid,&stt,WNOHANG);
+        if(r!=0){
+            ssize_t n=read(g_dw_kfd,kw,sizeof kw-1); kw[n>0?n:0]=0;
+            close(g_dw_kfd); g_dw_kfd=-1; g_dw_kid=0; kid_ended=!strcmp(g_dw_kso,so);
+        }
+    }
     if(dw_cache_load(cpath,out)) return 1;
     if(g_pd_async){
-        if(g_dw_kid>0){
-            int stt=0; pid_t r=waitpid(g_dw_kid,&stt,WNOHANG);
-            if(r==0){
-                if(strcmp(g_dw_kso,so)){ dw_kid_stop(); }   /* another instance's library now: start over */
-                else { snprintf(why,wn,"%s",g_ascii?"extracting offsets from DWARF in the background":"DWARF 에서 오프셋 추출 중(백그라운드)"); return 0; }
-            } else {
-                char kw[160]=""; ssize_t n=read(g_dw_kfd,kw,sizeof kw-1); if(n>0) kw[n]=0; else kw[0]=0;
-                close(g_dw_kfd); g_dw_kfd=-1; g_dw_kid=0;
-                if(!strcmp(g_dw_kso,so)){
-                    if(dw_cache_load(cpath,out)) return 1;
-                    snprintf(why,wn,"%s",kw[0]?kw:(g_ascii?"extraction failed":"추출 실패")); return 2; }
-            }
-        }
+        if(g_dw_kid>0){                                   /* still running */
+            if(strcmp(g_dw_kso,so)){ dw_kid_stop(); }   /* another instance's library now: start over */
+            else { snprintf(why,wn,"%s",g_ascii?"extracting offsets from DWARF in the background":"DWARF 에서 오프셋 추출 중(백그라운드)"); return 0; }
+        } else if(kid_ended){                             /* ended without a cache: it failed */
+            snprintf(why,wn,"%s",kw[0]?kw:(g_ascii?"extraction failed":"추출 실패")); return 2; }
         int pf[2]; if(pipe2(pf,O_CLOEXEC)!=0){ snprintf(why,wn,"pipe: %s",strerror(errno)); return 2; }
         pid_t k=fork();
         if(k<0){ close(pf[0]); close(pf[1]); snprintf(why,wn,"fork: %s",strerror(errno)); return 2; }
@@ -2283,14 +2318,14 @@ static void b_items(proc_t *P){
         if(B.sym[S_LKGL] && mxc>0){
             int off; int32_t nt;
             if(probe_i32(P->pid,B.base+B.sym[S_LKGL],mxc,mxc+16,&off,&nt))
-                ADD_COUNT("lock table (tran)",nt,"num_trans=%d @+%d — 크기 미상",nt,off);
+                ADD_COUNT("lock table (tran)",nt,g_ascii?"num_trans=%d @+%d - size unknown":"num_trans=%d @+%d — 크기 미상",nt,off);
         }
         if(B.sym[S_CONNMAX] && mxc>0){
             int32_t mx=rd_i32(P->pid,B.base+B.sym[S_CONNMAX]);
             if(mx>=mxc && mx<=mxc*2+32)
-                ADD_COUNT("conn entries (css)",mx,"max=%d — 크기 미상",mx);
+                ADD_COUNT("conn entries (css)",mx,g_ascii?"max=%d - size unknown":"max=%d — 크기 미상",mx);
         }
-        for(int i=0;i<B.n;i++) B.total+=0;   /* count-only is excluded from the sum (obvious, but stated) */
+        /* Count-only items add nothing to B.total, which method_b's memset left at 0 */
         return;
     }
     /* No single subsystem uses 64GB - the guard against reading a pointer as a count.
@@ -2454,6 +2489,9 @@ static void method_b(proc_t *P){
         static const btab_t *c_bt=NULL;
         static unsigned long c_sym[S_NSYM];
         struct stat cst; long long mt = stat(so,&cst)==0 ? (long long)cst.st_mtime : -2;
+        /* No short cut while this build's DWARF extraction has just finished: the cached
+           table may be another build's, adopted while the child was still running. */
+        if(c_bt && dw_kid_done()) c_bt=NULL;
         if(c_bt && c_pid==P->pid && c_mt==mt && !strcmp(c_so,so)){
             long long want=prm_get("data_buffer_pages");
             memcpy(B.sym,c_sym,sizeof B.sym);
@@ -2888,10 +2926,19 @@ static FILE *out_open(const char *path,int overwrite,char *why,size_t wn){
     FILE *f=fdopen(fd,"w"); if(!f){ snprintf(why,wn,"%s",strerror(errno)); close(fd); }
     return f;
 }
-/* A fresh temporary beside path for write-then-rename: unique, created exclusively, no symlink */
+/* A fresh temporary beside path for write-then-rename: unique, created exclusively, no symlink.
+   The name carries our pid, so one already there is a leftover of an earlier run that died
+   between create and rename (no live process shares our pid): it is removed once and the
+   create retried - only when it is a plain file of this account, never through a link. */
 static FILE *tmp_create(const char *path,char *tmp,size_t tn){
     snprintf(tmp,tn,"%s.%d.tmp",path,(int)getpid());
     int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(fd<0 && errno==EEXIST){
+        struct stat st;
+        if(lstat(tmp,&st)==0 && S_ISREG(st.st_mode) && st.st_uid==geteuid() && unlink(tmp)==0)
+            fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+        else errno=EEXIST;
+    }
     if(fd<0) return NULL;
     FILE *f=fdopen(fd,"w"); if(!f){ close(fd); unlink(tmp); }
     return f;
@@ -4669,9 +4716,10 @@ static int db_disks(int pid,const char *db,char out[][32],int max,char *why,size
         const char *dbs=getenv("CUBRID_DATABASES"); char tp[PATH_MAX], ln[4096];
         FILE *f=NULL; if(dbs){ snprintf(tp,sizeof tp,"%.4000s/databases.txt",dbs); f=fopen(tp,"re"); }
         while(f && fgets(ln,sizeof ln,f)){ char nm[256], vp[2048], hs[256], lp[2048];
-            if(ln[0]=='#' || sscanf(ln,"%255s %2047s %255s %2047s",nm,vp,hs,lp)<2 || strcmp(nm,db)) continue;
+            int nf=sscanf(ln,"%255s %2047s %255s %2047s",nm,vp,hs,lp);   /* name vol-path host [log-path] */
+            if(ln[0]=='#' || nf<2 || strcmp(nm,db)) continue;
             snprintf(paths[np++],PATH_MAX,"%s",vp); files++;
-            if(strcmp(lp,vp) && np<16 && sscanf(ln,"%*s %*s %*s %2047s",lp)==1) snprintf(paths[np++],PATH_MAX,"%s",lp);
+            if(nf>=4 && strcmp(lp,vp) && np<16) snprintf(paths[np++],PATH_MAX,"%s",lp);   /* lp is set only with 4 fields */
             break; }
         if(f) fclose(f); }
     int n=0, via=0; char sys[PATH_MAX];
@@ -5667,7 +5715,9 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     if(g_ninst>0){
         int VX=W-1-(os_wide?45:29);
         /* With more instances than rows, the last row summarises the rest; the instance in
-           view always keeps its row */
+           view always keeps its row.  The rows show exactly `shown` distinct instances
+           either way (slots 0..shown-2, then slot shown-1 or the one in view), so the
+           summary's count is always g_ninst-shown. */
         int shown = irows<g_ninst ? irows-1 : g_ninst;
         for(int slot=0;slot<shown;slot++){
             int i = (slot==shown-1 && g_cur>=shown && shown<g_ninst) ? g_cur : slot;
@@ -6994,7 +7044,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     /* D (disk wait) threads: wa is diluted by the core count, this is not.
        The same value that appears right of the iowait row on screen. */
     printf("server.d_threads=%d server.threads_total=%d\n",IO_dthr,IO_nthr);
-    /* Why paramdump could not start - the only clue to why the parameter keys are empty. */
+    /* Where the param.* rows come from: the server's applied values, or cubrid.conf while
+       paramdump has not answered (g_pd_why says why not). */
+    printf("param.source=\"%s\"\n",g_pd_applied?"paramdump":g_nprm>0?"cubrid.conf":"none");
     if(g_pd_why[0]) printf("param.skipped_reason=\"%s\"\n",tq(g_pd_why));
     /* io.* comes from /proc/<pid>/io and belongs to the current instance, while the device
        figures come from diskstats and are host-wide - separate key prefixes keep the
@@ -7515,6 +7567,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     /* Parameters: the verdicts compare usage against these, so a replay without them
        would judge against nothing.  Only the rows terse emits are looked for. */
     g_nprm=0;
+    { char src[32]=""; rp_str(t,"param.source",src,sizeof src); g_pd_applied=!strcmp(src,"paramdump"); }
     for(int i=0;i<NPRMROWS && g_nprm<MAXPARAM;i++){
         char k[96]; snprintf(k,sizeof k,"param.%s",PRMROWS[i].name);
         if(!rp_find(t,k,b,sizeof b)) continue;
@@ -7810,13 +7863,9 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                 P0->pid=P->pid;
                 /* Configuration is per instance too: cubrid.conf now so this frame has it, then
                    the new server's applied values (harvested next frame) */
-                { char cub[512]="";
-                  g_pagesize=0;
-                  if(newpid>=0 && !srv_env(newpid,"CUBRID",cub,sizeof cub)) (void)srv_root(newpid,cub,sizeof cub);
-                  if(cub[0]) params_from_conf(cub,keep);
-                  if(g_pagesize<=0) g_pagesize=16384;
-                  paramdump_abort(pd);
-                  if(newpid>=0) *pd=paramdump_start(newpid,keep); }
+                params_preload(newpid,keep);
+                paramdump_abort(pd);
+                if(newpid>=0) *pd=paramdump_start(newpid,keep);
             }
         }
     }
@@ -8749,8 +8798,9 @@ int main(int argc,char **argv){
                  :"cub_server 미기동 — OS·브로커·장치만 관측");
     } else {
         cap_probe(P.pid);
+        params_preload(P.pid,P.db);       /* cubrid.conf first, as after a restart: a refused or
+                                             skipped paramdump otherwise leaves no parameter at all */
         pd=paramdump_start(P.pid,P.db);   /* The child (about 0.03s) overlaps the sample window */
-        if(!pd && g_pagesize<=0) g_pagesize=16384;
     }
 
     g_interval=interval;
@@ -8827,7 +8877,7 @@ int main(int argc,char **argv){
                     memset(&P0,0,sizeof P0); P0.pid=P.pid;   /* A fresh delta baseline too */
                     HN=0;                                     /* History is per database; mixing them falsifies it */
                     with_a=1; a_pending=1;                    /* Run method A once immediately for the new target */
-                    g_pagesize=0;                             /* Configuration follows the new database too */
+                    params_preload(P.pid,P.db);               /* Configuration follows the new database too */
                     paramdump_abort(&pd);
                     pd=paramdump_start(P.pid,P.db);
                 }
@@ -8922,7 +8972,7 @@ int main(int argc,char **argv){
                 reset_instance_state();
                 cap_probe(P.pid);
                 memset(&P0,0,sizeof P0); P0.pid=P.pid;
-                g_pagesize=0;
+                params_preload(P.pid,P.db);
                 paramdump_abort(&pd);
                 pd=paramdump_start(P.pid,P.db);
                 work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,with_a,&pd);

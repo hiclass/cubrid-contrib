@@ -83,6 +83,13 @@ int main(int c,char**v){
     char ref[8][32]; int nr=db_disks(h[0],"tdb",ref,8,why,sizeof why);
     ok = n>0 && nr>0 && !strcmp(dk[0],ref[0]);
     printf("  %s   fds unreadable: databases.txt entry gives %s (same disk as the open files: %s)\n",ok?"ok  ":"FAIL",n?dk[0]:"-",nr?ref[0]:"-"); bad|=!ok;
+    /* An entry of 3 fields (no log path): the volume path alone, and no read of a log path
+       that was never filled in */
+    { char p[512]; snprintf(p,sizeof p,"%s/databases.txt",tmp); FILE *f=fopen(p,"w");
+      fprintf(f,"tdb6 %s localhost\n",tmp); fclose(f); }
+    n=db_disks(2,"tdb6",dk,8,why,sizeof why);
+    ok = n>0 && !strcmp(dk[0],ref[0]);
+    printf("  %s   a 3-field entry (no log path): %s from the volume path\n",ok?"ok  ":"FAIL",n?dk[0]:"-"); bad|=!ok;
     /* The verdict's device is the DB disk even when another disk is far busier */
     if(nr>0){
         static proc_t P; static iod_t IO; dstat_t d0[2], d1[2];

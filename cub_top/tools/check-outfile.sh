@@ -64,6 +64,16 @@ if "$BIN" -d 2>/dev/null | grep -q '^pgbuf.enabled=1'; then
     else no "--bcb-dump through a symlink: victim '$(head -c 20 "$victim")'"; fi
     left=$(ls "$TMP" | grep -c '\.tmp$')
     if [ "$left" = 0 ]; then ok "no temporary left behind"; else no "$left temporary file(s) left"; fi
+    # A leftover <path>.<pid>.tmp of a run that died before its rename, with our pid reused:
+    # the shell plants it under its own pid, then becomes cub_top (exec keeps the pid)
+    rm -f "$TMP/stale.bin"
+    sh -c 'printf stale > "$1.$$.tmp"; exec "$2" --bcb-dump "$1"' sh "$TMP/stale.bin" "$BIN" >/dev/null 2>"$TMP/serr"; rc=$?
+    if [ "$rc" = 0 ] && [ -s "$TMP/stale.bin" ] && [ "$(ls "$TMP" | grep -c 'stale.bin\..*\.tmp$')" = 0 ]; then ok "a stale temporary of our own pid is replaced"
+    else no "stale temporary: rc $rc, $(head -1 "$TMP/serr")"; fi
+    # The same name as a symbolic link is not removed: the write is refused, the link's target untouched
+    sh -c 'ln -s "$3" "$1.$$.tmp"; exec "$2" --bcb-dump "$1"' sh "$TMP/lnk.bin" "$BIN" "$victim" >/dev/null 2>"$TMP/lerr2"; rc=$?
+    if [ "$rc" != 0 ] && [ "$(cat "$victim")" = precious ] && [ ! -e "$TMP/lnk.bin" ]; then ok "a link under the temporary's name is not removed or followed ($(head -1 "$TMP/lerr2" | cut -c1-60))"
+    else no "link under the temporary's name: rc $rc, victim '$(head -c 20 "$victim")'"; fi
 else echo "  SKIP --bcb-dump (no buffer pool readable)"; fi
 
 # A write that fails: a file size limit with SIGXFSZ ignored makes write() return EFBIG

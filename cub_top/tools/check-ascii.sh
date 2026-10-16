@@ -96,6 +96,13 @@ PY
     done
 else echo "  SKIP screens -b/-p (needs script, python3 and examples/10-recording.jsonl)"; fi
 
+# Item notes of the anchor-probing mode (B.partial) cannot be reached on this host: a
+# stripped build of an unknown version is needed.  So the source is held to the contract
+# instead: in b_items, every line that carries Hangul must branch on g_ascii.
+bad_lines=$(sed -n '/^static void b_items(/,/^}/p' "$ROOT/src/cub_top.c" | LC_ALL=C grep "$HANGUL" | grep -v 'g_ascii?' | grep -v '^ *\(/\*\|\*\|:"\)')   # :" continues a ternary of the line before
+if [ -n "$bad_lines" ]; then echo "  FAIL b_items: Hangul without a g_ascii branch"; printf '%s\n' "$bad_lines" | sed 's/^/        /'; bad=1
+else echo "  ok   b_items: every Hangul note has its g_ascii branch"; fi
+
 # Korean mode must keep its Korean - an over-eager fix that made everything English
 # would otherwise pass every check above.
 KO=$("$BIN" --heap -d 2>/dev/null | LC_ALL=C grep -c "$HANGUL")
