@@ -7343,7 +7343,6 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     IO->d_thr =(int)rp_num(t,"server.d_threads",0);
     IO->n_thr =(int)rp_num(t,"server.threads_total",0);
 
-    /* Tier figures are RSS; recordings made before that carried PSS under *_pss_bytes */
     T->server_rss=rp_num(t,"tier.server_rss_bytes",0);
     T->master=rp_num(t,"tier.master_rss_bytes",0);
     T->broker=rp_num(t,"tier.broker_rss_bytes",0);
@@ -7663,6 +7662,19 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
         fprintf(stderr,"%s)\n",nbad>4?" ...":"");
     }
     if(!n){ fprintf(stderr,"cub_top: --replay %s: no frames\n",path); free(fr); return 1; }
+    /* Only recordings of this build are replayed.  A frame without the tier memory keys
+       (an older build wrote PSS under *_pss_bytes) would replay master, broker, CAS and
+       PL as 0 and shrink the totals: refused, with the line, instead of shown wrong. */
+    for(size_t i=0;i<n;i++)
+        if(!strstr(fr[i],"\"tier.master_rss_bytes\"")){
+            int old=strstr(fr[i],"\"tier.master_pss_bytes\"")!=NULL;
+            fprintf(stderr,g_ascii?"cub_top: --replay %s: frame %zu has no tier.*_rss_bytes%s - not a recording of this build;"
+                                   " its tier memory would replay as 0, so it is not replayed\n"
+                                  :"cub_top: --replay %s: 프레임 %zu 에 tier.*_rss_bytes 가 없음%s — 이 빌드가 만든 녹화가 아님."
+                                   " 계층 메모리가 0으로 재생되므로 재생하지 않음\n",
+                    path,i+1,old?(g_ascii?" (older build: *_pss_bytes)":" (이전 빌드의 *_pss_bytes)"):"");
+            for(size_t k=0;k<n;k++) free(fr[k]);
+            free(fr); return 1; }
 
     static proc_t P; static mem_t M; static tier_t T; static iod_t IO;
     /* -t / --json on a replay re-emit each frame instead of drawing it, so a recording

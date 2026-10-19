@@ -258,4 +258,14 @@ else
     echo "  skip /proc isolation check (no strace)"
 fi
 
+# 4) a recording this build did not make (an older build wrote tier memory as *_pss_bytes) is
+#    refused with the reason, rather than replayed with master/broker/CAS/PL at 0
+sed 's/\(tier\.[a-z]*\)_rss_bytes"/\1_pss_bytes"/g' "$REC" > "$TMP/older.jsonl"
+"$BIN" --replay "$TMP/older.jsonl" -d --replay-speed 0 >"$TMP/older.out" 2>"$TMP/older.err"; e=$?
+if [ "$e" = 1 ] && [ ! -s "$TMP/older.out" ] && grep -q '_pss_bytes' "$TMP/older.err"; then
+    echo "  ok   older build's recording refused: $(head -1 "$TMP/older.err" | sed 's/^cub_top: --replay [^:]*: //' | cut -c1-80)"
+else
+    echo "  FAIL older build's recording: exit $e, $(grep -c '^ts=' "$TMP/older.out") frame(s) shown"; bad=1
+fi
+
 [ $bad -eq 0 ] && { echo "-> PASS"; exit 0; } || { echo "-> FAIL"; exit 1; }
