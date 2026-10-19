@@ -3012,10 +3012,15 @@ static void pg_recount(void){
 /* Whether addr is resident in pid, from /proc/pid/pagemap (bit 63).  Reading pagemap does not
    touch the page; reading a swapped-out page would swap it in.  One 4KB block (512 pages) is
    cached since header addresses run in order.  Unreadable pagemap: -1 (not checked). */
+/* One pagemap block (2MB of address space) is kept between calls, but only within a frame:
+   residency changes between frames (swap-out, fault-in), so pm_frame() drops it. */
+static unsigned g_pm_gen=0;
+static void pm_frame(void){ g_pm_gen++; }
 static int pm_present(int pid,unsigned long addr){
-    static int fd=-1, fpid=-1; static uint64_t blk[512]; static long bno=-1;
+    static int fd=-1, fpid=-1; static uint64_t blk[512]; static long bno=-1; static unsigned gen=0;
     if(fpid!=pid){ if(fd>=0) close(fd); char p[64]; snprintf(p,sizeof p,"/proc/%d/pagemap",pid);
                    fd=open(p,O_RDONLY|O_CLOEXEC); fpid=pid; bno=-1; }
+    if(gen!=g_pm_gen){ gen=g_pm_gen; bno=-1; }
     if(fd<0) return -1;
     unsigned long pg=addr/4096; long b=(long)(pg/512);
     if(b!=bno){ if(pread(fd,blk,sizeof blk,(off_t)b*(off_t)sizeof blk)!=(ssize_t)sizeof blk) return -1; bno=b; }
@@ -3041,6 +3046,7 @@ static int g_pg_detail=0;   /* Page-level detail on a large buffer: asked for (l
 #define PG_MIN_VERIFY 32    /* Below this many hot/warm headers, cold ones top the sample up */
 static void pgbuf_scan(proc_t*P){
     PG.frame++;
+    pm_frame();                        /* this frame's residency, not a block cached by the last */
     PG.have_log=0;
     g_bcb_saved=0; g_bcb_why[0]=0;
     if(!B.ok){ PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"method B off — %s":"방법 B 비활성 — %s",B.why); return; }

@@ -131,6 +131,40 @@ probe "scope 3"         'perm.limited=1 .*ptrace_scope=3'                   'roo
 echo "2. page headers: recent sample only, resident only; large buffer on request"
 "$TMP/t" || bad=1
 
+# 2c. Residency is read afresh every frame: header pages that come in or go out between two
+#     frames are read or skipped by what the pagemap says now.  All io pages share one 2MB
+#     pagemap block, so a block kept from the last frame would be reused.
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$SRC" > "$TMP/f.c"
+cat >> "$TMP/f.c" <<'C'
+#define NB 40
+static unsigned char pool_[4096], *bcbs_, *iop_[NB];
+int main(void){
+    int bad=0; static proc_t P; P.pid=getpid(); CAP.vm_readv=1; g_ascii=1;
+    B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
+    bcbs_=calloc(NB,(size_t)g_bt->pg.sz_bcb);
+    unsigned char *raw=mmap(NULL,4u<<20,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    unsigned char *blk=(unsigned char*)(((uintptr_t)raw+(2u<<20)-1)&~(uintptr_t)((2u<<20)-1));   /* one 2MB block */
+    for(int i=0;i<NB;i++) iop_[i]=blk+(size_t)i*8192;
+    int32_t nb=NB; memcpy(pool_+g_bt->off_pgbuf_nbuf,&nb,4);
+    uint64_t t=(uint64_t)(uintptr_t)bcbs_; memcpy(pool_+g_bt->pg.bcbtab,&t,8);
+    for(int i=0;i<NB;i++){ unsigned char*b=bcbs_+(size_t)i*g_bt->pg.sz_bcb; int pid=500+i; int16_t v=0; uint32_t z=0x10000u; uint64_t ol=~0ull;
+        memcpy(b+g_bt->pg.vpid,&pid,4); memcpy(b+g_bt->pg.vpid+4,&v,2); memcpy(b+g_bt->pg.flags,&z,4); memcpy(b+g_bt->pg.olsa,&ol,8);
+        uint64_t ip=(uint64_t)(uintptr_t)iop_[i]; memcpy(b+g_bt->pg.iopg,&ip,8); }
+    pgbuf_scan(&P); int r1=PG.nhdr, n1=PG.nonres;                       /* frame 1: none resident */
+    for(int i=0;i<NB;i++){ unsigned char*h=iop_[i]+g_bt->pg.iobuf_iopg; int pid=500+i; int16_t v=0; uint64_t l=5;
+        memcpy(h,&l,8); memcpy(h+8,&pid,4); memcpy(h+12,&v,2); }            /* they come in */
+    pgbuf_scan(&P); int r2=PG.nhdr, n2=PG.nonres, ok2=PG.ok;              /* frame 2 */
+    madvise(blk,(size_t)NB*8192,MADV_DONTNEED);                           /* they go out */
+    pgbuf_scan(&P); int r3=PG.nhdr, n3=PG.nonres;                       /* frame 3 */
+    int ok = r1==0 && n1==NB && r2==NB && n2==0 && ok2 && r3==0 && n3==NB;
+    printf("  %s   residency per frame: read %d/%d/%d, not resident %d/%d/%d (want 0/%d/0, %d/0/%d)\n",
+           ok?"ok  ":"FAIL",r1,r2,r3,n1,n2,n3,NB,NB,NB);
+    return !ok;
+}
+C
+gcc -O0 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/f" "$TMP/f.c" -lm -lpthread 2>"$TMP/ccf.err" || { cat "$TMP/ccf.err"; echo "→ FAIL (compile failed)"; exit 1; }
+"$TMP/f" || bad=1
+
 echo "3. live target"
 if [ -x "$BIN" ] && "$BIN" -d 2>/dev/null | grep -q '^heapB.enabled=1'; then
     if ldd "$BIN" >/dev/null 2>&1; then     # a static binary ignores the preload shim
