@@ -952,11 +952,26 @@ static void pd_reap_zombies(void){
         if(r==0) g_pd_zombie[m++]=g_pd_zombie[i]; }
     g_pd_nz=m;
 }
+/* Done with the child: still alive (EOF with the group still up, say) it is killed, so
+   nothing forgotten here can outlive the run; reaped later */
 static void pd_forget_child(void){
     if(g_pd_pid<0) return;
     int st; pid_t r=waitpid(g_pd_pid,&st,WNOHANG);
-    if(r==0 && g_pd_nz<(int)(sizeof g_pd_zombie/sizeof g_pd_zombie[0])) g_pd_zombie[g_pd_nz++]=g_pd_pid;
+    if(r==0){ kill(-g_pd_pid,SIGKILL);
+              if(g_pd_nz<(int)(sizeof g_pd_zombie/sizeof g_pd_zombie[0])) g_pd_zombie[g_pd_nz++]=g_pd_pid; }
     g_pd_pid=-1;
+}
+/* A child right after fork(): the parent's children are not its to stop, nor its terminal
+   to restore, so the handlers it inherited go back to the default first */
+static void child_forget_parent(void);
+/* Every signal with a handler is held from fork() until the child's pid is recorded and
+   the child has reset the handlers: in the parent, a handler running in that window would
+   not see the child and leave it behind; in the child, it would run as the parent's */
+static const int g_handled_sigs[]={SIGINT,SIGTERM,SIGHUP,SIGQUIT,SIGTSTP,SIGCONT,SIGABRT,SIGSEGV,SIGBUS,SIGFPE};
+static void kids_hold(sigset_t *old){
+    sigset_t m; sigemptyset(&m);
+    for(size_t i=0;i<sizeof g_handled_sigs/sizeof g_handled_sigs[0];i++) sigaddset(&m,g_handled_sigs[i]);
+    sigprocmask(SIG_BLOCK,&m,old);
 }
 static FILE *paramdump_start(int spid,const char *db){
     char bin[512], envc[600], envd[600], envl[1100], root[512]="", dbs[512]="", cub[512]="";
@@ -996,12 +1011,15 @@ static FILE *paramdump_start(int spid,const char *db){
     int fd[2];
     if(pipe(fd)<0){ snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"pipe failed: %s":"pipe 실패: %s",strerror(errno));
                     g_pd_state=PD_SKIPPED; return NULL; }
+    sigset_t held; kids_hold(&held);
     pid_t pid=fork();
     if(pid<0){ /* EAGAIN means the host process limit; passing over it silently would leave no way
                   to tell why the parameters are empty. */
-               snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"fork failed: %s":"fork 실패: %s",strerror(errno));
+               int e=errno; sigprocmask(SIG_SETMASK,&held,NULL);
+               snprintf(g_pd_why,sizeof g_pd_why,g_ascii?"fork failed: %s":"fork 실패: %s",strerror(e));
                close(fd[0]); close(fd[1]); g_pd_state=PD_SKIPPED; return NULL; }
     if(pid==0){                                  /* Child */
+        child_forget_parent(); sigprocmask(SIG_SETMASK,&held,NULL);   /* exec keeps the mask */
         setpgid(0,0);                            /* Own pgid, so killing takes the grandchildren too */
         close(fd[0]);
         dup2(fd[1],STDOUT_FILENO); dup2(fd[1],STDERR_FILENO); close(fd[1]);   /* the error line is the reason */
@@ -1023,6 +1041,7 @@ static FILE *paramdump_start(int spid,const char *db){
     { int fl=fcntl(fd[0],F_GETFL,0); if(fl>=0) fcntl(fd[0],F_SETFL,fl|O_NONBLOCK);
       fcntl(fd[0],F_SETFD,FD_CLOEXEC); }
     g_pd_pid=pid; g_pd_used=0; g_pd_state=PD_RUNNING; g_pd_deadline=now_ms()+PD_WAIT_MS;
+    sigprocmask(SIG_SETMASK,&held,NULL);
     FILE *pf=fdopen(fd[0],"r");
     if(!pf){                                     /* nobody would read or reap it: stop it here */
         int e=errno; close(fd[0]); kill(-pid,SIGKILL); pd_forget_child(); pd_reap_zombies();
@@ -1079,6 +1098,10 @@ static int paramdump_poll(FILE **pd,int wait_ms){
         poll(&pf,1,(int)(left>1?left:1));
     }
 }
+/* Live loops that draw no frame (pause, help) still drain the request each tick, so the
+   deadline is kept from one place and an answer is applied as soon as it comes */
+static FILE **g_pd_idle=NULL;
+static void pd_idle_tick(void){ if(g_pd_idle && *g_pd_idle) paramdump_poll(g_pd_idle,0); }
 static void paramdump_apply(char *buf){
     long long dbp=-1;
     g_pd_applied = strchr(buf,'=')!=NULL;
@@ -1842,9 +1865,12 @@ static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
         } else if(kid_ended){                             /* ended without a cache: it failed */
             snprintf(why,wn,"%s",kw[0]?kw:(g_ascii?"extraction failed":"추출 실패")); return 2; }
         int pf[2]; if(pipe2(pf,O_CLOEXEC)!=0){ snprintf(why,wn,"pipe: %s",strerror(errno)); return 2; }
+        sigset_t held; kids_hold(&held);
         pid_t k=fork();
-        if(k<0){ close(pf[0]); close(pf[1]); snprintf(why,wn,"fork: %s",strerror(errno)); return 2; }
+        if(k<0){ int e=errno; sigprocmask(SIG_SETMASK,&held,NULL);
+                 close(pf[0]); close(pf[1]); snprintf(why,wn,"fork: %s",strerror(e)); return 2; }
         if(k==0){
+            child_forget_parent(); sigprocmask(SIG_SETMASK,&held,NULL);
             close(pf[0]); if(setpriority(PRIO_PROCESS,0,10)){}
             long o[DW_N]; char w[160]="";
             if(dwoff_extract(so,o,w,sizeof w)>0){ dw_cache_write(cpath,o); _exit(0); }
@@ -1852,6 +1878,7 @@ static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
             _exit(2);
         }
         close(pf[1]); g_dw_kfd=pf[0]; g_dw_kid=k; snprintf(g_dw_kso,sizeof g_dw_kso,"%s",so);
+        sigprocmask(SIG_SETMASK,&held,NULL);
         { static int reg=0; if(!reg){ atexit(dw_kid_stop); reg=1; } }
         snprintf(why,wn,"%s",g_ascii?"extracting offsets from DWARF in the background":"DWARF 에서 오프셋 추출 중(백그라운드)");
         return 0;
@@ -4208,6 +4235,10 @@ static void on_cont(int s){ int e=errno; (void)s; tui_raw_reenter(); errno=e; }
 static void kids_kill_now(void){
     if(g_pd_pid>0) kill(-g_pd_pid,SIGKILL);
     if(g_dw_kid>0) kill(g_dw_kid,SIGKILL);
+}
+static void child_forget_parent(void){
+    g_pd_pid=-1; g_dw_kid=0; g_dw_kfd=-1; g_raw=0;
+    for(size_t i=0;i<sizeof g_handled_sigs/sizeof g_handled_sigs[0];i++) signal(g_handled_sigs[i],SIG_DFL);
 }
 /* abort() and crashes: the terminal first, then the default action (core, status) */
 static void on_fatal(int s){ tui_raw_restore(); kids_kill_now(); raise_default(s); }
@@ -8172,7 +8203,7 @@ static int help_pager(const char *const *ln,int n){
         printf("\033[38;5;250m  [space] 순환  [→/PgDn] 다음  [←/PgUp] 이전  [q] 닫기\033[0m\n");
         fflush(stdout);
         int k=-1;
-        while(!g_stop && k<0){ k=tui_key(); if(k<0) usleep(40000); }
+        while(!g_stop && k<0){ k=tui_key(); if(k<0){ pd_idle_tick(); usleep(40000); } }
         if(g_stop) return 1;
         /* Same convention as volmap's help: only q closes (tui_key folds the Hangul jamo).
            space/enter rolls over (last page to first), right/down/PgDn advance,
@@ -8849,7 +8880,9 @@ int main(int argc,char **argv){
     const char *cub=getenv("CUBRID");
     FILE *pd=NULL;
     if(!live){ signal(SIGINT,on_term_kids); signal(SIGTERM,on_term_kids);   /* live installs its own */
-               signal(SIGHUP,on_term_kids); signal(SIGQUIT,on_term_kids); }
+               signal(SIGHUP,on_term_kids); signal(SIGQUIT,on_term_kids);
+               signal(SIGABRT,on_term_kids); signal(SIGSEGV,on_term_kids);   /* a crash too */
+               signal(SIGBUS,on_term_kids); signal(SIGFPE,on_term_kids); }
     if(P.pid<0){
         /* Server not running: fill in what is observable rather than stopping */
         memset(&CAP,0,sizeof CAP);
@@ -8881,6 +8914,7 @@ int main(int argc,char **argv){
     if(live){
         /* ---- Live dashboard ---- */
         int lens=1,paused=0,a_pending=0,help=0,view=view0; double a_at=now_ms();   /* When the startup measurement finished */
+        g_pd_idle=&pd;
         tui_enter();
         while(!g_stop){
             if(help){
@@ -8942,10 +8976,8 @@ int main(int argc,char **argv){
                 else if(k=='h') help=1;
             }
             if(g_stop||help) continue;
-            /* No frame is sampled while paused, but a paramdump still waiting is held to its
-               deadline: past it the poll kills the group (an answer that came is applied) */
-            if(paused){ if(pd && now_ms()>=g_pd_deadline) paramdump_poll(&pd,0);
-                        usleep(150000); continue; }
+            /* No frame is sampled while paused; a paramdump still waiting is drained all the same */
+            if(paused){ pd_idle_tick(); usleep(150000); continue; }
             /* Automatic mode: reschedule once the adaptive period has passed since the last completion */
             if(g_a_auto && !a_pending && a_at>=0 && (now_ms()-a_at)/1000.0>=a_period())
                 a_pending=1;

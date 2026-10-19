@@ -50,8 +50,12 @@ int main(int c,char**v){
 C
 gcc -O1 -o "$TMP/srv" "$TMP/srv.c" || { echo "→ FAIL (stand-in)"; exit 1; }
 # Short deadline for the test
-sed -e 's/^#define PD_WAIT_MS 10000 /#define PD_WAIT_MS 1500 /' "$SRC" > "$TMP/src.c"
+sed -e 's/^#define PD_WAIT_MS 10000 /#define PD_WAIT_MS 1500 /' -e 's|/var/tmp/cub_top.dw-|'"$TMP"'/dw-|' "$SRC" > "$TMP/src.c"
 grep -q '^#define PD_WAIT_MS 1500 ' "$TMP/src.c" || { echo "→ FAIL (constant not found)"; exit 1; }
+grep -q "$TMP/dw-" "$TMP/src.c" || { echo "→ FAIL (cache path not found)"; exit 1; }
+# A library with DWARF, for an extraction child to crash in
+printf 'struct session_state { int a; long b; char c[296]; }; struct session_state the_session;\n' > "$TMP/lib.c"
+gcc -g -O0 -shared -fPIC -o "$TMP/lib.so" "$TMP/lib.c" || { echo "→ FAIL (lib.so)"; exit 1; }
 printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/src.c" > "$TMP/t.c"
 cat >> "$TMP/t.c" <<'C'
 static int run(const char *mode,int spid,int wait_ms,double *worst_ms,int *polls){
@@ -133,6 +137,21 @@ int main(int c,char**v){
     st=run("ok",npid,PD_WAIT_MS,&w,&np);
     ok = st==PD_OK && prm_get("data_buffer_size")==536870912 && g_pd_applied;
     printf("  %s   an answer replaces them (data_buffer_size %lld)\n",ok?"ok  ":"FAIL",prm_get("data_buffer_size")); bad|=!ok;
+    /* A DWARF extraction child that crashes inherited on_fatal: it must not stop the
+       parent's paramdump group (a sleeper standing in for it) with its copy of g_pd_pid */
+    { struct rlimit rl={0,0}; setrlimit(RLIMIT_CORE,&rl);
+      pid_t s=fork(); if(s==0){ setpgid(0,0); execlp("sleep","sleep","30",(char*)NULL); _exit(127); }
+      setpgid(s,s); g_pd_pid=s; signal(SIGSEGV,on_fatal);
+      const char *so=getenv("DW_SO"); char cp[256]; dw_cache_path(so,cp,sizeof cp); unlink(cp);
+      g_pd_async=1; long o[DW_N]; char w[160]=""; int st2=dw_load_or_extract(so,o,w,sizeof w);
+      int stopped = st2==0 && g_dw_kid>0 && kill(g_dw_kid,SIGSTOP)==0, sig=0;
+      if(stopped){ kill(g_dw_kid,SIGSEGV); kill(g_dw_kid,SIGCONT); int ws=0; waitpid(g_dw_kid,&ws,0); sig=WIFSIGNALED(ws)?WTERMSIG(ws):0; }
+      usleep(200000); int sst=0, alive = waitpid(s,&sst,WNOHANG)==0;   /* a zombie still answers kill(s,0) */
+      signal(SIGSEGV,SIG_DFL); g_dw_kid=0; if(g_dw_kfd>=0){ close(g_dw_kfd); g_dw_kfd=-1; }
+      kill(-s,SIGKILL); if(alive) waitpid(s,NULL,0); g_pd_pid=-1; unlink(cp);
+      ok = stopped && sig==SIGSEGV && alive;
+      printf("  %s   DWARF child crashing (SIGSEGV) leaves the paramdump group alone: child %s, group %s\n",ok?"ok  ":"FAIL",
+             !stopped?"not caught running":sig==SIGSEGV?"died by SIGSEGV":"ended otherwise",alive?"alive":"killed"); bad|=!ok; }
     return bad;
 }
 C
@@ -164,15 +183,23 @@ int main(int c,char**v){
 }
 C
 gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/f" "$TMP/f.c" -lm -lpthread 2>"$TMP/cc2.err" || { cat "$TMP/cc2.err"; echo "→ FAIL (compile failed)"; exit 1; }
-CUBRID="$R" PD_LOG="$TMP/logs/log" WANT_UID="$(echo $SU | sed -n 's/SRV_UID=\([0-9]*\).*/\1/p')" "$TMP/t" $s1 $s2 $s3 $s4; rc=$?
+CUBRID="$R" PD_LOG="$TMP/logs/log" DW_SO="$TMP/lib.so" WANT_UID="$(echo $SU | sed -n 's/SRV_UID=\([0-9]*\).*/\1/p')" "$TMP/t" $s1 $s2 $s3 $s4; rc=$?
 CUBRID="$R" PD_LOG="$TMP/logs/log" "$TMP/f" $s1 || rc=1
 kill $s1 $s2 $s3 $s4 2>/dev/null; wait $s1 $s2 $s3 $s4 2>/dev/null
-# Live: a paramdump that hangs is held to its deadline while paused, and nothing it started
-# outlives the run - quit while it waits, or a one-shot run interrupted by SIGINT.  The
+# Live: a paramdump that hangs is held to its deadline while paused or in the help, and
+# nothing it started outlives the run - quit while it waits, a one-shot run interrupted by
+# SIGINT or crashing (SIGSEGV), a child that closed its output and then hung.  The
 # stand-in's cubrid execs a named script so its processes can be found and counted.
 LT=$TMP/live; LR=$LT/root; mkdir -p $LR/lib $LR/bin
 head -c 8192 /dev/zero > $LR/lib/libcubrid.so.11.5
-printf '#!/bin/sh\nexec %s/hang\n' "$LT" > $LR/bin/cubrid; printf '#!/bin/sh\nsleep 60\n' > $LT/hang; chmod +x $LR/bin/cubrid $LT/hang
+printf '#!/bin/sh\nexec %s/${PD_HANG:-hang}\n' "$LT" > $LR/bin/cubrid; printf '#!/bin/sh\nsleep 60\n' > $LT/hang
+printf '#!/bin/sh\nexec >/dev/null 2>&1\nsleep 60\n' > $LT/hang2; chmod +x $LR/bin/cubrid $LT/hang $LT/hang2
+# Whatever a scenario left (its own cleanup not reached: timeout, exception): the hang
+# groups and the pty cub_top
+sweep(){ for p in $(pgrep -f -- "$LT/hang"); do kill -9 -- -$(ps -o pgid= -p $p | tr -d ' ') 2>/dev/null; done
+         for p in $(pgrep -x -f -- "$ROOT/cub_top -b --interval 0.3"); do kill -9 $p 2>/dev/null; done; }
+hangs(){ pgrep -f -- "$LT/hang" | wc -l; }
+waithang(){ n=0; for i in $(seq 40); do n=$(hangs); [ "$n" -ge 1 ] && break; sleep 0.1; done; echo $n; }   # a loaded host starts slowly
 cat > $LT/srv.c <<'C'
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -195,31 +222,47 @@ def pump(fd,sec):
 pid,fd=pty.fork()
 if pid==0:
     os.environ["TERM"]="xterm"; os.execv(binp,[binp,"-b","--interval","0.3"])
-fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',50,160,0,0))
-pump(fd,1.5); k0=kids(); k1=[]
-if mode=="pause":
-    os.write(fd,b' '); pump(fd,13); k1=kids()
-os.write(fd,b'q'); pump(fd,1.5)
-try: os.waitpid(pid,0)
-except ChildProcessError: pass
-time.sleep(0.3); k2=kids()
-for p in set(k0+k1+k2):
-    try: os.killpg(os.getpgid(p),signal.SIGKILL)
+k0=k1=k2=[]
+try:
+    fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',50,160,0,0))
+    pump(fd,1.5); k0=kids()
+    if mode=="pause":
+        os.write(fd,b' '); pump(fd,13); k1=kids()
+    elif mode=="help":
+        os.write(fd,b'h'); pump(fd,13); k1=kids(); os.write(fd,b'q'); pump(fd,0.5)   # q closes the help
+    os.write(fd,b'q'); pump(fd,1.5)
+    try: os.waitpid(pid,0)
+    except ChildProcessError: pass
+    time.sleep(0.3); k2=kids()
+finally:                                  # whatever happened above, nothing is left running
+    try: os.kill(pid,signal.SIGKILL)
     except OSError: pass
+    for p in set(k0+k1+k2+kids()):
+        try: os.killpg(os.getpgid(p),signal.SIGKILL)
+        except OSError: pass
 ok = len(k0)>=1 and len(k1)==0 and len(k2)==0
-if mode=="pause": print("  %s   live, paused 13 s while paramdump hangs: %d waiting, %d after the deadline, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),len(k2)))
-else:             print("  %s   live, quit while paramdump hangs: %d waiting, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k2)))
+if mode=="pause":  print("  %s   live, paused 13 s while paramdump hangs: %d waiting, %d after the deadline, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),len(k2)))
+elif mode=="help": print("  %s   live, help open 13 s while paramdump hangs: %d waiting, %d after the deadline, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),len(k2)))
+else:              print("  %s   live, quit while paramdump hangs: %d waiting, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k2)))
 sys.exit(0 if ok else 1)
 PY2
 env CUBRID=$LR CUBRID_DATABASES=$LT $LT/cub_server $LR/lib/libcubrid.so.11.5 & ls_=$!
 sleep 0.3
-timeout 40 python3 $LT/live.py "$ROOT/cub_top" "$LT" pause || rc=1
-timeout 20 python3 $LT/live.py "$ROOT/cub_top" "$LT" quit || rc=1
-"$ROOT/cub_top" -d >/dev/null 2>&1 & op=$!
-sleep 1; n0=$(pgrep -f -- "$LT/hang" | wc -l); kill -INT $op; wait $op 2>/dev/null; sleep 0.3
-n1=$(pgrep -f -- "$LT/hang" | wc -l)
-for p in $(pgrep -f -- "$LT/hang"); do kill -9 -- -$(ps -o pgid= -p $p | tr -d ' ') 2>/dev/null; done
-if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     one-shot interrupted (SIGINT) while paramdump hangs: $n0 waiting, $n1 after"
-else echo "  FAIL   one-shot interrupted (SIGINT): $n0 waiting, $n1 after"; rc=1; fi
+live(){ timeout "$1" python3 $LT/live.py "$ROOT/cub_top" "$LT" "$2" || { echo "  FAIL   live scenario $2 did not finish cleanly"; rc=1; }; sweep; }
+live 40 pause
+live 40 help
+live 20 quit
+# One-shot cut by a signal: INT (the default action is kept), and a crash (SIGSEGV)
+for sig in INT SEGV; do
+    (ulimit -c 0; exec "$ROOT/cub_top" -d >/dev/null 2>&1) & op=$!
+    n0=$(waithang); kill -$sig $op; wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
+    if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     one-shot cut by SIG$sig while paramdump hangs: $n0 waiting, $n1 after"
+    else echo "  FAIL   one-shot cut by SIG$sig: $n0 waiting, $n1 after"; rc=1; fi
+done
+# The child closes its output, then hangs: EOF with the group still up is stopped at once
+PD_HANG=hang2 "$ROOT/cub_top" -d >/dev/null 2>&1 & op=$!
+n0=$(waithang); wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
+if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     paramdump closed its output and hung: $n0 while the run waited, $n1 after"
+else echo "  FAIL   paramdump closed its output and hung: $n0 while the run waited, $n1 after"; rc=1; fi
 kill $ls_ 2>/dev/null; wait $ls_ 2>/dev/null
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
