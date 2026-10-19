@@ -4094,7 +4094,9 @@ volmap_panel_fill_one_page (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, VOLMAP_PANEL 
     }
   if (!((vol->pagebm[sect] >> i) & 1))
     {
-      p->glyph[cell] = '_';
+      /* no owner: whether the page is allocated is unknown (that comes from the
+         owner's file table), so it is '?' rather than passed off as empty */
+      p->glyph[cell] = (vol->owner[sect] < 0 && !ctx->scan_active) ? '?' : '_';
       return;
     }
   if (!readable || page == NULL || pr->pageid != (PAGEID) pg || pr->volid != vol->volid)
@@ -5072,13 +5074,16 @@ volmap_cell_classify (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long p0, long per_p
     {
       out->state = '~';		/* progressive scan has not attributed this sector yet */
     }
+  else if (out->maj < 0)
+    {
+      /* reserved, but no file claims it: unknown, not empty.  Its allocation is not
+         known either (it comes from the owner's file table), so this is decided
+         before the fill test, or the cell would pass for reserved-but-empty */
+      out->state = '?';
+    }
   else if (out->nalloc * 50 < out->npages_cell)
     {
       out->state = '_';
-    }
-  else if (out->maj < 0)
-    {
-      out->state = '?';
     }
   else
     {
