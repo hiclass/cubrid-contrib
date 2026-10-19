@@ -1808,7 +1808,10 @@ static int dw_cache_load(const char*cpath,long out[]){
    writes the cache; frames go on meanwhile and pick the cache up when the child is done.
    One-shot modes wait, as they report this very frame. */
 static pid_t g_dw_kid=0; static int g_dw_kfd=-1; static char g_dw_kso[PATH_MAX];
-static void dw_kid_stop(void){ if(g_dw_kid>0){ kill(g_dw_kid,SIGKILL); waitpid(g_dw_kid,NULL,0); g_dw_kid=0; } }
+static void dw_kid_stop(void){
+    if(g_dw_kid>0){ kill(g_dw_kid,SIGKILL); waitpid(g_dw_kid,NULL,0); g_dw_kid=0; }
+    if(g_dw_kfd>=0){ close(g_dw_kfd); g_dw_kfd=-1; }   /* its pipe too, or each switch leaves one open */
+}
 /* The child has finished and waits to be collected (not collected here: dw_load_or_extract
    reads its reason and reaps it).  A frame that adopted another build's table meanwhile
    asks this to go back through the ladder, where this build's own offsets now win. */

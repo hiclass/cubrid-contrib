@@ -139,6 +139,21 @@ int main(void){
     int wp=waitpid(kid,NULL,WNOHANG); ok = st==1 && d0==0 && d1==1 && still && g_dw_kid==0 && wp<0; if(!ok) printf("        st=%d still=%d g_dw_kid=%d wp=%d w=%s\n",st,still,(int)g_dw_kid,wp,w);
     printf("  %s   finished child noticed (%d then %d after %d poll(s)) without being reaped early; then adopted and reaped\n",
            ok?"ok  ":"FAIL",d0,d1,polls); bad|=!ok;
+    /* Switching to another instance's library while a child still extracts: the child is
+       stopped and its pipe closed, every time - no descriptor left per switch.  The child
+       is held with SIGSTOP so it is still running when the switch comes. */
+    { int nfd0=0, nfd1=0; DIR *dd; struct dirent *de;
+      unlink(cp1); unlink(cp2);
+      if((dd=opendir("/proc/self/fd"))){ while((de=readdir(dd))) nfd0++; closedir(dd); }
+      for(int sw=0;sw<6;sw++){
+          const char *so = (sw&1) ? "nobid.so" : "lib.so";
+          dw_load_or_extract(so,o,w,sizeof w);
+          if(g_dw_kid>0) kill(g_dw_kid,SIGSTOP);
+      }
+      dw_kid_stop();
+      if((dd=opendir("/proc/self/fd"))){ while((de=readdir(dd))) nfd1++; closedir(dd); }
+      ok = nfd1==nfd0 && g_dw_kfd<0 && g_dw_kid==0;
+      printf("  %s   6 library switches during extraction: open fds %d -> %d, pipe %d (want equal, -1)\n",ok?"ok  ":"FAIL",nfd0,nfd1,g_dw_kfd); bad|=!ok; }
     return bad;
 }
 C
