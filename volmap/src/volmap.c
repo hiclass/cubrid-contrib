@@ -165,7 +165,43 @@ struct volmap_file
   INT64 time_creation;		/* from FILE_HEADER — the only identity a temp file carries */
   PAGEID root_page;		/* b-tree root = sticky first page (BTID third component) */
   char index_name[64];		/* lazily resolved from class properties; "" = not yet, "?" = failed */
+  signed char tracked;		/* 1 listed in the file tracker, 2 listed and marked deleted (dropped,
+				   awaiting vacuum), 0 found by probing only */
 };
+
+/* What runs beside the database, read from /proc (volmap_proc_scan).  Nothing here
+   touches the server: process command lines and the socket table are public. */
+typedef struct volmap_proc
+{
+  bool scanned;			/* /proc could be read at all */
+  pid_t server_pid;		/* cub_server <db> on this host; 0 = none */
+  bool server_registered;	/* its registration socket is in /proc/net/unix: boot and
+				   restart recovery are over (css_init runs after boot_restart_server) */
+  long server_elapsed;		/* seconds since cub_server started */
+  char util[24];		/* cubrid/cub_admin utility running on this database ("" = none) */
+  pid_t util_pid;
+  long util_elapsed;		/* seconds since it started */
+  time_t at;			/* when this was sampled */
+} VOLMAP_PROC;
+
+/* Disk activity of the device the volumes live on, from /proc/diskstats (readable by
+   any account), and the server's own I/O from /proc/<pid>/io (its owner or root) */
+typedef struct volmap_io
+{
+  int state;			/* 0 not sampled yet, 1 sampling, -1 device not found */
+  int major_n, minor_n;
+  char dev[32];
+  struct timespec t;		/* last sample */
+  unsigned long long io_ticks, in_queue, rd_sect, wr_sect;
+  double util_pct;		/* % of the interval the device had I/O in flight */
+  double queue;			/* average requests in flight */
+  double mb_s;			/* device throughput over the interval */
+  bool busy;			/* util_pct >= VOLMAP_IO_BUSY_PCT */
+  int srv_ok;			/* /proc/<server>/io: 1 readable, 0 not, -1 not tried */
+  unsigned long long srv_rd, srv_wr;
+  double srv_mb_s;		/* the server's read+write throughput */
+} VOLMAP_IO;
+#define VOLMAP_IO_BUSY_PCT 80
 
 /* one record of the cub_top --bcb-dump snapshot (32 bytes, little-endian; shared contract) */
 typedef struct volmap_bufrec VOLMAP_BUFREC;
@@ -230,6 +266,21 @@ struct volmap_ctx
   bool release_unsupported;	/* the log names a release before 10.1 (warned at start and at exit) */
   int shutdown_state;		/* log header is_shutdown: 1 clean, 0 not clean, -1 unknown (no log) */
   long sweep_left;		/* unowned sectors the automatic second pass did not probe (over the cap) */
+  /* The engine's own list of files: volume 0 names the boot heap, whose first record
+     (BOOT_DB_PARM) names the file tracker.  Read first, so pass A probes only the
+     sectors no listed file owns (volmap_discover_tracker). */
+  bool no_tracker;		/* --no-tracker: probe every reserved sector's first page, as before */
+  int tracker_state;		/* 0 not tried, 1 read, -1 not readable (tracker_why) */
+  char tracker_why[120];
+  VPID tracker_first;		/* first tracker page, for the re-walk on refresh */
+  int files_tracked;		/* files registered from the tracker */
+  long probe_sectors;		/* sectors whose first page pass A read after the tracker */
+  VOLMAP_PROC proc;		/* server and utility processes of this database (volmap_proc_scan) */
+  VOLMAP_IO io;			/* disk activity (volmap_io_sample) */
+  bool hold;			/* -i: scan and auto refresh paused while a utility runs or the server recovers */
+  bool hold_override;		/* the user pressed r during a hold: go on regardless, this run */
+  char notes_json[2048];	/* --format=json: notes collected by volmap_findings */
+  int notes_len;
   VOLMAP_FILE *files;
   int nfiles;
   int width;
@@ -285,6 +336,14 @@ static int volmap_discover_files_from (VOLMAP_CTX * ctx, int first_pass);
 static int volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf);
 static int volmap_scan_temp_volumes (VOLMAP_CTX * ctx);
 static bool volmap_try_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, char *iopage);
+static void volmap_discover_tracker (VOLMAP_CTX * ctx);
+static int volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn);
+static void volmap_tde_sample (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol);
+static void volmap_proc_scan (VOLMAP_CTX * ctx);
+static void volmap_io_sample (VOLMAP_CTX * ctx);
+static void volmap_io_begin (VOLMAP_CTX * ctx);
+static void volmap_io_window (VOLMAP_CTX * ctx);
+static int volmap_blockdev_of (const char *path, int *major_out, int *minor_out);
 static void volmap_walk_extdata (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const char *iopage, int offset,
 				 bool is_partial, int file_idx);
 static void volmap_deep_scan (VOLMAP_CTX * ctx);
@@ -522,6 +581,42 @@ static const char *
 volmap_shutdown_name (int st)
 {
   return (st == 1) ? "clean" : (st == 0) ? "not_clean" : "unknown";
+}
+
+/* How the files were found: the tracker (and how many it listed) or probing alone */
+static void
+volmap_print_discovery (const VOLMAP_CTX * ctx, FILE * fp)
+{
+  int k, untracked = 0, deleted = 0;
+
+  for (k = 0; k < ctx->nfiles; k++)
+    {
+      untracked += (ctx->files[k].tracked == 0);
+      deleted += (ctx->files[k].tracked == 2);
+    }
+  if (ctx->tracker_state == 1)
+    {
+      fprintf (fp, "  files: %d listed in the file tracker", ctx->files_tracked);
+      if (deleted > 0)
+	{
+	  fprintf (fp, " (%d marked deleted, sectors freed by vacuum later)", deleted);
+	}
+      fprintf (fp, "; %ld sector%s probed for the rest", ctx->probe_sectors, ctx->probe_sectors == 1 ? "" : "s");
+      if (untracked > 0)
+	{
+	  fprintf (fp, ", %d file%s found that the tracker does not list", untracked, untracked == 1 ? "" : "s");
+	}
+      fprintf (fp, "\n");
+    }
+  else if (ctx->tracker_state == -1)
+    {
+      fprintf (fp, "  files: file tracker not read (%s) - found by probing the first page of %ld reserved sectors\n",
+	       ctx->tracker_why, ctx->probe_sectors);
+    }
+  else if (ctx->no_tracker)
+    {
+      fprintf (fp, "  files: found by probing the first page of %ld reserved sectors (--no-tracker)\n", ctx->probe_sectors);
+    }
 }
 
 static void
@@ -1761,6 +1856,375 @@ volmap_probe_sector (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, DKNSECTS s, char *io
     }
 }
 
+/* ---- the file tracker: the engine's own list of files -------------------------------
+ *
+ * Every file is registered in the tracker when it is created and unregistered when it
+ * is destroyed (file_tracker_register/unregister).  Reading it gives the exact list of
+ * files - wherever their headers happen to be - for a few pages: the tracker pages
+ * (16 bytes per file) plus one header page per file.  Probing, which reads the first
+ * page of every reserved sector, is then needed only for the sectors no listed file
+ * owns: files being created or destroyed at that moment, and sectors a dropped file
+ * still holds until vacuum frees them.
+ *
+ * The path is the engine's: volume 0's header names the boot heap (boot_hfid); the
+ * first record of that heap is BOOT_DB_PARM, whose first field is trk_vfid - the same
+ * position from 10.1 to 11.5; the tracker file's sticky first page starts the chain of
+ * tracker pages (FILE_EXTENSIBLE_DATA, vpid_next).  Each step is checked against what
+ * it must be (a heap header, a FILE_TRACKER header, 16-byte items), so a wrong guess
+ * stops here instead of producing a wrong list; the probe then does all the work, as
+ * before, and the report says the tracker was not read. */
+
+/* FILE_TRACK_ITEM is private to file_manager.c; its 16-byte on-disk form is the
+   same from 10.1 to 11.5 */
+typedef struct volmap_track_item
+{
+  INT32 fileid;
+  INT16 volid;
+  INT16 type;
+  unsigned char is_marked_deleted;	/* heap metadata: dropped, sectors freed by vacuum later */
+  unsigned char pad[7];
+} VOLMAP_TRACK_ITEM;
+
+/* the index of the file with this VFID, or -1 */
+static int
+volmap_file_index (VOLMAP_CTX * ctx, INT16 volid, INT32 fileid)
+{
+  int k;
+
+  for (k = 0; k < ctx->nfiles; k++)
+    {
+      if (ctx->files[k].vfid.volid == volid && ctx->files[k].vfid.fileid == fileid)
+	{
+	  return k;
+	}
+    }
+  return -1;
+}
+
+/* read page `pageid` of `vol` and check it is the FILE_HEADER of that very file and of
+   `want_type` (FILE_LAST = any type); the page is left in iopage */
+static bool
+volmap_read_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, int want_type, char *iopage)
+{
+  const FILE_HEADER *fhead;
+
+  if (vol == NULL || pageid <= vol->sys_lastpage || pageid >= (PAGEID) vol->nsect_total * VOLMAP_SECT_NPAGES
+      || !volmap_read_iopage (vol, pageid, iopage))
+    {
+      return false;
+    }
+  fhead = (const FILE_HEADER *) (iopage + prv_user_offset ());
+  if (fhead->self.fileid != pageid || fhead->self.volid != vol->volid)
+    {
+      return false;
+    }
+  if (fhead->type < FILE_TRACKER || fhead->type >= FILE_LAST || fhead->n_sector_total <= 0)
+    {
+      return false;
+    }
+  (void) ctx;
+  return want_type == FILE_LAST || fhead->type == want_type;
+}
+
+/* Find the tracker: boot_hfid -> boot heap pages -> the record whose first 8 bytes name
+   a FILE_TRACKER header.  Returns false with the reason in why. */
+static bool
+volmap_tracker_locate (VOLMAP_CTX * ctx, VPID * first, char *why, size_t wn)
+{
+  VOLMAP_VOLUME *vol0 = volmap_find_vol (ctx, 0);
+  int prv = prv_user_offset ();
+  char *page = NULL, *hpage = NULL;
+  HFID hfid;
+  int shifts[2], nshift, si, boot_idx = -1, vi;
+  bool found = false;
+
+  if (vol0 == NULL)
+    {
+      snprintf (why, wn, "volume 0 is not open");
+      return false;
+    }
+  page = (char *) malloc (volmap_max_iopagesize (ctx));
+  hpage = (char *) malloc (volmap_max_iopagesize (ctx));
+  if (page == NULL || hpage == NULL || !volmap_read_iopage (vol0, 0, page))
+    {
+      snprintf (why, wn, "volume 0 header could not be read");
+      free (page);
+      free (hpage);
+      return false;
+    }
+  /* boot_hfid sits after vol_creation, which v11.4 inserted: 8 bytes earlier on older
+     volumes.  When the layout is known use it; otherwise try both, the header check
+     below rejects the wrong one. */
+  if (ctx->vlayout == VOLMAP_VLAY_114)
+    {
+      shifts[0] = 0;
+      nshift = 1;
+    }
+  else if (ctx->vlayout == VOLMAP_VLAY_UNKNOWN)
+    {
+      shifts[0] = 0;
+      shifts[1] = -8;
+      nshift = 2;
+    }
+  else
+    {
+      shifts[0] = -8;
+      nshift = 1;
+    }
+  for (si = 0; si < nshift && boot_idx < 0; si++)
+    {
+      memcpy (&hfid, page + prv + offsetof (DISK_VOLUME_HEADER, boot_hfid) + shifts[si], sizeof (hfid));
+      if (hfid.vfid.volid != 0 || hfid.vfid.fileid <= 0 || hfid.hpgid <= 0)
+	{
+	  continue;
+	}
+      if (!volmap_read_file_header (ctx, vol0, hfid.vfid.fileid, FILE_HEAP, hpage))
+	{
+	  continue;
+	}
+      boot_idx = volmap_file_index (ctx, 0, hfid.vfid.fileid);
+      if (boot_idx < 0 && volmap_try_file_header (ctx, vol0, hfid.vfid.fileid, hpage))
+	{
+	  boot_idx = ctx->nfiles - 1;	/* registered like any file: it is one */
+	}
+    }
+  if (boot_idx < 0)
+    {
+      snprintf (why, wn, "boot heap not found from the volume 0 header");
+      free (page);
+      free (hpage);
+      return false;
+    }
+  /* the boot heap's pages are known now (its sector tables were walked): scan their
+     records for the one that names a FILE_TRACKER header */
+  for (vi = 0; vi < ctx->nvols && !found; vi++)
+    {
+      VOLMAP_VOLUME *sv = &ctx->vols[vi];
+      DKNSECTS s;
+
+      for (s = 0; s < sv->nsect_total && !found; s++)
+	{
+	  int pg;
+
+	  if (sv->w_owner[s] != boot_idx)
+	    {
+	      continue;
+	    }
+	  for (pg = 0; pg < VOLMAP_SECT_NPAGES && !found; pg++)
+	    {
+	      PAGEID pageid = s * VOLMAP_SECT_NPAGES + pg;
+	      const FILEIO_PAGE_RESERVED *pr;
+	      const SPAGE_HEADER *sph;
+	      int slotid;
+
+	      if (!((sv->w_pagebm[s] >> pg) & 1) || (sv == vol0 && pageid == hfid.vfid.fileid)
+		  || !volmap_read_iopage (sv, pageid, page))
+		{
+		  continue;
+		}
+	      pr = (const FILEIO_PAGE_RESERVED *) page;
+	      sph = (const SPAGE_HEADER *) (page + prv);
+	      if (pr->ptype != PAGE_HEAP || pr->pageid != pageid || pr->volid != sv->volid
+		  || sph->num_slots <= 1 || sph->num_slots > sv->user_size / (int) sizeof (SPAGE_SLOT))
+		{
+		  continue;
+		}
+	      for (slotid = 1; slotid < sph->num_slots && !found; slotid++)
+		{
+		  const SPAGE_SLOT *slot = (const SPAGE_SLOT *) (page + prv + sv->user_size - sizeof (SPAGE_SLOT)) - slotid;
+		  VFID cand;
+
+		  if (slot->record_type != REC_HOME || slot->record_length < sizeof (VFID)
+		      || slot->offset_to_record == 0 || slot->offset_to_record + sizeof (VFID) > (unsigned) sv->user_size)
+		    {
+		      continue;
+		    }
+		  memcpy (&cand, page + prv + slot->offset_to_record, sizeof (cand));
+		  if (cand.volid != 0 || cand.fileid <= 0 || !volmap_read_file_header (ctx, vol0, cand.fileid, FILE_TRACKER, hpage))
+		    {
+		      continue;
+		    }
+		  *first = ((const FILE_HEADER *) (hpage + prv))->vpid_sticky_first;
+		  found = !VPID_ISNULL (first);
+		  if (found)
+		    {
+		      /* the tracker is a file too, the one file it does not list itself */
+		      int ti = volmap_file_index (ctx, 0, cand.fileid);
+
+		      if (ti < 0 && volmap_try_file_header (ctx, vol0, cand.fileid, hpage))
+			{
+			  ti = ctx->nfiles - 1;
+			}
+		      if (ti >= 0)
+			{
+			  ctx->files[ti].tracked = 1;
+			}
+		    }
+		}
+	    }
+	}
+    }
+  if (!found)
+    {
+      snprintf (why, wn, "no record of the boot heap names a FILE_TRACKER header");
+    }
+  free (page);
+  free (hpage);
+  return found;
+}
+
+/* Walk the tracker pages and register every file they list.  Files already known are
+   only marked.  Returns the number of files registered, -1 when the chain could not
+   be read at all. */
+static int
+volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
+{
+  int prv = prv_user_offset ();
+  char *page = (char *) malloc (volmap_max_iopagesize (ctx));
+  char *hpage = (char *) malloc (volmap_max_iopagesize (ctx));
+  VPID cur = *first;
+  int guard, registered = 0, pages = 0;
+
+  if (page == NULL || hpage == NULL)
+    {
+      free (page);
+      free (hpage);
+      snprintf (why, wn, "out of memory");
+      return -1;
+    }
+  for (guard = 0; guard < 100000 && !VPID_ISNULL (&cur); guard++)
+    {
+      VOLMAP_VOLUME *vol = volmap_find_vol (ctx, cur.volid);
+      const FILEIO_PAGE_RESERVED *pr;
+      const FILE_EXTENSIBLE_DATA *extdata;
+      const char *items;
+      int i;
+
+      if (vol == NULL || !volmap_read_iopage (vol, cur.pageid, page))
+	{
+	  break;
+	}
+      pr = (const FILEIO_PAGE_RESERVED *) page;
+      extdata = (const FILE_EXTENSIBLE_DATA *) (page + prv);
+      items = (const char *) extdata + DB_ALIGN (sizeof (FILE_EXTENSIBLE_DATA), MAX_ALIGNMENT);
+      if (pr->ptype != PAGE_FTAB || pr->pageid != cur.pageid || pr->volid != vol->volid
+	  || extdata->size_of_item != (int) sizeof (VOLMAP_TRACK_ITEM) || extdata->n_items < 0
+	  || prv + (int) DB_ALIGN (sizeof (FILE_EXTENSIBLE_DATA), MAX_ALIGNMENT)
+	  + extdata->n_items * (int) sizeof (VOLMAP_TRACK_ITEM) > vol->iopagesize)
+	{
+	  break;		/* not a tracker page: stop rather than guess */
+	}
+      pages++;
+      for (i = 0; i < extdata->n_items; i++)
+	{
+	  VOLMAP_TRACK_ITEM it;
+	  VOLMAP_VOLUME *fv;
+	  int idx;
+
+	  memcpy (&it, items + i * sizeof (it), sizeof (it));
+	  fv = volmap_find_vol (ctx, it.volid);
+	  if (fv == NULL)
+	    {
+	      continue;		/* a volume that could not be opened: listed in SKIPPED VOLUMES */
+	    }
+	  idx = volmap_file_index (ctx, it.volid, it.fileid);
+	  if (idx < 0)
+	    {
+	      /* The header is read and checked like a probed one; a file being created or
+	         destroyed right now can fail that, and then the probe may still find it */
+	      if (!volmap_read_file_header (ctx, fv, it.fileid, FILE_LAST, hpage)
+		  || !volmap_try_file_header (ctx, fv, it.fileid, hpage))
+		{
+		  continue;
+		}
+	      idx = ctx->nfiles - 1;
+	      registered++;
+	    }
+	  ctx->files[idx].tracked = (it.is_marked_deleted && (it.type == FILE_HEAP || it.type == FILE_HEAP_REUSE_SLOTS)) ? 2 : 1;
+	}
+      cur = extdata->vpid_next;
+    }
+  free (page);
+  free (hpage);
+  if (pages == 0)
+    {
+      snprintf (why, wn, "first tracker page is not a tracker page");
+      return -1;
+    }
+  return registered;
+}
+
+/* Read the tracker once per run; pass A then probes only the sectors still unowned */
+static void
+volmap_discover_tracker (VOLMAP_CTX * ctx)
+{
+  char why[120] = "";
+  int n;
+
+  if (ctx->no_tracker || ctx->tracker_state != 0)
+    {
+      return;
+    }
+  if (!volmap_tracker_locate (ctx, &ctx->tracker_first, why, sizeof (why)))
+    {
+      ctx->tracker_state = -1;
+      snprintf (ctx->tracker_why, sizeof (ctx->tracker_why), "%s", why);
+      return;
+    }
+  n = volmap_tracker_walk (ctx, &ctx->tracker_first, why, sizeof (why));
+  if (n < 0)
+    {
+      ctx->tracker_state = -1;
+      snprintf (ctx->tracker_why, sizeof (ctx->tracker_why), "%s", why);
+      return;
+    }
+  ctx->tracker_state = 1;
+  ctx->files_tracked = 0;
+  for (n = 0; n < ctx->nfiles; n++)
+    {
+      ctx->files_tracked += (ctx->files[n].tracked != 0);
+    }
+}
+
+/* With the tracker read, the probe no longer visits the sectors listed files own, and
+   those are where the TDE flag is seen.  Keep that observation as a sample: the first
+   page's 32-byte prefix of up to 64 owned sectors per volume, spread over the volume. */
+#define VOLMAP_TDE_SAMPLE_SECTORS 64
+static void
+volmap_tde_sample (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol)
+{
+  DKNSECTS s, step = vol->nsect_total / VOLMAP_TDE_SAMPLE_SECTORS;
+
+  if (ctx->tracker_state != 1 || vol->tde_bm == NULL)
+    {
+      return;
+    }
+  if (step < 1)
+    {
+      step = 1;
+    }
+  for (s = 0; s < vol->nsect_total; s += step)
+    {
+      FILEIO_PAGE_RESERVED prv_area;
+      PAGEID pageid = s * VOLMAP_SECT_NPAGES;
+
+      if (!vol->w_stab[s] || vol->w_owner[s] < 0 || pageid <= vol->sys_lastpage || ((vol->tde_bm[s] >> 0) & 1))
+	{
+	  continue;
+	}
+      if (pread (volmap_vol_fd (vol), &prv_area, sizeof (prv_area), (off_t) pageid * vol->iopagesize)
+	  != (ssize_t) sizeof (prv_area))
+	{
+	  return;
+	}
+      if ((prv_area.pflag & 0x3) && prv_area.pageid == pageid && prv_area.volid == vol->volid)
+	{
+	  vol->tde_bm[s] |= (UINT64) 1;
+	  vol->tde_pages++;
+	}
+    }
+}
+
 /* begin progressive discovery: allocate state; the actual probing happens in
  * volmap_discover_step() slices driven from the interactive idle loop */
 static int
@@ -1778,12 +2242,16 @@ volmap_scan_begin (VOLMAP_CTX * ctx)
   ctx->scan_total = 0;
   ctx->scan_probed = 0;
   ctx->scan_pref = 0;
+  /* the listed files first (a few pages): the slices then skip the sectors they own,
+     so on a database whose tracker is readable the scan is over almost at once */
+  volmap_discover_tracker (ctx);
   for (vi = 0; vi < ctx->nvols; vi++)
     {
       for (s = 0; s < ctx->vols[vi].nsect_total; s++)
 	{
 	  ctx->scan_total += ctx->vols[vi].stab[s];
 	}
+      volmap_tde_sample (ctx, &ctx->vols[vi]);
     }
   ctx->scan_active = true;
   return NO_ERROR;
@@ -1870,7 +2338,7 @@ volmap_discover_step (VOLMAP_CTX * ctx, long budget, bool user_idle)
 	{
 	  DKNSECTS run0 = ahead;
 
-	  while (ahead < vol->nsect_total && b0 > 0 && vol->w_stab[ahead])
+	  while (ahead < vol->nsect_total && b0 > 0 && vol->w_stab[ahead] && vol->w_owner[ahead] < 0)
 	    {
 	      ahead++;
 	      b0--;
@@ -1902,8 +2370,14 @@ volmap_discover_step (VOLMAP_CTX * ctx, long budget, bool user_idle)
 	    {
 	      continue;
 	    }
+	  if (vol->w_owner[s] >= 0)
+	    {
+	      ctx->scan_probed++;	/* a listed file's sector: counted as done, not read */
+	      continue;
+	    }
 	  budget--;
 	  ctx->scan_probed++;
+	  ctx->probe_sectors++;
 	  volmap_probe_sector (ctx, vol, s, iopage, 1);
 	  if ((ctx->scan_probed & 0x7F) == 0)
 	    {
@@ -1987,6 +2461,10 @@ volmap_discover_files_from (VOLMAP_CTX * ctx, int first_pass)
 	}
     }
 
+  if (first_pass == 0)
+    {
+      volmap_discover_tracker (ctx);	/* the listed files first: pass A then skips what they own */
+    }
   for (pass = first_pass; pass < npasses; pass++)
     {
       if (pass == 1 && !ctx->full_sweep)
@@ -2005,10 +2483,10 @@ volmap_discover_files_from (VOLMAP_CTX * ctx, int first_pass)
 	  DKNSECTS s;
 	  PAGEID pageid;
 
-	  /* prefetch hint for the strided probe */
+	  /* prefetch hint for the strided probe; a sector a listed file owns is not probed */
 	  for (s = 0; s < vol->nsect_total; s++)
 	    {
-	      if (!vol->w_stab[s] || (pass == 1 && vol->w_owner[s] >= 0))
+	      if (!vol->w_stab[s] || vol->w_owner[s] >= 0)
 		{
 		  continue;
 		}
@@ -2025,13 +2503,21 @@ volmap_discover_files_from (VOLMAP_CTX * ctx, int first_pass)
 	    }
 	  for (s = 0; s < vol->nsect_total; s++)
 	    {
-	      if (!vol->w_stab[s] || (pass == 1 && vol->w_owner[s] >= 0))
+	      if (!vol->w_stab[s] || vol->w_owner[s] >= 0)
 		{
 		  continue;
+		}
+	      if (pass == 0)
+		{
+		  ctx->probe_sectors++;
 		}
 	      volmap_probe_sector (ctx, vol, s, iopage, (pass == 0) ? 1 : VOLMAP_SECT_NPAGES);
 	    }
 	  free (iopage);
+	  if (pass == 0)
+	    {
+	      volmap_tde_sample (ctx, vol);
+	    }
 	}
     }
   return NO_ERROR;
@@ -3369,6 +3855,19 @@ volmap_refresh (VOLMAP_CTX * ctx)
 	}
     }
 
+  /* files created since: the tracker lists them, for the cost of its few pages */
+  if (ctx->tracker_state == 1)
+    {
+      char why[120];
+      int k;
+
+      (void) volmap_tracker_walk (ctx, &ctx->tracker_first, why, sizeof (why));
+      ctx->files_tracked = 0;
+      for (k = 0; k < ctx->nfiles; k++)
+	{
+	  ctx->files_tracked += (ctx->files[k].tracked != 0);
+	}
+    }
   /* delta probe: only reserved sectors that nobody claimed (new files / new extents) */
   for (vi = 0; vi < ctx->nvols; vi++)
     {
@@ -6514,6 +7013,11 @@ volmap_file_line (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long sect, char *buf, s
     {
       n0 = volmap_resolve_class_name (ctx, f0);
     }
+  /* what the tracker says of this file, when it was read: listed as dropped (its
+     sectors are freed by vacuum later), or not listed at all (found by probing) */
+  const char *trk = (ctx->tracker_state != 1 || f0->tracked == 1) ? ""
+    : (f0->tracked == 2) ? " [dropped, awaiting vacuum]" : " [not in the file tracker]";
+
   if (!OID_ISNULL (&f0->class_oid))
     {
       int i9, tot9 = 0, ord9 = 1;
@@ -6539,13 +7043,13 @@ volmap_file_line (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long sect, char *buf, s
       /* A bare 's' reads as seconds; the same value is written "sectors" elsewhere,
 	 so spell the unit out here too (sectors_seen = sectors this file uses in
 	 this volume). */
-      snprintf (buf, bufsz, "%s%s%s (%d sect \xc2\xb7 file %d/%d)",
+      snprintf (buf, bufsz, "%s%s%s (%d sect \xc2\xb7 file %d/%d)%s",
 		(k0 == 0) ? VOLMAP_TAG_H : (k0 == 1) ? VOLMAP_TAG_I : "", n0,
-		(role0 == 2) ? " ovf" : "", f0->sectors_seen, ord9, tot9);
+		(role0 == 2) ? " ovf" : "", f0->sectors_seen, ord9, tot9, trk);
     }
   else
     {
-      snprintf (buf, bufsz, "%s (%d sectors)", n0, f0->sectors_seen);
+      snprintf (buf, bufsz, "%s (%d sectors)%s", n0, f0->sectors_seen, trk);
     }
 }
 
@@ -6891,7 +7395,7 @@ volmap_mt_a_main (void *arg)
        * (the help screen holds ui_reading until it is closed).  Nor is anything while
        * the list is frozen: the UI wakes us when it lifts the barrier. */
       if (volmap_mt.list_frozen
-	  || (!volmap_mt.a_refresh_req && volmap_mt.a_resid_vi < 0 && !ctx->scan_active))
+	  || (!volmap_mt.a_refresh_req && volmap_mt.a_resid_vi < 0 && (!ctx->scan_active || ctx->hold)))
 	{
 	  struct timespec dl;
 
@@ -6979,10 +7483,10 @@ volmap_mt_a_main (void *arg)
 	  pthread_cond_broadcast (&volmap_mt.a_cv);
 	  pthread_mutex_unlock (&volmap_mt.a_mx);
 	}
-      if (ctx->scan_active)
+      if (ctx->scan_active && !ctx->hold)
 	{
 	  struct timespec now;
-	  bool idle;
+	  bool idle, busy = ctx->io.busy;
 	  bool done;
 	  bool go;
 
@@ -7002,11 +7506,19 @@ volmap_mt_a_main (void *arg)
 	    }
 	  clock_gettime (CLOCK_MONOTONIC, &now);
 	  idle = (now.tv_sec - volmap_last_key_sec) > 2;
-	  done = volmap_discover_step (ctx, 8192, idle);
+	  /* a busy disk: shallow slices (512 sectors, 50ms) with a pause between them, so
+	     the scan takes longer and the other load keeps the disk */
+	  done = volmap_discover_step (ctx, busy ? 512 : 8192, idle && !busy);
 	  pthread_mutex_lock (&volmap_mt.a_mx);
 	  volmap_mt.a_busy = false;
 	  pthread_cond_broadcast (&volmap_mt.a_cv);
 	  pthread_mutex_unlock (&volmap_mt.a_mx);
+	  if (busy && !done)
+	    {
+	      struct timespec ts = { 0, 200 * 1000000L };
+
+	      nanosleep (&ts, NULL);
+	    }
 	  clock_gettime (CLOCK_MONOTONIC, &now);
 	  if (done
 	      || (now.tv_sec - last_prog.tv_sec) * 1000 + (now.tv_nsec - last_prog.tv_nsec) / 1000000 >= 150)
@@ -7208,6 +7720,588 @@ volmap_mt_stop (void)
 /* Bottom status bar: two inspection rows plus the key list.
    All width computation goes through volmap_disp_clip.
    status2 must be writable - the \x01 line-break hints are stripped in place. */
+/* ---- what runs beside the database: /proc only, nothing asked of the server --------
+ *
+ * Two facts are public on Linux: every process's command line and the socket table.
+ *   - cub_server <db> is the server.  It registers with cub_master only after
+ *     boot_restart_server() - which includes restart recovery - has returned
+ *     (network_sr.c: css_init after boot_restart_server), and that registration opens a
+ *     datagram socket named cubrid_tcp_setup_server<pid>.  The file is unlinked, but
+ *     the bound name stays in /proc/net/unix for as long as the server runs.  So:
+ *     server process without that name = booting or recovering; with it = running.
+ *   - cubrid/cub_admin <utility> ... <db> is a maintenance utility on this database
+ *     (backupdb, checkdb, ...).  The engine keeps "backup in progress" only in memory
+ *     (log_Gl.backup_in_progress), never in the log header, so the client process is
+ *     the one sign of it outside the server.
+ * Not visible this way, and so not claimed: work the server does on its own (vacuum,
+ * checkpoint, flushing), a backup or utility run from another host, and other
+ * accounts' processes on a /proc mounted with hidepid=2. */
+
+static const char *const volmap_util_names[] = {
+  "backupdb", "restoredb", "checkdb", "compactdb", "vacuumdb", "loaddb", "unloaddb", "addvoldb",
+  "optimizedb", "copydb", "deletedb", "renamedb", "diagdb", NULL
+};
+
+/* /proc/<pid>/cmdline split on NUL; returns argc (0 = unreadable or gone) */
+static int
+volmap_cmdline (pid_t pid, char *buf, size_t bufsz, char **argv, int maxargv)
+{
+  char path[64];
+  int fd, argc = 0;
+  ssize_t n;
+  size_t i;
+
+  snprintf (path, sizeof (path), "/proc/%ld/cmdline", (long) pid);
+  fd = open (path, O_RDONLY);
+  if (fd < 0)
+    {
+      return 0;
+    }
+  n = read (fd, buf, bufsz - 1);
+  close (fd);
+  if (n <= 0)
+    {
+      return 0;
+    }
+  buf[n] = '\0';
+  for (i = 0; i < (size_t) n && argc < maxargv; i++)
+    {
+      if (i == 0 || buf[i - 1] == '\0')
+	{
+	  argv[argc++] = buf + i;
+	}
+    }
+  return argc;
+}
+
+/* seconds since the process started: /proc/<pid>/stat field 22 (clock ticks after boot)
+   against /proc/uptime; -1 when unreadable */
+static long
+volmap_proc_elapsed (pid_t pid)
+{
+  char path[64], line[1024];
+  FILE *f;
+  double uptime = -1;
+  long long start = -1;
+  const char *p;
+  int field;
+
+  f = fopen ("/proc/uptime", "r");
+  if (f != NULL)
+    {
+      if (fscanf (f, "%lf", &uptime) != 1)
+	{
+	  uptime = -1;
+	}
+      fclose (f);
+    }
+  snprintf (path, sizeof (path), "/proc/%ld/stat", (long) pid);
+  f = fopen (path, "r");
+  if (f == NULL || fgets (line, sizeof (line), f) == NULL)
+    {
+      if (f != NULL)
+	{
+	  fclose (f);
+	}
+      return -1;
+    }
+  fclose (f);
+  /* the command name in field 2 may hold spaces: resume after its closing parenthesis */
+  p = strrchr (line, ')');
+  if (p == NULL)
+    {
+      return -1;
+    }
+  p++;
+  for (field = 3; *p != '\0'; field++)
+    {
+      while (*p == ' ')
+	{
+	  p++;
+	}
+      if (field == 22)
+	{
+	  start = atoll (p);
+	  break;
+	}
+      while (*p != '\0' && *p != ' ')
+	{
+	  p++;
+	}
+    }
+  if (start < 0 || uptime < 0)
+    {
+      return -1;
+    }
+  return (long) (uptime - (double) start / (double) sysconf (_SC_CLK_TCK));
+}
+
+/* is the server's registration socket name bound (see the note above) */
+static bool
+volmap_server_registered (pid_t pid)
+{
+  char want[64], line[1024];
+  FILE *f = fopen ("/proc/net/unix", "r");
+  bool found = false;
+  size_t wl;
+
+  if (f == NULL)
+    {
+      return false;
+    }
+  snprintf (want, sizeof (want), "cubrid_tcp_setup_server%ld", (long) pid);
+  wl = strlen (want);
+  while (!found && fgets (line, sizeof (line), f) != NULL)
+    {
+      const char *hit = strstr (line, want);
+
+      /* the name is the last field; the pid must end there (123 is not 1234) */
+      found = hit != NULL && (hit[wl] == '\n' || hit[wl] == '\0' || hit[wl] == ' ');
+    }
+  fclose (f);
+  return found;
+}
+
+static const char *
+volmap_basename_of (const char *s)
+{
+  const char *b = strrchr (s, '/');
+
+  return (b != NULL) ? b + 1 : s;
+}
+
+/* the server and any maintenance utility of this database, from /proc */
+static void
+volmap_proc_scan (VOLMAP_CTX * ctx)
+{
+  DIR *d = opendir ("/proc");
+  struct dirent *de;
+  const char *dbn = (ctx->db_label != NULL) ? ctx->db_label : "";
+  VOLMAP_PROC np;
+
+  memset (&np, 0, sizeof (np));
+  np.at = time (NULL);
+  if (d == NULL || dbn[0] == '\0')
+    {
+      if (d != NULL)
+	{
+	  closedir (d);
+	}
+      ctx->proc = np;
+      return;
+    }
+  np.scanned = true;
+  while ((de = readdir (d)) != NULL)
+    {
+      char buf[4096], *argv[64];
+      int argc, i;
+      const char *a0;
+      pid_t pid;
+
+      if (de->d_name[0] < '1' || de->d_name[0] > '9')
+	{
+	  continue;
+	}
+      pid = (pid_t) atol (de->d_name);
+      argc = volmap_cmdline (pid, buf, sizeof (buf), argv, 64);
+      if (argc < 2)
+	{
+	  continue;
+	}
+      a0 = volmap_basename_of (argv[0]);
+      if (strcmp (a0, "cub_server") == 0)
+	{
+	  if (np.server_pid == 0 && strcmp (argv[1], dbn) == 0)
+	    {
+	      np.server_pid = pid;
+	    }
+	  continue;
+	}
+      if (strcmp (a0, "cub_admin") != 0 && strcmp (a0, "cubrid") != 0)
+	{
+	  continue;
+	}
+      for (i = 0; volmap_util_names[i] != NULL; i++)
+	{
+	  if (strcmp (argv[1], volmap_util_names[i]) == 0)
+	    {
+	      break;
+	    }
+	}
+      if (volmap_util_names[i] == NULL)
+	{
+	  continue;
+	}
+      /* the database is named by name or by path (restoredb takes paths too) */
+      for (int k = 2; k < argc; k++)
+	{
+	  if (strcmp (argv[k], dbn) == 0 || strcmp (volmap_basename_of (argv[k]), dbn) == 0)
+	    {
+	      /* cubrid launches cub_admin for the real work: either one will do, the
+	         earlier-started one tells how long the utility has been running */
+	      long el = volmap_proc_elapsed (pid);
+
+	      if (np.util[0] == '\0' || el > np.util_elapsed)
+		{
+		  snprintf (np.util, sizeof (np.util), "%s", volmap_util_names[i]);
+		  np.util_pid = pid;
+		  np.util_elapsed = el;
+		}
+	      break;
+	    }
+	}
+    }
+  closedir (d);
+  if (np.server_pid > 0)
+    {
+      np.server_registered = volmap_server_registered (np.server_pid);
+      np.server_elapsed = volmap_proc_elapsed (np.server_pid);
+    }
+  ctx->proc = np;
+}
+
+/* one line about the server, for the report head and the status bar */
+static void
+volmap_server_state_str (const VOLMAP_CTX * ctx, char *out, size_t n)
+{
+  const VOLMAP_PROC *p = &ctx->proc;
+
+  if (!p->scanned)
+    {
+      snprintf (out, n, "unknown (/proc not readable)");
+    }
+  else if (p->server_pid > 0 && p->server_registered)
+    {
+      snprintf (out, n, "running (cub_server pid %ld, up %lds)", (long) p->server_pid, p->server_elapsed);
+    }
+  else if (p->server_pid > 0)
+    {
+      snprintf (out, n, "starting or recovering (cub_server pid %ld, %lds, not yet registered with cub_master)",
+		(long) p->server_pid, p->server_elapsed);
+    }
+  else if (ctx->shutdown_state == 0)
+    {
+      snprintf (out, n, "no cub_server for this database on this host - the log says it did not shut down cleanly:"
+		" restart recovery has not run (or it runs elsewhere)");
+    }
+  else
+    {
+      snprintf (out, n, "no cub_server for this database on this host");
+    }
+}
+
+static const char *
+volmap_server_state_name (const VOLMAP_CTX * ctx)
+{
+  const VOLMAP_PROC *p = &ctx->proc;
+
+  return !p->scanned ? "unknown" : (p->server_pid > 0 && p->server_registered) ? "running"
+    : (p->server_pid > 0) ? "starting_or_recovering" : "not_running";
+}
+
+/* ---- the disk under the volumes: /proc/diskstats, and the server's own I/O ----------
+ *
+ * The device is the one volume 0 lives on (resolved like volmap_media_rotational).
+ * Between two samples: io_ticks says how much of the interval the device had requests
+ * in flight (busy %), time_in_queue the average queue depth, sectors the throughput.
+ * Any account can read it.  In a container these counters are the host's: still the
+ * disk the volumes are on, which is what matters for contention.  The server's own
+ * share is read from /proc/<pid>/io when the account may (the file owner or root). */
+
+/* major:minor of the block device holding `path`; -1 when unresolved (pseudo filesystems) */
+static int
+volmap_blockdev_of (const char *path, int *major_out, int *minor_out)
+{
+  struct stat st;
+  char sys[256];
+
+  if (path == NULL || stat (path, &st) != 0)
+    {
+      return -1;
+    }
+  *major_out = (int) major (st.st_dev);
+  *minor_out = (int) minor (st.st_dev);
+  snprintf (sys, sizeof (sys), "/sys/dev/block/%d:%d", *major_out, *minor_out);
+  if (access (sys, F_OK) == 0)
+    {
+      return 0;
+    }
+  /* an overlay or other pseudo device (major 0): the mount's source device instead */
+  {
+    FILE *mi = fopen ("/proc/self/mountinfo", "r");
+    char line[4096], best[256] = "";
+    size_t bestlen = 0;
+
+    if (mi == NULL)
+      {
+	return -1;
+      }
+    while (fgets (line, sizeof (line), mi))
+      {
+	char mp[1024], src[256];
+	int maj = -1, min = -1;
+	char *sep = strstr (line, " - ");
+
+	if (sep == NULL || sscanf (line, "%*d %*d %d:%d %*s %1023s", &maj, &min, mp) != 3)
+	  {
+	    continue;
+	  }
+	if (sscanf (sep, " - %*s %255s", src) != 1 || src[0] != '/')
+	  {
+	    continue;
+	  }
+	{
+	  size_t l = strlen (mp);
+
+	  if (l > bestlen && strncmp (path, mp, l) == 0 && (mp[l - 1] == '/' || path[l] == '/' || path[l] == '\0'))
+	    {
+	      bestlen = l;
+	      snprintf (best, sizeof (best), "%s", src);
+	    }
+	}
+      }
+    fclose (mi);
+    if (best[0] != '\0' && stat (best, &st) == 0 && S_ISBLK (st.st_mode))
+      {
+	*major_out = (int) major (st.st_rdev);
+	*minor_out = (int) minor (st.st_rdev);
+	return 0;
+      }
+  }
+  return -1;
+}
+
+/* read the diskstats row of the device */
+static bool
+volmap_diskstats_row (int major_n, int minor_n, char *name, size_t nn, unsigned long long *rd_sect,
+		      unsigned long long *wr_sect, unsigned long long *io_ticks, unsigned long long *in_queue)
+{
+  FILE *f = fopen ("/proc/diskstats", "r");
+  char line[512];
+  bool found = false;
+
+  if (f == NULL)
+    {
+      return false;
+    }
+  while (!found && fgets (line, sizeof (line), f) != NULL)
+    {
+      int maj, min;
+      unsigned long long v[11];
+      char nm[32];
+
+      if (sscanf (line, "%d %d %31s %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu", &maj, &min, nm,
+		  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10]) != 14)
+	{
+	  continue;
+	}
+      if (maj == major_n && min == minor_n)
+	{
+	  snprintf (name, nn, "%s", nm);
+	  *rd_sect = v[2];
+	  *wr_sect = v[6];
+	  *in_queue = v[10];
+	  *io_ticks = v[9];
+	  found = true;
+	}
+    }
+  fclose (f);
+  return found;
+}
+
+static void
+volmap_io_begin (VOLMAP_CTX * ctx)
+{
+  VOLMAP_IO *io = &ctx->io;
+
+  memset (io, 0, sizeof (*io));
+  io->srv_ok = -1;
+  if (ctx->nvols == 0 || volmap_blockdev_of (ctx->vols[0].path, &io->major_n, &io->minor_n) != 0)
+    {
+      io->state = -1;
+      return;
+    }
+  io->state = 1;
+  volmap_io_sample (ctx);	/* the first sample only sets the baseline */
+}
+
+static void
+volmap_io_sample (VOLMAP_CTX * ctx)
+{
+  VOLMAP_IO *io = &ctx->io;
+  unsigned long long rd, wr, ticks, q;
+  struct timespec now;
+  double ms;
+
+  if (io->state != 1)
+    {
+      return;
+    }
+  if (!volmap_diskstats_row (io->major_n, io->minor_n, io->dev, sizeof (io->dev), &rd, &wr, &ticks, &q))
+    {
+      /* a partition without its own row: try the parent disk once */
+      if (io->minor_n != 0)
+	{
+	  io->minor_n = 0;
+	  if (!volmap_diskstats_row (io->major_n, io->minor_n, io->dev, sizeof (io->dev), &rd, &wr, &ticks, &q))
+	    {
+	      io->state = -1;
+	      return;
+	    }
+	}
+      else
+	{
+	  io->state = -1;
+	  return;
+	}
+    }
+  clock_gettime (CLOCK_MONOTONIC, &now);
+  if (io->t.tv_sec != 0)
+    {
+      ms = (now.tv_sec - io->t.tv_sec) * 1000.0 + (now.tv_nsec - io->t.tv_nsec) / 1e6;
+      if (ms >= 50)
+	{
+	  io->util_pct = 100.0 * (double) (ticks - io->io_ticks) / ms;
+	  if (io->util_pct > 100.0)
+	    {
+	      io->util_pct = 100.0;
+	    }
+	  io->queue = (double) (q - io->in_queue) / ms;
+	  io->mb_s = ((double) (rd - io->rd_sect) + (double) (wr - io->wr_sect)) * 512.0 / (ms / 1000.0) / 1e6;
+	  io->busy = io->util_pct >= VOLMAP_IO_BUSY_PCT;
+	}
+      else
+	{
+	  return;		/* too soon for a rate: keep the previous figures */
+	}
+    }
+  io->t = now;
+  io->io_ticks = ticks;
+  io->in_queue = q;
+  io->rd_sect = rd;
+  io->wr_sect = wr;
+  /* the server's share, when the account may read it */
+  if (ctx->proc.server_pid > 0)
+    {
+      char path[64], line[128];
+      FILE *f;
+      unsigned long long srd = 0, swr = 0;
+      int got = 0;
+
+      snprintf (path, sizeof (path), "/proc/%ld/io", (long) ctx->proc.server_pid);
+      f = fopen (path, "r");
+      if (f != NULL)
+	{
+	  while (fgets (line, sizeof (line), f) != NULL)
+	    {
+	      got += sscanf (line, "read_bytes: %llu", &srd) == 1;
+	      got += sscanf (line, "write_bytes: %llu", &swr) == 1;
+	    }
+	  fclose (f);
+	}
+      if (got == 2)
+	{
+	  if (io->srv_ok == 1 && ms >= 50)
+	    {
+	      io->srv_mb_s = ((double) (srd - io->srv_rd) + (double) (swr - io->srv_wr)) / (ms / 1000.0) / 1e6;
+	    }
+	  io->srv_rd = srd;
+	  io->srv_wr = swr;
+	  io->srv_ok = 1;
+	}
+      else
+	{
+	  io->srv_ok = 0;
+	}
+    }
+}
+
+/* A batch run can be over in a few milliseconds, too short for a rate: the final sample
+   waits until the window since the baseline is at least 200ms (once per run) */
+static void
+volmap_io_window (VOLMAP_CTX * ctx)
+{
+  VOLMAP_IO *io = &ctx->io;
+  struct timespec now;
+  double ms;
+
+  if (io->state != 1 || io->t.tv_sec == 0)
+    {
+      return;
+    }
+  if (io->util_pct > 0.0 || io->mb_s > 0.0)
+    {
+      volmap_io_sample (ctx);	/* already measured once: just extend */
+      return;
+    }
+  clock_gettime (CLOCK_MONOTONIC, &now);
+  ms = (now.tv_sec - io->t.tv_sec) * 1000.0 + (now.tv_nsec - io->t.tv_nsec) / 1e6;
+  if (ms < 200)
+    {
+      struct timespec ts;
+
+      ts.tv_sec = 0;
+      ts.tv_nsec = (long) ((200 - ms) * 1e6);
+      nanosleep (&ts, NULL);
+    }
+  volmap_io_sample (ctx);
+}
+
+/* the report head: server, utility, disk */
+static void
+volmap_print_environment (VOLMAP_CTX * ctx, FILE * fp)
+{
+  char st[256];
+
+  volmap_server_state_str (ctx, st, sizeof (st));
+  fprintf (fp, "  server: %s\n", st);
+  if (ctx->proc.util[0] != '\0')
+    {
+      fprintf (fp, "  maintenance: cubrid %s is running on this database (pid %ld, %lds) - the map is the disk as that run"
+	       " leaves it\n", ctx->proc.util, (long) ctx->proc.util_pid, ctx->proc.util_elapsed);
+    }
+  if (ctx->io.state == 1 && ctx->io.t.tv_sec != 0)
+    {
+      fprintf (fp, "  disk: %s busy %.0f%% during this run, %.1f MB/s%s", ctx->io.dev, ctx->io.util_pct, ctx->io.mb_s,
+	       ctx->io.busy ? " (busy: another load is using it)" : "");
+      if (ctx->io.srv_ok == 1)
+	{
+	  fprintf (fp, "; cub_server %.1f MB/s", ctx->io.srv_mb_s);
+	}
+      fprintf (fp, "\n");
+    }
+}
+
+/* -i: should the scan and the auto refresh hold?  A maintenance utility is running on
+   this database, or the server is still booting/recovering.  The reason, for the bar. */
+static bool
+volmap_hold_reason (const VOLMAP_CTX * ctx, char *out, size_t n)
+{
+  const VOLMAP_PROC *p = &ctx->proc;
+
+  if (p->util[0] != '\0')
+    {
+      long m = p->util_elapsed / 60, s = p->util_elapsed % 60;
+
+      if (p->util_elapsed >= 0)
+	{
+	  snprintf (out, n, "%s running (pid %ld, %ldm%02lds)", p->util, (long) p->util_pid, m, s);
+	}
+      else
+	{
+	  snprintf (out, n, "%s running (pid %ld)", p->util, (long) p->util_pid);
+	}
+      return true;
+    }
+  if (p->server_pid > 0 && !p->server_registered)
+    {
+      snprintf (out, n, "cub_server starting or recovering (pid %ld, %lds)", (long) p->server_pid, p->server_elapsed);
+      return true;
+    }
+  out[0] = '\0';
+  return false;
+}
+
 static void
 volmap_status_bar_draw (VOLMAP_CTX * ctx, char *status2, int cols, int rows, bool auto_refresh)
 {
@@ -7368,12 +8462,26 @@ volmap_top_bar_draw (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int vi, int cols, in
 
   /* row 2: volume summary */
   {
-    char scanmsg[48] = "", zsfx[96], prog[24] = "";
+    char scanmsg[320] = "", zsfx[96], prog[24] = "", hr[160];
 
     if (ctx->scan_active && ctx->scan_total > 0)
       {
 	snprintf (scanmsg, sizeof (scanmsg), "  \033[33mscanning %d%%\033[0;1m",
 		  (int) (100 * ctx->scan_probed / ctx->scan_total));
+      }
+    /* what runs beside the database, and what this tool does about it */
+    if (ctx->hold && volmap_hold_reason (ctx, hr, sizeof (hr)))
+      {
+	size_t sl = strlen (scanmsg);
+
+	snprintf (scanmsg + sl, sizeof (scanmsg) - sl, "  \033[33m\xe2\x8f\xb8 %s - scan/refresh paused, r = continue\033[0;1m", hr);
+      }
+    else if (ctx->io.busy)
+      {
+	size_t sl = strlen (scanmsg);
+
+	snprintf (scanmsg + sl, sizeof (scanmsg) - sl, "  \033[33mdisk %s busy %.0f%%%s\033[0;1m",
+		  ctx->io.dev, ctx->io.util_pct, ctx->scan_active ? " - scanning slowly" : "");
       }
     {
       /* Also show how many sectors the cell covers.  It matches the sector count the
@@ -7672,6 +8780,11 @@ volmap_interactive (VOLMAP_CTX * ctx)
   printf ("\033[2J\033[?25l\033[?7l\033[?1000h\033[?1006h");
   fflush (stdout);
   volmap_mt_start (ctx);	/* batch + low-latency worker lanes (scan/refresh off this thread) */
+  {
+    char hr[160];
+
+    ctx->hold = volmap_hold_reason (ctx, hr, sizeof (hr));	/* sampled before the loop by the caller */
+  }
 
   for (;;)
     {
@@ -8601,11 +9714,14 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	      FD_SET (volmap_mt.pipe_rd, &rfds);
 	      nfds = volmap_mt.pipe_rd + 1;
 	    }
+	  bool tick_is_refresh = false;
+
 	  if (auto_refresh && !ctx->scan_active)
 	    {
 	      tv.tv_sec = ctx->tick_sec;
 	      tv.tv_usec = 0;
 	      ptv = &tv;
+	      tick_is_refresh = true;
 	    }
 	  else if (!volmap_mt.started && ctx->scan_active)
 	    {
@@ -8613,6 +9729,16 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	      tv.tv_sec = 0;
 	      tv.tv_usec = 10000;
 	      ptv = &tv;
+	    }
+	  /* /proc is re-read once a second while something holds the scan or the disk
+	     is being watched, so a backup that ends or a server that finishes recovery
+	     is noticed without a key */
+	  if ((ctx->hold || (ctx->io.state == 1 && (ctx->scan_active || auto_refresh))) && (ptv == NULL || tv.tv_sec >= 1))
+	    {
+	      tv.tv_sec = 1;
+	      tv.tv_usec = 0;
+	      ptv = &tv;
+	      tick_is_refresh = false;
 	    }
 	  /* The only point in the loop where this thread holds no array pointer: drop
 	   * the interlock so a pending commit can publish, and take it again before the
@@ -8644,16 +9770,53 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	    }
 	  if (rv == 0)
 	    {
-	      if (!volmap_mt.started && ctx->scan_active)
+	      /* a sampling wakeup, or the hold ending: no refresh is requested here */
+	      {
+		static time_t last_proc = 0;
+		time_t nowt = time (NULL);
+
+		if (nowt != last_proc)
+		  {
+		    char hr[160];
+		    bool was_hold = ctx->hold, was_busy = ctx->io.busy, h;
+
+		    last_proc = nowt;
+		    volmap_proc_scan (ctx);
+		    volmap_io_sample (ctx);
+		    h = volmap_hold_reason (ctx, hr, sizeof (hr));
+		    if (!h)
+		      {
+			ctx->hold_override = false;	/* the next hold holds again */
+		      }
+		    ctx->hold = h && !ctx->hold_override;
+		    if (was_hold && !ctx->hold)
+		      {
+			snprintf (status2, sizeof (status2), "%s",
+				  L ("the run beside the database ended - scan and refresh resumed",
+				     "\xec\x98\x86\xec\x97\x90\xec\x84\x9c \xeb\x8f\x8c\xeb\x8d\x98 \xec\x9e\x91\xec\x97\x85\xec\x9d\xb4 \xeb\x81\x9d\xeb\x82\xa8 - \xec\x8a\xa4\xec\xba\x94\xc2\xb7\xec\x83\x88\xeb\xa1\x9c\xea\xb3\xa0\xec\xb9\xa8 \xec\x9e\xac\xea\xb0\x9c"));
+			if (volmap_mt.started)
+			  {
+			    pthread_mutex_lock (&volmap_mt.a_mx);
+			    pthread_cond_broadcast (&volmap_mt.a_cv);
+			    pthread_mutex_unlock (&volmap_mt.a_mx);
+			  }
+		      }
+		    if (was_hold != ctx->hold || was_busy != ctx->io.busy)
+		      {
+			force_full = true;
+		      }
+		  }
+	      }
+	      if (!volmap_mt.started && ctx->scan_active && !ctx->hold)
 		{
 		  /* fallback path: scan on the UI thread as before */
 		  static struct timespec last_paint = { 0, 0 };
 		  struct timespec now;
-		  bool idle;
+		  bool idle, busy = ctx->io.busy;
 
 		  clock_gettime (CLOCK_MONOTONIC, &now);
 		  idle = (now.tv_sec - volmap_last_key_sec) > 2;
-		  (void) volmap_discover_step (ctx, 8192, idle);
+		  (void) volmap_discover_step (ctx, busy ? 512 : 8192, idle && !busy);
 		  clock_gettime (CLOCK_MONOTONIC, &now);
 		  if (ctx->scan_active
 		      && (now.tv_sec - last_paint.tv_sec) * 1000 + (now.tv_nsec - last_paint.tv_nsec) / 1000000 < 150)
@@ -8663,6 +9826,14 @@ volmap_interactive (VOLMAP_CTX * ctx)
 		  last_paint = now;
 		  force_full = true;
 		  continue;
+		}
+	      if (!tick_is_refresh || ctx->hold)
+		{
+		  if (force_full)
+		    {
+		      continue;	/* the bar changed: repaint */
+		    }
+		  goto interactive_input;
 		}
 	      /* auto-refresh tick: the buffer-pool snapshot is a small file - reload it
 	       * here on the UI lane (cub_top live rewrites it every frame) */
@@ -9241,6 +10412,23 @@ volmap_interactive (VOLMAP_CTX * ctx)
 	  }
 	else if (ch == 'r' || ch == 'R')
 	  {
+	    if (ctx->hold)
+	      {
+		/* the user's call: the fact is on the bar, the reads are theirs to allow */
+		ctx->hold_override = true;
+		ctx->hold = false;
+		snprintf (status2, sizeof (status2), "%s",
+			  L ("continuing while it runs - reads compete with it",
+			     "\xea\xb7\xb8 \xec\x9e\x91\xec\x97\x85 \xec\xa4\x91\xec\x97\x90\xeb\x8f\x84 \xea\xb3\x84\xec\x86\x8d - \xec\x9d\xbd\xea\xb8\xb0\xea\xb0\x80 \xea\xb2\xbd\xed\x95\xa9\xed\x95\xa9\xeb\x8b\x88\xeb\x8b\xa4"));
+		if (volmap_mt.started)
+		  {
+		    pthread_mutex_lock (&volmap_mt.a_mx);
+		    pthread_cond_broadcast (&volmap_mt.a_cv);
+		    pthread_mutex_unlock (&volmap_mt.a_mx);
+		  }
+		force_full = true;
+		continue;
+	      }
 	    if (ctx->scan_active)
 	      {
 		snprintf (status2, sizeof (status2), L ("initial scan in progress (%d%%)",
@@ -9668,6 +10856,9 @@ volmap_render (VOLMAP_CTX * ctx)
 	     ctx->nvols, ctx->nfiles, h1);
   }
   volmap_print_shutdown (ctx, fp);
+  volmap_io_window (ctx);	/* the disk over the run (at least a 200ms window) */
+  volmap_print_environment (ctx, fp);
+  volmap_print_discovery (ctx, fp);
   if (total_reserved_pages > 0)
     {
       {
@@ -10260,7 +11451,7 @@ volmap_media_note (int rot)
 static int
 volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
 {
-  int vi, fi, nfind = 0;
+  int vi, fi, nfind = 0, nnote = 0;
 
 /* The JSON and human forms share one argument list.  The human form sometimes
  * appends derived values (read restarts, media type), so JSON may carry fewer
@@ -10281,6 +11472,31 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
 	fprintf (fp, "  " human_fmt "\n", __VA_ARGS__); \
       } \
   } while (0)
+/* A note is a property of the database worth saying next to the findings, not an
+ * irregular structure: it does not count towards --check's exit status.  JSON collects
+ * them for a notes[] array the caller prints after findings[]. */
+#define VM_NOTE(json_fmt, human_fmt, ...) \
+  do { \
+    nnote++; \
+    if (as_json) \
+      { \
+	int left_ = (int) sizeof (ctx->notes_json) - ctx->notes_len; \
+	if (left_ > 0) \
+	  { \
+	    _Pragma ("GCC diagnostic push") \
+	    _Pragma ("GCC diagnostic ignored \"-Wformat-extra-args\"") \
+	    int w_ = snprintf (ctx->notes_json + ctx->notes_len, (size_t) left_, "%s    " json_fmt, (nnote > 1) ? ",\n" : "", __VA_ARGS__); \
+	    _Pragma ("GCC diagnostic pop") \
+	    ctx->notes_len += (w_ < 0) ? 0 : (w_ >= left_) ? left_ - 1 : w_; \
+	  } \
+      } \
+    else \
+      { \
+	fprintf (fp, "  note: " human_fmt "\n", __VA_ARGS__); \
+      } \
+  } while (0)
+  ctx->notes_len = 0;
+  ctx->notes_json[0] = '\0';
 
   if (!as_json)
     {
@@ -10362,9 +11578,11 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
 	}
       if (vol->tde_pages > 0)
 	{
-	  VM_FINDING ("{\"finding\": \"tde_encrypted_pages\", \"volid\": %d, \"sampled\": %ld}",
-		      "[vol %d] TDE-encrypted pages detected (%ld sampled) - contents not interpretable without key",
-		      vol->volid, vol->tde_pages);
+	  /* Encryption is how the database was made, not an irregularity: a note, so a
+	     TDE database does not fail --check on that alone */
+	  VM_NOTE ("{\"note\": \"tde_encrypted_pages\", \"volid\": %d, \"sampled\": %ld}",
+		   "[vol %d] TDE-encrypted pages (%ld sampled) - contents not interpretable without the key; not a finding",
+		   vol->volid, vol->tde_pages);
 	}
       /* Fragmentation finding.
        * Judged on the ratio to reserved sectors rather than absolute switches,
@@ -10473,13 +11691,14 @@ volmap_findings (VOLMAP_CTX * ctx, FILE * fp, bool as_json)
     }
   if (nfind == 0 && !as_json)
     {
-      fprintf (fp, "  no findings - ownership fully attributed, no skew, no encryption\n");
+      fprintf (fp, "  no findings - ownership fully attributed, no skew\n");
     }
   if (!as_json)
     {
       fprintf (fp, "\n");
     }
 #undef VM_FINDING
+#undef VM_NOTE
   return nfind;
 }
 
@@ -10528,10 +11747,48 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
     strftime (ts, sizeof (ts), "%Y-%m-%d %H:%M:%S", localtime (&now));
     char erel[64];
 
+    char ewhy[2 * sizeof (ctx->tracker_why)];
+
     fprintf (fp, "{\n  \"db\": \"%s\", \"tool\": \"volmap\", \"timestamp\": \"%s\",\n"
-	     "  \"release\": \"%s\", \"shutdown_state\": \"%s\",\n  \"volumes\": [\n",
+	     "  \"release\": \"%s\", \"shutdown_state\": \"%s\",\n",
 	     volmap_json_escape (db_name, edb, (int) sizeof (edb)), ts,
 	     volmap_json_escape (ctx->db_release, erel, (int) sizeof (erel)), volmap_shutdown_name (ctx->shutdown_state));
+    fprintf (fp, "  \"discovery\": {\"tracker\": \"%s\", \"tracker_files\": %d, \"probed_sectors\": %ld, \"reason\": \"%s\"},\n",
+	     ctx->tracker_state == 1 ? "read" : ctx->no_tracker ? "off" : "unreadable",
+	     ctx->tracker_state == 1 ? ctx->files_tracked : 0, ctx->probe_sectors,
+	     volmap_json_escape (ctx->tracker_why, ewhy, (int) sizeof (ewhy)));
+    /* beside the database: the server, a utility on it, the disk (volmap_proc_scan) */
+    volmap_io_window (ctx);
+    fprintf (fp, "  \"server\": {\"state\": \"%s\", \"pid\": %ld, \"registered\": %s, \"up_sec\": %ld},\n",
+	     volmap_server_state_name (ctx), (long) ctx->proc.server_pid, ctx->proc.server_registered ? "true" : "false",
+	     ctx->proc.server_pid > 0 ? ctx->proc.server_elapsed : -1L);
+    if (ctx->proc.util[0] != '\0')
+      {
+	fprintf (fp, "  \"maintenance\": {\"utility\": \"%s\", \"pid\": %ld, \"elapsed_sec\": %ld},\n", ctx->proc.util,
+		 (long) ctx->proc.util_pid, ctx->proc.util_elapsed);
+      }
+    else
+      {
+	fprintf (fp, "  \"maintenance\": null,\n");
+      }
+    if (ctx->io.state == 1 && ctx->io.t.tv_sec != 0)
+      {
+	fprintf (fp, "  \"disk\": {\"device\": \"%s\", \"busy_pct\": %.1f, \"mb_s\": %.1f, \"server_mb_s\": ", ctx->io.dev,
+		 ctx->io.util_pct, ctx->io.mb_s);
+	if (ctx->io.srv_ok == 1)
+	  {
+	    fprintf (fp, "%.1f},\n", ctx->io.srv_mb_s);
+	  }
+	else
+	  {
+	    fprintf (fp, "null},\n");
+	  }
+      }
+    else
+      {
+	fprintf (fp, "  \"disk\": null,\n");
+      }
+    fprintf (fp, "  \"volumes\": [\n");
   }
   /* -V selects the volumes to report; the batch renderer honours it, so JSON must too
      or an automation asking for one volume gets the whole database.  The separator is
@@ -10634,10 +11891,14 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
       iname = volmap_json_escape (iname, einame, (int) sizeof (einame));
       fprintf (fp, "    {\"vfid\": \"%d|%d\", \"type\": \"%s\", \"class\": \"%s\", \"index\": \"%s\","
 	       " \"pages_total\": %d, \"pages_user\": %d, \"pages_free\": %d, \"pages_ftab\": %d,"
-	       " \"sectors\": %d, \"alloc_pages\": %lld}%s\n",
+	       " \"sectors\": %d, \"alloc_pages\": %lld, \"tracked\": %s}%s\n",
 	       (int) f->vfid.volid, (int) f->vfid.fileid, volmap_ftype_name (f->ftype), name, iname,
 	       f->n_page_total, f->n_page_user, f->n_page_free, f->n_page_ftab, f->n_sector_total,
-	       (long long) f->alloc_pages, (fi < ctx->nfiles - 1) ? "," : "");
+	       (long long) f->alloc_pages,
+	       /* true: listed; "deleted": listed as dropped, awaiting vacuum; false: found by
+	          probing only; null: the tracker was not read, so nothing is known either way */
+	       ctx->tracker_state != 1 ? "null" : f->tracked == 1 ? "true" : f->tracked == 2 ? "\"deleted\"" : "false",
+	       (fi < ctx->nfiles - 1) ? "," : "");
     }
   fprintf (fp, "  ],\n");
   /* per-kind totals: what is growing, on one line */
@@ -10732,7 +11993,9 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
   fprintf (fp, "%s],\n", volmap_skipped_selected (ctx) ? "\n  " : "");
   fprintf (fp, "  \"findings\": [\n");
   int nfind = volmap_findings (ctx, fp, true);
-  fprintf (fp, "%s  ]\n}\n", nfind ? "\n" : "");
+  fprintf (fp, "%s  ],\n", nfind ? "\n" : "");
+  /* notes: properties worth knowing (TDE), kept apart from findings and the exit status */
+  fprintf (fp, "  \"notes\": [%s%s%s]\n}\n", ctx->notes_len ? "\n" : "", ctx->notes_json, ctx->notes_len ? "\n  " : "");
   return nfind;
 }
 
@@ -11171,6 +12434,8 @@ volmap_usage (const char *argv0)
 	   "      --deep               full scan: record density + forwarding ratio\n"
 	   "      --full-sweep         probe every page of every unowned sector (by default only when\n"
 	   "                           there are at most 256 of them)\n"
+	   "      --no-tracker         do not read the engine's file tracker; find files by probing the\n"
+	   "                           first page of every reserved sector (the tracker is tried first by default)\n"
 	   "      --plain              ASCII output without ANSI colors\n"
 	   "      --tick=SEC           interactive auto-refresh period in seconds (default 2)\n"
 	   "      --warn-idle=PCT      report volumes whose idle space >= PCT%% as a finding (exit 2)\n"
@@ -11212,6 +12477,7 @@ volmap (UTIL_FUNCTION_ARG * arg)
   ctx.rows = utility_get_option_int_value (arg_map, VOLMAP_ROWS_S);
   ctx.deep = utility_get_option_bool_value (arg_map, VOLMAP_DEEP_S);
   ctx.full_sweep = utility_get_option_bool_value (arg_map, VOLMAP_FULL_SWEEP_S);
+  ctx.no_tracker = utility_get_option_bool_value (arg_map, VOLMAP_NO_TRACKER_S);
   /* --no-overlay is still accepted and ignored: the live overlay was removed, and
      refusing the flag would break command lines that carry it. */
   (void) utility_get_option_bool_value (arg_map, VOLMAP_NO_OVERLAY_S);
@@ -11359,6 +12625,9 @@ volmap (UTIL_FUNCTION_ARG * arg)
       volmap_warn_unsupported (&ctx);
       return 3;
     }
+  /* what runs beside the database and how busy its disk is: /proc only */
+  volmap_proc_scan (&ctx);
+  volmap_io_begin (&ctx);
   if (ctx.interactive)
     {
       /* progressive: draw immediately from the sector tables; file ownership

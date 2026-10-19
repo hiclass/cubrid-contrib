@@ -99,6 +99,10 @@
 #define VOLMAP_TEMP_PATH_S    10859
 #define VOLMAP_TEMP_PATH_L    "temp-path"
 #endif
+#ifndef VOLMAP_NO_TRACKER_S
+#define VOLMAP_NO_TRACKER_S   10860
+#define VOLMAP_NO_TRACKER_L   "no-tracker"
+#endif
 #ifndef VOLMAP_HELP_S
 #define VOLMAP_HELP_S         'h'
 #define VOLMAP_HELP_L         "help"

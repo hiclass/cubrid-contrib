@@ -9,7 +9,7 @@ volmap은 서버에 접속하지 않고 볼륨 파일을 읽기 전용으로 연
 | 서버 무접촉 | 볼륨 바이너리 파일을 `O_RDONLY`로 직접 해석. 서버 프로세스·페이지 버퍼·락 테이블에 일절 접근하지 않음 |
 | 락 0 | 파일 락(`flock`/`fcntl`) 미사용. DB 락은 접속 자체가 없어 원천 불가 — 전수 스캔 중 `cubrid lockdb` 기준 잡힌 객체 0 |
 | 쓰기 0 | 볼륨 fd는 커널 수준에서 읽기 전용 — 결함이 있어도 파일 훼손이 불가능한 구조 |
-| 읽기 최소 | 기본 실행은 볼륨 헤더·섹터 테이블·파일 테이블과 예약 섹터마다 첫 페이지만 읽는다. 예약 공간의 약 0.5%(대형)~10%(소형) — README [실행 중 DB에서 쓸 때](../README.md#실행-중-db에서-쓸-때) |
+| 읽기 최소 | 기본 실행은 볼륨 헤더·섹터 테이블·파일 트래커·파일마다 헤더 1페이지와 그 파일 테이블만 읽는다. 예약 공간이 아니라 파일 수에 비례: 콜드 97GB 에서 31MB — README [실행 중 DB에서 쓸 때](../README.md#실행-중-db에서-쓸-때) |
 | 오프셋 하드코딩 0 | 페이지·볼륨 구조체는 엔진 헤더를 `#include` — 오프셋은 컴파일러가 계산한다. 파일 디스크립터 구조체는 사본(`storage_ondisk_layout.hpp`)이라 포맷 변경이 컴파일로 드러나지 않는다 |
 | 자기검증 3중 | 볼륨 magic / FILE_HEADER self VFID / 페이지 prv.pageid — 불일치 항목은 폐기 (틀린 지도를 그리지 않음) |
 
@@ -31,7 +31,8 @@ volmap은 서버에 접속하지 않고 볼륨 파일을 읽기 전용으로 연
   FILE_DESCRIPTORS: 힙 → class OID, 인덱스 → BTID의 class OID
   L2/L3: partial/full 섹터 테이블(extdata 체인, 볼륨 경계 통과) → 페이지 비트맵·실사용 수
   L4(--deep): SPAGE_HEADER(각 페이지 선두에 영속) → 레코드 밀도·포워딩 비율
-  TDE 감지: prv.pflag의 암호화 비트(AES/ARIA) — 감지 시 'E' 표기 + finding 보고
+  TDE 감지: prv.pflag의 암호화 비트(AES/ARIA) — 감지 시 'E' 표기 + note 보고(finding 아님). 트래커로 찾은 파일의 섹터는
+  프로브하지 않으므로 볼륨당 64 섹터를 고르게 골라 첫 페이지 32B 만 표본한다
   OID→클래스명: 클래스 레코드의 첫 가변속성 = 이름 (or_class_name과 동일 원리,
                 REC_RELOCATION→REC_NEWHOME 추적, REC_BIGONE→오버플로 first-part 파싱)
   인덱스명: 클래스 레코드 property list의 BTID 문자열("vol|file|root") 역방향 탐색
@@ -138,6 +139,35 @@ update)로 감싸 지원 터미널에서는 tearing까지 차단한다.
 
 진행률은 헤더에 `scanning NN%` 로 표시되고, 아직 귀속되지 않은 예약 셀은 회색 `⠒`
 자리표시로 그린다. 스캔 완료 시 실제 소유 색으로 바뀐다.
+
+### 파일 탐색: 트래커 먼저, 프로브는 나머지만
+
+엔진은 모든 파일을 **파일 트래커**에 등록한다(`file_tracker_register/unregister`). 그 목록을 읽는
+경로는 엔진과 같다 — 볼륨 0 헤더의 `boot_hfid` → 부트 힙의 첫 레코드 `BOOT_DB_PARM`(첫 필드가
+`trk_vfid`, 10.1~11.5 동일) → 트래커 파일의 sticky first page → `FILE_EXTENSIBLE_DATA` 체인
+(`vpid_next`), 아이템은 16B `{fileid, volid, type, metadata}`. 각 단계는 그 자리에 있어야 할
+것(힙 헤더, `FILE_TRACKER` 헤더, 16B 아이템)으로 자기검증하고, 실패하면 예전 방식으로 넘어간다.
+
+| 단계 | 읽는 것 |
+|---|---|
+| 트래커 | 볼륨 0 헤더 1 + 부트 힙 2~3 + 트래커 페이지(파일 1,000개당 1) + **파일마다 헤더 1 페이지** + 섹터 테이블(ftab) 페이지 |
+| 프로브 | 어느 파일도 소유하지 않는 예약 섹터의 첫 페이지 32B(OS 는 4KB). 삭제돼 vacuum 을 기다리는 파일과 만들어지는 중인 파일이 여기서 나온다 |
+| 2차 탐색 | 그래도 소유자가 없는 섹터 ≤256 이면 전 페이지(`--full-sweep` 은 전부) |
+
+실측(콜드, 97GB cbench, 파일 76개): 배치 31MB·0.1초, `-i` 탐색 완료까지 31MB. 트래커를 끄면
+(`--no-tracker`) 83MB — 프로브도 **이미 소유가 확정된 섹터는 건너뛰므로** 예전의 405MB 와 다르다.
+트래커 자체도 파일이라 목록에 넣고(`TRACKER`), 자기 자신은 목록에 없으므로 그 하나만 따로 표시한다.
+`refresh` 는 기존 파일의 ftab 재순회 뒤 트래커를 다시 읽어 새 파일을 찾고, 그 뒤 무소유 섹터만 프로브한다.
+
+### 옆에서 도는 것: /proc 두 파일
+
+서버에 묻지 않고 알 수 있는 공개 정보는 프로세스 명령줄(`/proc/<pid>/cmdline`)과 소켓 표
+(`/proc/net/unix`)다. `cub_server <db>` 가 있고 그 pid 의 `cubrid_tcp_setup_server<pid>` 가
+소켓 표에 있으면 실행 중, 없으면 기동·복구 중이다(`network_sr.c`: `css_init` 은
+`boot_restart_server` 뒤). `cubrid`/`cub_admin <유틸> … <db>` 가 있으면 그 유틸리티가 이 DB 에서
+도는 중이다. 디스크는 볼륨 0 의 블록 장치를 `/proc/diskstats` 에서 1초 간격으로 표본해 busy%
+(`io_ticks` 증가분 / 경과)·처리량을 얻고, `/proc/<server pid>/io` 를 읽을 수 있으면 서버 몫도 얻는다.
+무엇을 하는지(멈춤·감속)와 못 보는 것은 [usage.md](usage.md#옆에서-도는-것의-감지-proc-만-읽는다).
 
 ### 부하 내성 I/O (읽기 최소화·순차화)
 

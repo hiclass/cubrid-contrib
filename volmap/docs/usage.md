@@ -29,10 +29,13 @@ cub_volmap [옵션] <database-name | vinf-경로>
                        mincore 를 믿을 수 없는 계정(소유자·쓰기 권한자·root 가 아님)에서는 반납 대상을 가릴 수 없어
                        거부한다(종료코드 1) — DB 소유 계정으로 실행
       --check          무결성 소견(findings) 리포트 — 소견 존재 시 종료코드 2
-      --format=json    JSON 출력 (volumes/files/findings)
+      --format=json    JSON 출력 (volumes/files/findings/notes + discovery/server/maintenance/disk)
       --full-sweep     소유자 미상 섹터 전부의 전 페이지를 본다. 지정하지 않아도 1차 탐색 뒤 소유자 미상 섹터가
                        256개 이하면 그 섹터들의 전 페이지를 자동으로 본다(16KB 페이지에서 최대 256MB 읽기).
                        넘으면 자동으로 보지 않고 stderr 에 개수를 알린다
+      --no-tracker     엔진의 파일 트래커를 읽지 않는다. 기본은 트래커(볼륨 0 헤더 → 부트 힙 → trk_vfid → 트래커
+                       페이지)로 파일 목록을 먼저 얻고, 어느 파일도 소유하지 않는 섹터만 첫 페이지를 프로브한다.
+                       이 옵션은 모든 예약 섹터의 첫 페이지를 프로브하는 예전 방식이며, 두 방식의 결과 대조용이다
       --plain          ANSI 없이 ASCII
       --tick=SEC       인터랙티브 자동 새로고침 주기 (기본 2초)
       --warn-idle=PCT  볼륨 idle 공간이 PCT% 이상이면 소견(finding)으로 보고 — 종료코드 2 (용량 경보)
@@ -58,6 +61,31 @@ cub_volmap [옵션] <database-name | vinf-경로>
 `[r]` 는 지도를 다시 읽을 뿐 아니라 **볼륨 목록도 재스캔**한다. temp 볼륨
 (`<db>_t<NNNNN>`)은 쿼리가 spill 하는 동안만 존재하므로, 새로 생긴 것은 목록에 넣고
 사라진 것은 뺀다. 영구 볼륨(vinf 등재분)은 건드리지 않는다.
+
+### 옆에서 도는 것의 감지 (/proc 만 읽는다)
+
+서버에는 아무것도 묻지 않고, 리눅스가 공개하는 두 가지 — 프로세스 명령줄과 소켓 표 — 로
+이 DB 옆에서 무엇이 도는지 본다. 결과는 배치 출력 머리(`server:`·`maintenance:`·`disk:` 줄)와
+JSON(`server`·`maintenance`·`disk`)에 적히고, 인터랙티브에서는 2행 헤더에 표시된다.
+
+| 신호 | 어떻게 아는가 | 인터랙티브 동작 |
+|---|---|---|
+| 유틸리티 실행 중 (`backupdb`·`restoredb`·`checkdb`·`compactdb`·`vacuumdb`·`loaddb`·`unloaddb`·`addvoldb`·`optimizedb`·`copydb`·`deletedb`·`renamedb`·`diagdb`) | `cubrid`/`cub_admin <유틸> … <db>` 명령줄. 어느 계정이든 읽을 수 있다. 엔진은 "백업 중"을 메모리에만 두고 로그 헤더에 적지 않으므로 이 프로세스가 서버 밖의 유일한 표시다 | 헤더에 `⏸ backupdb running (pid, 경과) - scan/refresh paused, r = continue`. 초기 스캔과 자동 새로고침을 멈춘다. `r` 을 누르면 그 실행이 끝날 때까지 무시하고 계속한다. 끝나면 1초 안에 알아채고 스스로 재개한다 |
+| 서버 기동·복구 중 | `cub_server <db>` 프로세스는 있는데 `/proc/net/unix` 에 그 pid 의 `cubrid_tcp_setup_server<pid>` 가 없다. 서버는 `boot_restart_server`(재시작 복구 포함)를 마친 뒤에야 `css_init` 으로 마스터에 등록하고 이 소켓을 열며, 파일은 지워지지만 이름은 서버가 사는 동안 소켓 표에 남는다 | 같은 방식으로 멈추고 `⏸ cub_server starting or recovering` 을 표시 |
+| 서버 상태 | 위 둘을 로그 헤더의 `is_shutdown` 과 합치면 다섯 상태다: 정상 종료 / 기동 중 / 크래시 후 복구 전 / 복구 중 / 실행 중 | `server:` 줄 |
+| 디스크 혼잡 | 볼륨 0 이 놓인 블록 장치의 `/proc/diskstats`(누구나 읽음): 1초 간격 표본으로 busy%(요청이 걸려 있던 시간 비율)·처리량. 서버 자신의 I/O 는 `/proc/<cub_server pid>/io` 를 읽을 수 있는 계정(소유자·root)에서만 | busy ≥ 80% 면 헤더에 `disk sdb busy 97% - scanning slowly`. 초기 스캔은 슬라이스를 512 섹터·50ms 로 줄이고 슬라이스 사이 200ms 를 쉰다. 자동 새로고침(수백 KB)은 그대로 둔다 |
+
+멈춤은 사용자의 결정을 대신하지 않는다. 사실을 헤더에 보이고 기본값을 "기다림"으로 둘 뿐이며,
+`r` 한 번으로 계속할 수 있다. 배치 실행은 한 번 읽고 끝나므로 멈추지 않고 머리에 적기만 한다.
+
+**감지하지 못하는 것** — 그래서 주장하지 않는 것:
+
+- 서버가 스스로 하는 일: vacuum, 체크포인트, 더티 페이지 플러시. 디스크 혼잡으로만 간접적으로 보인다.
+- 다른 호스트에서 도는 백업·유틸리티(공유 스토리지, HA). 이 호스트의 `/proc` 에 없다.
+- `hidepid=2` 로 마운트된 `/proc` 에서 다른 계정의 프로세스. `server:` 줄이 `no cub_server` 가 될 수 있다.
+- 컨테이너 안에서 `/proc/diskstats` 는 호스트 전체 값이다. 볼륨이 놓인 디스크의 혼잡이라는 점은 같다.
+- 오버레이 같은 가상 파일시스템 위의 볼륨은 블록 장치를 찾지 못해 `disk:` 줄이 없다.
+- 유틸리티가 어느 단계에 있는지(백업의 진행률 등). 프로세스의 존재와 경과 시간만 안다.
 
 화면: 1행 범례 / 2행 `[n/N]` 볼륨 헤더 / 3행 공백 / 4행~ **라운드 프레임 지도** — 상단 테두리 우측에 할당 통계(pages/idle/owner switches), 하단 테두리 우측에 볼륨 파일 경로가 inset으로 / 하단 인스펙션 2줄 + 키 목록 /
 하단 상태바 3줄. 한 볼륨 = 한 화면.

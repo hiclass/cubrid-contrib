@@ -236,6 +236,7 @@ main (int argc, char **argv)
     {VOLMAP_TICK_L, 1, 0, VOLMAP_TICK_S},
     {VOLMAP_WARN_IDLE_L, 1, 0, VOLMAP_WARN_IDLE_S},
     {VOLMAP_TEMP_PATH_L, 1, 0, VOLMAP_TEMP_PATH_S},
+    {VOLMAP_NO_TRACKER_L, 0, 0, VOLMAP_NO_TRACKER_S},
     {VOLMAP_HELP_L, 0, 0, VOLMAP_HELP_S},
     {0, 0, 0, 0}
   };
