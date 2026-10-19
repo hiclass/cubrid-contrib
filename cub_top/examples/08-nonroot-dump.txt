@@ -1,21 +1,20 @@
 opts.used="-d"
-ts="2026-10-16 06:29:03" ts_epoch=1792132143 ts_epoch_ms=1792132143000
+ts="2026-10-19 02:27:29" ts_epoch=1792376849 ts_epoch_ms=1792376849000
 caps.vm_readv=0 caps.mem_pread=0 caps.rollup=1 caps.proc_io=1
 perm.limited=1 perm.reason="대상이 다른 사용자 소유: maps/smaps/io 차단 - status 기반 총량만 (전체는 서버를 띄운 계정으로 실행)"
-os.ram_total_kb=197179440 os.ram_avail_kb=24493096 os.cached_kb=103761064 os.swap_total_kb=0 os.swap_free_kb=0
-os.cpu_us_pct=13.4 os.cpu_sy_pct=7.7 os.cpu_wa_pct=0.4 os.cpu_busy_cores=13.46 os.cores_logical=64 os.cores_physical=32
-os.load1=30.38 os.load5=34.95 os.load15=36.53
-os.cores_saturated=6 os.cores_high=2 os.core_max_pct=100.0
-os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,100.0,100.0,58.0,50.0,44.0,39.2,37.0,30.0,28.6,27.7,27.7,26.9,22.0,18.8,18.0,17.6,16.3,16.0,16.0,14.9,14.6,14.3,14.3,14.0,14.0,13.7,11.8,11.8,11.5,10.6,10.2,10.2,10.0,7.5,6.0,6.0,6.0,5.9,5.9,5.8,4.0,4.0,4.0,4.0,3.9,3.9,3.9,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,0.0,0.0,0.0,0.0,0.0"
+os.ram_total_kb=197179440 os.ram_avail_kb=29827532 os.cached_kb=107198908 os.swap_total_kb=0 os.swap_free_kb=0
+os.cpu_us_pct=2.8 os.cpu_sy_pct=7.0 os.cpu_wa_pct=0.0 os.cpu_busy_cores=6.25 os.cores_logical=64 os.cores_physical=32
+os.load1=19.08 os.load5=19.86 os.load15=20.28
+os.cores_saturated=4 os.cores_high=0 os.core_max_pct=100.0
+os.core_pct_n=64 os.core_pct="100.0,100.0,100.0,100.0,39.5,27.3,26.5,26.5,14.6,10.4,8.3,6.0,5.9,4.0,4.0,3.9,3.9,3.9,2.1,2.1,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,2.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0"
 cubrid.version="unknown" heapB.table="-" heapB.lib="-"
 server.up=1
-instance.count=5 instance.current="cbench"
-instance.cbench.pid=1177276 instance.cbench.uid=0 instance.cbench.rss_bytes=1007595520 instance.cbench.file_bytes=6172672 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=208486400 instance.cbench.pl_count=1 instance.cbench.tracked=1
-instance.chkdb.pid=2304878 instance.chkdb.uid=0 instance.chkdb.rss_bytes=991879168 instance.chkdb.file_bytes=5603328 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=60825600 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
-instance.demodb.pid=1229138 instance.demodb.uid=0 instance.demodb.rss_bytes=1031823360 instance.demodb.file_bytes=8331264 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=202944512 instance.demodb.pl_count=1 instance.demodb.tracked=0
-instance.jiradb.pid=2357500 instance.jiradb.uid=0 instance.jiradb.rss_bytes=990162944 instance.jiradb.file_bytes=4980736 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=199626752 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
-instance.samedb_3938735.pid=3938756 instance.samedb_3938735.uid=1001 instance.samedb_3938735.rss_bytes=958464 instance.samedb_3938735.file_bytes=860160 instance.samedb_3938735.swap_bytes=0 instance.samedb_3938735.pl_rss_bytes=0 instance.samedb_3938735.pl_count=0 instance.samedb_3938735.tracked=0
-server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=983980 server.pss_kb=0 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=0.0 server.host_cores=64
+instance.count=4 instance.current="cbench"
+instance.cbench.pid=1177276 instance.cbench.uid=0 instance.cbench.rss_bytes=1007771648 instance.cbench.file_bytes=6348800 instance.cbench.swap_bytes=0 instance.cbench.pl_rss_bytes=208879616 instance.cbench.pl_count=1 instance.cbench.tracked=1
+instance.chkdb.pid=2304878 instance.chkdb.uid=0 instance.chkdb.rss_bytes=1002332160 instance.chkdb.file_bytes=6000640 instance.chkdb.swap_bytes=0 instance.chkdb.pl_rss_bytes=75067392 instance.chkdb.pl_count=1 instance.chkdb.tracked=0
+instance.demodb.pid=1229138 instance.demodb.uid=0 instance.demodb.rss_bytes=1038168064 instance.demodb.file_bytes=8355840 instance.demodb.swap_bytes=0 instance.demodb.pl_rss_bytes=203190272 instance.demodb.pl_count=1 instance.demodb.tracked=0
+instance.jiradb.pid=2357500 instance.jiradb.uid=0 instance.jiradb.rss_bytes=1002995712 instance.jiradb.file_bytes=5812224 instance.jiradb.swap_bytes=0 instance.jiradb.pl_rss_bytes=207589376 instance.jiradb.pl_count=1 instance.jiradb.tracked=0
+server.db="cbench" server.pid=1177276 server.mapped_kb=6742952 server.rss_kb=984152 server.pss_kb=0 server.swap_kb=0 server.workers=117 server.minflt_per_s=0 server.majflt_per_s=0 server.cpu_pct=0.0 server.host_cores=64
 region.dynamic_heap.mapped_bytes=0 region.dynamic_heap.rss_bytes=0
 region.thread_stacks.mapped_bytes=0 region.thread_stacks.rss_bytes=0
 region.code_so.mapped_bytes=0 region.code_so.rss_bytes=0
@@ -34,7 +33,7 @@ io.read_bps=0 io.write_bps=0 io.read_iops=0 io.write_iops=0 io.cache_absorb_ok=0
 server.d_threads=0 server.threads_total=117
 param.source="none"
 param.skipped_reason="서버 설치 위치를 읽을 수 없음(다른 계정) — paramdump 생략"
-hostdev.name="sda" hostdev.util_pct=29.2 hostdev.read_bps=916556
-tier.server_rss_bytes=1007595520 tier.master_rss_bytes=1847296 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=208486400 tier.pl_count=1
+hostdev.name="sda" hostdev.util_pct=2.0 hostdev.read_bps=0
+tier.server_rss_bytes=1007771648 tier.master_rss_bytes=2469888 tier.broker_rss_bytes=0 tier.cas_rss_bytes=0 tier.cas_count=0 tier.pl_rss_bytes=208879616 tier.pl_count=1
 tier.server_cores=0.00 tier.master_cores=0.00 tier.broker_cores=0.00 tier.cas_cores=0.00 tier.pl_cores=0.00
-total.cubrid_rss_bytes=1217929216 total.cubrid_pct_ram=0.60
+total.cubrid_rss_bytes=1219121152 total.cubrid_pct_ram=0.60

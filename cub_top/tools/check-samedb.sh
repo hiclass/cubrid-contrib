@@ -18,6 +18,8 @@
 # name: the PL attaches to its own account's server, a name given at start picks this
 # account's server first, and when the watched server goes away the restart is followed
 # only to the same account's database of that name - never quietly to another user's.
+# The account is recorded when the target is chosen, so a switch followed by a stop before
+# any frame still looks for the restart under the account switched to.
 # Stand-in processes named cub_server / cub_pl carry the db name as their first argument.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
@@ -60,4 +62,43 @@ int main(int argc,char**v){
 }
 C
 gcc -O1 -std=gnu99 -w -I "$ROOT/src" -o "$TMP/t" "$TMP/t.c" -lm -lpthread 2>"$TMP/cc.err" || { cat "$TMP/cc.err"; echo "→ FAIL (compile)"; exit 1; }
-if "$TMP/t" $DB $a $b $HU; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
+rc=0
+"$TMP/t" $DB $a $b $HU || rc=1
+kill $a 2>/dev/null
+# Switching to the other account's server of that name, which then stops before a frame has
+# seen it: the restart is looked for under the account switched to (set at selection), so
+# root's server of the same name is not taken, and that account's server is followed when
+# it comes back.
+"$TMP/cub_server" ${DB}w & a=$!
+runuser -u hiclass -- "$TMP/cub_server" ${DB}w 2>/dev/null &
+sleep 0.5
+b=$(pgrep -u hiclass -x cub_server -a | awk -v d=${DB}w '$3==d{print $1}')
+[ -n "$b" ] || { echo "→ FAIL (stand-ins not started)"; exit 1; }
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$SRC" > "$TMP/w.c"
+cat >> "$TMP/w.c" <<'C'
+int main(int argc,char**v){
+    const char *db=v[1]; int ra=atoi(v[2]), hb=atoi(v[3]), hu=atoi(v[4]), bad=0, ok;
+    static proc_t P,P0; static mem_t M; static tier_t T; static iod_t IO; FILE *pd=NULL;
+    g_ascii=1; enum_instances();
+    int ir=-1, ih=-1;
+    for(int i=0;i<g_ninst;i++){ if(g_inst[i].pid==ra) ir=i; if(g_inst[i].pid==hb) ih=i; }
+    target_select(&P,ir); sample_once(&P,&P0,&M,&T,&IO,0.05,0,&pd);      /* watching root's */
+    target_select(&P,ih); reset_instance_state();                         /* < or > to uid hu's */
+    kill(hb,SIGKILL); usleep(200000);                                     /* gone before a frame */
+    sample_once(&P,&P0,&M,&T,&IO,0.05,0,&pd);
+    ok = P.pid==-1;
+    printf("  %s   switched to uid %d's server, it stopped before a frame: not running (pid %d), root's %d not taken\n",ok?"ok  ":"FAIL",hu,P.pid,ra); bad|=!ok;
+    char cmd[600]; snprintf(cmd,sizeof cmd,"runuser -u hiclass -- %s %s >/dev/null 2>&1 &",v[5],db);
+    if(system(cmd)){} usleep(500000);
+    sample_once(&P,&P0,&M,&T,&IO,0.05,0,&pd);
+    int nu=-1; for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P.pid) nu=g_inst[i].uid;
+    ok = P.pid>0 && P.pid!=ra && nu==hu;
+    printf("  %s   that account's server restarted: followed (pid %d, uid %d)\n",ok?"ok  ":"FAIL",P.pid,nu); bad|=!ok;
+    if(P.pid>0 && P.pid!=ra) kill(P.pid,SIGKILL);
+    if(pd) paramdump_abort(&pd);
+    return bad;
+}
+C
+gcc -O1 -std=gnu99 -w -I "$ROOT/src" -o "$TMP/w" "$TMP/w.c" -lm -lpthread 2>"$TMP/cc2.err" || { cat "$TMP/cc2.err"; echo "→ FAIL (compile)"; exit 1; }
+"$TMP/w" ${DB}w $a $b $HU "$TMP/cub_server" || rc=1
+if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi

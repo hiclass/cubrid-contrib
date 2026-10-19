@@ -462,6 +462,15 @@ static int restart_pick(const char *db,int uid){
         if(!strcmp(g_inst[i].db,db) && (uid<0 || g_inst[i].uid==uid)) return g_inst[i].pid;
     return -1;
 }
+/* The account of the server being watched.  Set where the target is chosen (start, < >,
+   the one-shot walk, a followed restart), so a restart is looked for under the account
+   chosen even when that server stops before a frame has seen it; -1 = any. */
+static int g_track_uid=-1;
+static void target_select(proc_t *P,int i){
+    g_cur=i; P->pid=g_inst[i].pid; g_track_uid=g_inst[i].uid;
+    snprintf(P->db,sizeof P->db,"%s",g_inst[i].db);
+    snprintf(g_cur_db,sizeof g_cur_db,"%s",g_inst[i].db);
+}
 /* A db name held by several accounts: this account's server first */
 static int inst_find(const char*db){
     int first=-1;
@@ -7856,18 +7865,17 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
     {
         /* The check must run even at pid<0 (not running), or a restart is never noticed and the
            instance stays down forever once it has died. */
-        /* The account of the server being watched: a restart is followed to the same account's
-           database of that name, never to another user's database that happens to share it */
-        static int track_uid=-1;
+        /* A restart is followed to the same account's database of that name (g_track_uid,
+           set where the target was chosen), never to another user's that happens to share it */
         int alive=0;
         if(P->pid>=0)
-            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P->pid){ alive=1; track_uid=g_inst[i].uid; break; }
+            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P->pid){ alive=1; g_track_uid=g_inst[i].uid; break; }
         if(!alive){
             /* Keep the db name: clearing it with memset loses the name while waiting for a restart,
                so the server can never be picked up again when it returns. */
             char keep[64]; snprintf(keep,sizeof keep,"%s",P->db[0]?P->db:g_cur_db);
             int newpid=-1;
-            if(keep[0]) newpid=restart_pick(keep,track_uid);
+            if(keep[0]) newpid=restart_pick(keep,g_track_uid);
             /* Started with no server and no db named: take the first, as at startup */
             if(newpid<0 && (!keep[0] || !strcmp(keep,"-")) && g_ninst>0){
                 newpid=g_inst[0].pid; snprintf(keep,sizeof keep,"%s",g_inst[0].db); }
@@ -7883,7 +7891,7 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                 P->pid=newpid;
                 if(newpid>=0){
                     for(int i=0;i<g_ninst;i++)
-                        if(g_inst[i].pid==newpid){ g_cur=i; break; }
+                        if(g_inst[i].pid==newpid){ g_cur=i; g_track_uid=g_inst[i].uid; break; }
                     snprintf(g_cur_db,sizeof g_cur_db,"%s",keep);
                     cap_probe(newpid);             /* The new process: re-probe rather than inherit the old flags */
                     parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P);
@@ -8809,9 +8817,7 @@ int main(int argc,char **argv){
         }
         g_cur=k;
     } else g_cur=0;                     /* First alphabetically */
-    if(g_ninst>0){ P.pid=g_inst[g_cur].pid;
-                   snprintf(P.db,sizeof P.db,"%s",g_inst[g_cur].db);
-                   snprintf(g_cur_db,sizeof g_cur_db,"%s",g_inst[g_cur].db); }
+    if(g_ninst>0) target_select(&P,g_cur);
     else { P.pid=-1; snprintf(P.db,sizeof P.db,"-"); g_cur_db[0]=0; }
     /* The recording is opened (and truncated) only after every check that can reject the
        run, so a mistyped command never empties an existing recording; still before the
@@ -8903,11 +8909,7 @@ int main(int argc,char **argv){
                     /* Switch instance.  The previous target's classification would make method_a
                        exclude the wrong region and double-count, so the globals are
                        cleared and tracking starts over. */
-                    g_cur = (k=='<'||k==',') ? (g_cur+g_ninst-1)%g_ninst
-                                             : (g_cur+1)%g_ninst;
-                    P.pid=g_inst[g_cur].pid;
-                    snprintf(P.db,sizeof P.db,"%s",g_inst[g_cur].db);
-                    snprintf(g_cur_db,sizeof g_cur_db,"%s",g_inst[g_cur].db);
+                    target_select(&P,(k=='<'||k==',') ? (g_cur+g_ninst-1)%g_ninst : (g_cur+1)%g_ninst);
                     reset_instance_state();
                     cap_probe(P.pid);                         /* Capabilities belong to the target, not the last one */
                     memset(&P0,0,sizeof P0); P0.pid=P.pid;   /* A fresh delta baseline too */
@@ -9001,10 +9003,7 @@ int main(int argc,char **argv){
         for(int ii=0; ii<(g_ninst>0?g_ninst:1); ii++){
             if(only>=0 && ii!=only) continue;
             if(g_ninst>0 && ii!=g_cur){        /* Switch target, the same procedure as live < and > */
-                g_cur=ii;
-                P.pid=g_inst[ii].pid;
-                snprintf(P.db,sizeof P.db,"%s",g_inst[ii].db);
-                snprintf(g_cur_db,sizeof g_cur_db,"%s",g_inst[ii].db);
+                target_select(&P,ii);
                 reset_instance_state();
                 cap_probe(P.pid);
                 memset(&P0,0,sizeof P0); P0.pid=P.pid;
