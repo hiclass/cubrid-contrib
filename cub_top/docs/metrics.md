@@ -180,7 +180,7 @@ util = (diskstats io_ms 델타) / 경과시간(ms) × 100
 | `pgbuf.zone_void` | 적재/축출 전이 중 | 순간값 |
 | `pgbuf.zone_free` | 빈 BCB(invalid 존) | `resident + zone_free = num_buffers` |
 | `pgbuf.vol<N>.resident / .dirty` | 볼륨별 분해 | `cub_volmap --bufmap` 볼륨 헤더의 `buf N pages (dirty M)` 과 같은 값 |
-| `pgbuf.hdr_read` | 읽은 페이지 헤더 수 | 평소 표본 256개(LRU 존 1·2 에서 고르게). `--bcb-dump` 일 때만 전수 |
+| `pgbuf.hdr_read` | 읽은 페이지 헤더 수 | 평소 표본 최대 256개(LRU 존 1·2 에서 고르게, 32개 미만이면 상주 cold 페이지로 32개까지 채움). `--bcb-dump` 일 때만 전수. 0 이면 오프셋을 검증하지 못한 것이라 `pgbuf.enabled=0` |
 | `pgbuf.hdr_nonresident` | 상주가 아니어서(pagemap) 읽지 않은 헤더 수 | 읽으면 스왑인을 일으키므로 건너뛴다 |
 | `pgbuf.hdr_pagemap_unchecked` | pagemap 을 못 읽어 상주 확인 없이 읽은 수 | 보통 0 |
 | `pgbuf.hdr_mismatch / hdr_unread` | 읽은 헤더 중 대조 불일치 / 읽기 실패 수 | 소량(교체 중)은 정상, 표본의 50% 초과면 비활성 |

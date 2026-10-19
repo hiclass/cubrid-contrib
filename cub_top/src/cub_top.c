@@ -3029,6 +3029,7 @@ static void pg_log(proc_t*P){
 static int g_pg_detail=0;   /* Page-level detail on a large buffer: asked for (live d, --pgbuf-detail, --bcb-dump) */
 #define PG_LARGE 262144     /* BCBs above which the whole-array scan runs only on request */
 #define PG_SAMPLE 256       /* Headers read to verify the offsets; a wrong offset mismatches all of them */
+#define PG_MIN_VERIFY 32    /* Below this many hot/warm headers, cold ones top the sample up */
 static void pgbuf_scan(proc_t*P){
     PG.frame++;
     PG.have_log=0;
@@ -3132,7 +3133,28 @@ static void pgbuf_scan(proc_t*P){
           if(pr==0){ PG.nonres++; continue; }
           if(pr<0) PG.pm_unchecked++;
           hsel[m]=hsel[j]; haddr[m]=addr[hsel[j]]; m++; }
+      /* An idle server can have few or no hot/warm pages, and the offsets would then go
+         unchecked: resident cold pages, evenly spread, top the sample up to PG_MIN_VERIFY. */
+      if(!full && m<PG_MIN_VERIFY){
+          int ncold=0; for(int k=0;k<PG.nrec;k++) if(PG.rec[k].zone!=1 && PG.rec[k].zone!=2) ncold++;
+          int want=PG_MIN_VERIFY-m, step=ncold>want?ncold/want:1, seen=0;
+          for(int k=0;k<PG.nrec && m<PG_MIN_VERIFY;k++){
+              if(PG.rec[k].zone==1 || PG.rec[k].zone==2) continue;
+              if(seen++%step) continue;
+              int pr=pm_present(P->pid,(unsigned long)addr[k]);
+              if(pr==0){ PG.nonres++; continue; }
+              if(pr<0) PG.pm_unchecked++;
+              hsel[m]=k; haddr[m]=addr[k]; m++; }
+      }
       PG.nhdr=m; }
+    /* Nothing to check the offsets against - no page in the pool, or none resident: the
+       values are not shown as verified ones */
+    if(PG.nhdr==0){ PG.ok=0;
+        if(PG.nrec==0) snprintf(PG.why,sizeof PG.why,g_ascii?"no page in the buffer pool - nothing to verify the offsets with"
+                                                         :"버퍼풀에 적재된 페이지 없음 — 오프셋을 검증할 대상 없음");
+        else snprintf(PG.why,sizeof PG.why,g_ascii?"no page header could be read to verify the offsets (%d not resident) - not verified"
+                                                  :"오프셋을 검증할 페이지 헤더를 읽지 못함(비상주 %d) — 검증 안 됨",PG.nonres);
+        return; }
     if(PG.nhdr>0){
         vm_gather(P->pid,haddr,PG.nhdr,16,hdr,okf);
         /* Collect the mismatched indices for the recheck.  addr[] is overwritten there, so
@@ -3220,13 +3242,15 @@ static void pgbuf_scan(proc_t*P){
            offset failing all 32,768 reads still passed as healthy (a deliberate
            corruption test returned enabled=1).  Reading no header at all empties
            the LSA axis, so it is treated as an offset error. */
-        if(PG.nhdr>100 && PG.unread>PG.nhdr/2){ PG.ok=0;
+        /* Proportions of the headers actually read, at any sample size: a hot/warm sample
+           on a large pool can be small, and a wrong offset fails every one of them. */
+        if(PG.unread*2>PG.nhdr){ PG.ok=0;
             snprintf(PG.why,sizeof PG.why,
                      g_ascii?"page headers unreadable %d/%d — iopage offset mismatch suspected"
                             :"페이지 헤더 읽기 실패 %d/%d — iopage 오프셋 불일치 의심",PG.unread,PG.nhdr);
             return; }
-        if(PG.nhdr>100 && PG.mismatch>PG.nhdr/20){
-            if(PG.mismatch>PG.nhdr/2){ PG.ok=0;
+        if(PG.mismatch*20>PG.nhdr){
+            if(PG.mismatch*2>PG.nhdr || PG.unread+PG.mismatch>=PG.nhdr){ PG.ok=0;
                 snprintf(PG.why,sizeof PG.why,
                          g_ascii?"page header vs BCB mismatch %d/%d after recheck — offset mismatch suspected"
                                 :"재검 후에도 페이지 헤더·BCB 불일치 %d/%d — 오프셋 불일치 의심",PG.mismatch,PG.nhdr);

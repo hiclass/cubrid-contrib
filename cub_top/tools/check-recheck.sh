@@ -211,6 +211,63 @@ if gcc -O1 -g -std=gnu99 -w -fsanitize=address -I "$(dirname "$SRC")" -o "$TMP/z
 else
     echo "  SKIP switch to larger BCBs (no AddressSanitizer)"
 fi
+# Small samples: the header gate holds at any sample size (a large pool's hot/warm sample can
+# be under 100), a pool with no hot/warm page is still checked on cold ones, and a frame
+# with no header to check is reported as not verified, not as a success.
+printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/src.c" > "$TMP/s.c"
+cat >> "$TMP/s.c" <<'HS'
+void test_after_pass1(void){}
+/* Small samples: the header gate must hold at any sample size, and "nothing could be
+   verified" must not pass as success. */
+#define NB 50
+static unsigned char pool_[4096], *bcbs_, *iop_[NB];
+static void put_bcb(int i,int pageid,uint32_t flags,unsigned char *iop){
+    unsigned char*b=bcbs_+(size_t)i*g_bt->pg.sz_bcb; int16_t v=0; uint64_t ol=~0ull;
+    memcpy(b+g_bt->pg.vpid,&pageid,4); memcpy(b+g_bt->pg.vpid+4,&v,2);
+    memcpy(b+g_bt->pg.flags,&flags,4); memcpy(b+g_bt->pg.olsa,&ol,8);
+    uint64_t ip=(uint64_t)(uintptr_t)iop; memcpy(b+g_bt->pg.iopg,&ip,8);
+}
+static void put_hdr(int i,int pageid){
+    unsigned char*h=iop_[i]+g_bt->pg.iobuf_iopg; int16_t v=0; uint64_t lsa=5;
+    memcpy(h,&lsa,8); memcpy(h+8,&pageid,4); memcpy(h+12,&v,2);
+}
+static int bad=0;
+static void expect(const char *what,int want_ok,const char *why_has){
+    int ok = PG.ok==want_ok && (!why_has || strstr(PG.why,why_has));
+    printf("  %s   %-46s ok=%d read=%d mismatch=%d \"%s\"\n",ok?"ok  ":"FAIL",what,PG.ok,PG.nhdr,PG.mismatch,PG.why); bad|=!ok;
+}
+int main(void){
+    static proc_t P; P.pid=getpid(); CAP.vm_readv=1; g_ascii=1;
+    B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
+    bcbs_=calloc(NB,(size_t)g_bt->pg.sz_bcb);
+    for(int i=0;i<NB;i++) iop_[i]=calloc(1,(size_t)g_bt->pg.iobuf_iopg+64);
+    int32_t nb=NB; memcpy(pool_+g_bt->off_pgbuf_nbuf,&nb,4);
+    uint64_t t=(uint64_t)(uintptr_t)bcbs_; memcpy(pool_+g_bt->pg.bcbtab,&t,8);
+    /* 1. a wrong iopage offset: every header disagrees with its BCB (50 hot pages, < 100) */
+    for(int i=0;i<NB;i++){ put_bcb(i,100+i,0x00010000u,iop_[i]); put_hdr(i,9000+i); }
+    pgbuf_scan(&P); expect("all 50 headers wrong (sample < 100)",0,"mismatch");
+    /* 2. healthy small pool: passes */
+    for(int i=0;i<NB;i++) put_hdr(i,100+i);
+    pgbuf_scan(&P); expect("all 50 headers right",1,NULL);
+    /* 3. only cold (zone 3) pages: a few are read so the offsets are still checked */
+    for(int i=0;i<NB;i++) put_bcb(i,100+i,0x00030000u,iop_[i]);
+    pgbuf_scan(&P); expect("zone 3 only, headers right: verified",1,NULL);
+    printf("        headers read: %d\n",PG.nhdr); bad|=PG.nhdr<1;
+    for(int i=0;i<NB;i++) put_hdr(i,9000+i);
+    pgbuf_scan(&P); expect("zone 3 only, headers wrong",0,"mismatch");
+    /* 4. nothing resident: io pages never touched (anonymous, not faulted in) */
+    unsigned char *cold=mmap(NULL,(size_t)NB*65536,PROT_READ,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    for(int i=0;i<NB;i++) put_bcb(i,100+i,0x00010000u,cold+(size_t)i*65536);
+    pgbuf_scan(&P); expect("no header resident: not verified",0,"verif");
+    /* 5. empty buffer pool */
+    for(int i=0;i<NB;i++){ unsigned char*b=bcbs_+(size_t)i*g_bt->pg.sz_bcb; int32_t m1=-1; int16_t v1=-1;
+        memcpy(b+g_bt->pg.vpid,&m1,4); memcpy(b+g_bt->pg.vpid+4,&v1,2); }
+    pgbuf_scan(&P); expect("empty pool: nothing to verify",0,"verif");
+    return bad;
+}
+HS
+gcc -O2 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/s" "$TMP/s.c" 2>"$TMP/cc6.err" || { cat "$TMP/cc6.err"; echo "→ FAIL (compile failed)"; exit 1; }
+"$TMP/s" || rc=1
 # --bcb-dump alone succeeds only when it replaced the file: an unwritable path or a target
 # that cannot be replaced must exit 1 (needs a running server; skipped otherwise).
 BIN="$ROOT/cub_top"

@@ -131,7 +131,8 @@ LSA 는 `struct log_lsa { int64 pageid:48; int64 offset:16; }` 8바이트다(리
 |---|---|---|
 | L4 pgbuf 게이트 (기존) | `num_buffers == paramdump data_buffer_pages` | 방법 B 전체 비활성 → pgbuf 도 비활성 |
 | VPID 위생 | volid ∉ [-1, 255] 또는 pageid < -1 인 BCB 가 1% 초과 | pgbuf 비활성 + 사유 |
-| **페이지 헤더 대조** | iopage 헤더의 (pageid, volid) ≠ BCB.vpid 가 5% 초과(100개 이상일 때) | pgbuf 비활성 + 사유. 소량 불일치는 교체 중인 페이지(정상) |
+| **페이지 헤더 대조** | 실제로 읽은 헤더 수 대비 비율 — 표본 크기와 무관. 읽기 실패 50% 초과, 또는 재검 후에도 (pageid, volid) ≠ BCB.vpid 가 50% 초과, 또는 검증된 헤더 0개 | pgbuf 비활성 + 사유. 5~50% 는 전수(`--bcb-dump`)일 때 검증된 레코드만 집계(degraded). 소량 불일치는 교체 중인 페이지(정상) |
+| **검증 표본 없음** | 읽을 수 있는 헤더가 0개 — 버퍼풀이 비었거나 표본 페이지가 모두 비상주 | pgbuf 비활성 + 오프셋 오류와 구분되는 사유("검증 안 됨"). hot/warm 표본이 32개 미만이면 상주 cold 페이지를 고르게 더해 32개까지 채운다 |
 | 로그 위생 | append ≥ nxio, pageid ≥ 0 | 로그 항목만 생략 |
 
 실측(11.5, 32,768 BCB): 위생 위반 0, 헤더 불일치 0, 읽기 실패 0, 소요 8~17ms.
