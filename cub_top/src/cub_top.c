@@ -4203,8 +4203,17 @@ static void on_tstp(int s){
     signal(SIGTSTP,on_tstp); (void)s; errno=e;
 }
 static void on_cont(int s){ int e=errno; (void)s; tui_raw_reenter(); errno=e; }
+/* Children this process started (paramdump's group, the DWARF extraction): stopped on the
+   way out by a signal, since no exit path runs then.  Async-signal-safe: kill(2) only. */
+static void kids_kill_now(void){
+    if(g_pd_pid>0) kill(-g_pd_pid,SIGKILL);
+    if(g_dw_kid>0) kill(g_dw_kid,SIGKILL);
+}
 /* abort() and crashes: the terminal first, then the default action (core, status) */
-static void on_fatal(int s){ tui_raw_restore(); raise_default(s); }
+static void on_fatal(int s){ tui_raw_restore(); kids_kill_now(); raise_default(s); }
+/* One-shot runs keep the default disposition of INT/TERM/HUP/QUIT (exit by that signal);
+   only the children are stopped first, or a waiting paramdump would outlive the run */
+static void on_term_kids(int s){ kids_kill_now(); raise_default(s); }
 static void tui_leave(void){
     static int done=0;
     if(g_raw){ tcsetattr(STDIN_FILENO,TCSADRAIN,&g_tio); g_raw=0; }
@@ -8839,6 +8848,8 @@ int main(int argc,char **argv){
     }
     const char *cub=getenv("CUBRID");
     FILE *pd=NULL;
+    if(!live){ signal(SIGINT,on_term_kids); signal(SIGTERM,on_term_kids);   /* live installs its own */
+               signal(SIGHUP,on_term_kids); signal(SIGQUIT,on_term_kids); }
     if(P.pid<0){
         /* Server not running: fill in what is observable rather than stopping */
         memset(&CAP,0,sizeof CAP);
@@ -8931,7 +8942,10 @@ int main(int argc,char **argv){
                 else if(k=='h') help=1;
             }
             if(g_stop||help) continue;
-            if(paused){ usleep(150000); continue; }
+            /* No frame is sampled while paused, but a paramdump still waiting is held to its
+               deadline: past it the poll kills the group (an answer that came is applied) */
+            if(paused){ if(pd && now_ms()>=g_pd_deadline) paramdump_poll(&pd,0);
+                        usleep(150000); continue; }
             /* Automatic mode: reschedule once the adaptive period has passed since the last completion */
             if(g_a_auto && !a_pending && a_at>=0 && (now_ms()-a_at)/1000.0>=a_period())
                 a_pending=1;
@@ -8948,6 +8962,7 @@ int main(int argc,char **argv){
                                a_at=now_ms(); a_pending=0; } }
         }
         tui_leave();
+        paramdump_abort(&pd);          /* a request still waiting must not outlive the run */
         if(g_mem_fd>=0) close(g_mem_fd);
         if(RPR.f){ FILE *rf=RPR.f; int e=0; RPR.f=NULL;
                    if(fflush(rf)!=0 || ferror(rf)) e=errno?errno:EIO;

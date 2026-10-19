@@ -167,4 +167,59 @@ gcc -O1 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/f" "$TMP/f.c" -lm -lpthrea
 CUBRID="$R" PD_LOG="$TMP/logs/log" WANT_UID="$(echo $SU | sed -n 's/SRV_UID=\([0-9]*\).*/\1/p')" "$TMP/t" $s1 $s2 $s3 $s4; rc=$?
 CUBRID="$R" PD_LOG="$TMP/logs/log" "$TMP/f" $s1 || rc=1
 kill $s1 $s2 $s3 $s4 2>/dev/null; wait $s1 $s2 $s3 $s4 2>/dev/null
+# Live: a paramdump that hangs is held to its deadline while paused, and nothing it started
+# outlives the run - quit while it waits, or a one-shot run interrupted by SIGINT.  The
+# stand-in's cubrid execs a named script so its processes can be found and counted.
+LT=$TMP/live; LR=$LT/root; mkdir -p $LR/lib $LR/bin
+head -c 8192 /dev/zero > $LR/lib/libcubrid.so.11.5
+printf '#!/bin/sh\nexec %s/hang\n' "$LT" > $LR/bin/cubrid; printf '#!/bin/sh\nsleep 60\n' > $LT/hang; chmod +x $LR/bin/cubrid $LT/hang
+cat > $LT/srv.c <<'C'
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+int main(int c,char**v){ int fd=open(v[1],O_RDONLY); void*p=mmap(0,8192,PROT_READ,MAP_PRIVATE,fd,0); (void)p; for(;;) pause(); }
+C
+gcc -O1 -o $LT/cub_server $LT/srv.c
+cat > $LT/live.py <<'PY2'
+import os,sys,pty,time,select,signal,fcntl,termios,struct,subprocess
+binp,mark,mode=sys.argv[1:4]
+def kids():
+    return [int(x) for x in subprocess.run(["pgrep","-f","--",mark+"/hang"],capture_output=True,text=True).stdout.split()]
+def pump(fd,sec):
+    end=time.time()+sec
+    while time.time()<end:
+        r,_,_=select.select([fd],[],[],0.1)
+        if r:
+            try: os.read(fd,65536)
+            except OSError: return
+pid,fd=pty.fork()
+if pid==0:
+    os.environ["TERM"]="xterm"; os.execv(binp,[binp,"-b","--interval","0.3"])
+fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',50,160,0,0))
+pump(fd,1.5); k0=kids(); k1=[]
+if mode=="pause":
+    os.write(fd,b' '); pump(fd,13); k1=kids()
+os.write(fd,b'q'); pump(fd,1.5)
+try: os.waitpid(pid,0)
+except ChildProcessError: pass
+time.sleep(0.3); k2=kids()
+for p in set(k0+k1+k2):
+    try: os.killpg(os.getpgid(p),signal.SIGKILL)
+    except OSError: pass
+ok = len(k0)>=1 and len(k1)==0 and len(k2)==0
+if mode=="pause": print("  %s   live, paused 13 s while paramdump hangs: %d waiting, %d after the deadline, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),len(k2)))
+else:             print("  %s   live, quit while paramdump hangs: %d waiting, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k2)))
+sys.exit(0 if ok else 1)
+PY2
+env CUBRID=$LR CUBRID_DATABASES=$LT $LT/cub_server $LR/lib/libcubrid.so.11.5 & ls_=$!
+sleep 0.3
+timeout 40 python3 $LT/live.py "$ROOT/cub_top" "$LT" pause || rc=1
+timeout 20 python3 $LT/live.py "$ROOT/cub_top" "$LT" quit || rc=1
+"$ROOT/cub_top" -d >/dev/null 2>&1 & op=$!
+sleep 1; n0=$(pgrep -f -- "$LT/hang" | wc -l); kill -INT $op; wait $op 2>/dev/null; sleep 0.3
+n1=$(pgrep -f -- "$LT/hang" | wc -l)
+for p in $(pgrep -f -- "$LT/hang"); do kill -9 -- -$(ps -o pgid= -p $p | tr -d ' ') 2>/dev/null; done
+if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     one-shot interrupted (SIGINT) while paramdump hangs: $n0 waiting, $n1 after"
+else echo "  FAIL   one-shot interrupted (SIGINT): $n0 waiting, $n1 after"; rc=1; fi
+kill $ls_ 2>/dev/null; wait $ls_ 2>/dev/null
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
