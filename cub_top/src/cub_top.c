@@ -3408,7 +3408,6 @@ static void method_a(proc_t *P){
 /* ---------------- Classify cub_server regions into six kinds ---------------- */
 typedef struct {
     char name[20]; double mapped,rss; long long cfg; char grade;
-    double prev_mapped;         /* grow for view 2 (over configured), tied to the allocation-over-configuration axis */
     double prev_rss;            /* Previous-frame baseline (live) for the grow column */
 } srg_t;
 static srg_t SR[8]; static int NSR=0;
@@ -3623,8 +3622,8 @@ static const char *GR(char g){
 
 #define RCHAR_MIN (64.0*1024.0)   /* Floor below which the absorb denominator is meaningless (64KB/s) */
 /* ---- Live dashboard: canvas / braille / TUI ----
- * Six-dot glyph gauges (foreground = lens metric, background = a second share such as
- * dirty), four value columns alloc|rss|conf|chg, two lenses, ~3 minute window, 24h time ruler.
+ * Six-dot glyph gauges (foreground = the box's metric, background = a second share such as
+ * dirty), four value columns alloc|rss|conf|chg, ~3 minute window, 24h time ruler.
  */
 #define CV_W 120   /* Ceiling of 114 plus slack */
 /* Plot mode is the tallest: nine panels (53 rows) plus the status line and the
@@ -3794,7 +3793,7 @@ static void cv_box2(int x,int y,int w,int h,const char*title,const char*rtitle){
     }
 }
 static void cv_box(int x,int y,int w,int h,const char*title){ cv_box2(x,y,w,h,title,NULL); }
-/* Six-dot gauge: foreground is the lens metric (green to red), background a second share (complementary blue) */
+/* Six-dot gauge: foreground is the box's metric (green to red), background a second share (complementary blue) */
 /* Overlay chg on the gauge.  The background already carries the second share, so an
    orange background would mix two signals in one channel; instead the growth
    since the previous frame is painted orange at the end of the filled bar, where
@@ -5672,7 +5671,7 @@ static void sat_cell(char *dst,size_t n,int sat,int cap){
 }
 
 static int tui_too_small(const char *what,const char *keys_en,const char *keys_ko);
-static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
+static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
                         double work_ms,double a_age,int with_a){
     if(tui_too_small(g_ascii?"dashboard":"대시보드","[p] plots  [q] quit","[p] 플롯  [q] 종료")) return;
     int W=term_w();
@@ -5717,7 +5716,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         cv_put(W-1-disp_w(t1),y,t1,"38;5;250");
         y+=1;
     }
-    /* ---- OS context; no lens marker, since the lens is a regions-only axis ---- */
+    /* ---- OS context ---- */
     /* The instance list lives in the OS box: what is running on this host and how much
        each uses is an OS-level fact.  The boxes below analyse the selected one. */
     int oh = 4 + irows;   /* +1 for the CPU row */
@@ -5983,10 +5982,6 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
         cv_put(2,y,cutf(vb,W-4),vc); y+=1;
     }
     /* ---- cub_server regions ---- */
-    /* Two lenses; the delta is the grow column, not a lens */
-    static const char*LN[3]={"","할당/상주","설정 초과"};
-    static const char*LNA[3]={"","alloc/rss","config over"};
-    const char **LNS = g_ascii?LNA:LN;
     /* Four value columns: alloc | rss | conf | growth, each preceded by a space so it does
        not touch the pipe. */
     /* Value width 7: just below 1024, H() produces "1023.9M", seven characters; six would
@@ -6027,45 +6022,27 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
               int ax=2+disp_w(t2)+4;
               if(ax+disp_w(at) <= PCT_X-2) cv_put(ax,y,at,"38;5;214");
           } }
-        /* Column order alloc | rss | conf | grow.  grow follows the lens: rss delta in view 1,
-           alloc delta in view 2 (over configured), whose conf heading turns orange. */
+        /* Column order alloc | rss | conf | grow; the gauge is rss over alloc and grow the rss delta */
         snprintf(t2,sizeof t2,"┤%7s |%7s |%7s |%6s├","alloc","rss","conf","grow");
         /* A heading past the right corner breaks the box, so it is pulled left by the overhang.
            If it would still collide with the title (at 60 columns), it is omitted; the
            values remain. */
         { int hx=VAL_X-1, hw=disp_w(t2);
           if(hx+hw > W-1) hx = W-1-hw;
-          if(hx >= title_end){
-              /* View badge, just before the value headings.  Its colour matches the column it
-                 changes (orange for over-configured), so badge, heading
-                 token and row value read as one colour. */
-              { char vb2[48];
-                snprintf(vb2,sizeof vb2,"┤%s%d · %s ",g_ascii?"lens":"보기",lens,LNS[lens]);
-                int vw=disp_w(vb2), vx=hx-vw;
-                if(vx>=title_end)
-                    cv_put(vx,y,vb2, lens==2?"1;38;5;214":"1;36");
-              }
-              cv_put(hx,y,t2,"1;36");
-              /* Token position for column 3 (conf): border 1, field 7, separator 2 */
-              if(lens==2) cv_put(hx+19,y,padf("conf",7,1),"1;38;5;214");
-          } }
-          double sm=0,ssr=0,sc=0,sd=0,sdm=0; int base_ok=1,mbase_ok=1;   /* Material for the total row */
+          if(hx >= title_end) cv_put(hx,y,t2,"1;36"); }
+          double sm=0,ssr=0,sc=0,sd=0; int base_ok=1;   /* Material for the total row */
         for(int i=0;i<NSR;i++){
             srg_t*r=&SR[i]; int yy=y+1+i;
             cv_put(2,yy,GR(r->grade),
                    r->grade=='M'?"38;5;39":r->grade=='R'?"38;5;214":r->grade=='E'?"38;5;250":"38;5;203");
             cv_put(4,yy,padf(r->name,14,0),"250");
             double frac=0,dfrac=0; char tail[24]; int warn=0;
-            /* The growth (on the rss basis) is converted to each lens's scale and painted orange at
-               the end of the gauge.  A decrease already shows as a shorter bar and is
-               not marked. */
+            /* Gauge: resident over allocated (low = reserved and not used).  The growth is painted
+               orange at the end of the gauge; a decrease already shows as a shorter bar. */
             double dv=r->rss-r->prev_rss; if(dv<0) dv=0;
-            if(lens==1){ frac=r->mapped>0?r->rss/r->mapped:0;
-                         dfrac=r->mapped>0?dv/r->mapped:0;
-                         snprintf(tail,sizeof tail,"%.0f%%",frac*100); }
-            else { if(r->cfg>0){ frac=r->mapped/(double)r->cfg; warn=frac>1.05;   /* View 2: over configured */
-                                 snprintf(tail,sizeof tail,"%.0f%%%s",frac*100,warn?"!":""); }
-                   else snprintf(tail,sizeof tail,"n/a"); }
+            frac=r->mapped>0?r->rss/r->mapped:0;
+            dfrac=r->mapped>0?dv/r->mapped:0;
+            snprintf(tail,sizeof tail,"%.0f%%",frac*100);
             if(r->mapped>0||r->rss>0) cv_meter3(MET_X,yy,MET_W,frac,0,dfrac);
             cv_put(PCT_X,yy,padf(tail,6,1),warn?"38;5;203":"250");
             cv_put(VAL_X,   yy,padf(r->mapped>0?H(r->mapped):"-",7,1),"244");
@@ -6074,16 +6051,14 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
             cv_put(VAL_X+9, yy,padf(r->rss>0?H(r->rss):"0B",7,1),"250");
             cv_put(VAL_X+17,yy,"|","38;5;240");
             /* conf: the configured size, directly comparable with alloc and rss */
-            cv_put(VAL_X+18,yy,padf(r->cfg>0?H((double)r->cfg):"-",7,1),lens==2?"38;5;214":"250");
+            cv_put(VAL_X+18,yy,padf(r->cfg>0?H((double)r->cfg):"-",7,1),"250");
             cv_put(VAL_X+26,yy,"|","38;5;240");
             /* growth is the rss delta against the previous frame.  No change prints a dot: 0B would
                read as "wrote zero bytes" and not be distinguishable from no change.
                One-shot mode has no baseline and prints '-'. */
             { char cg[24]; const char *cc="38;5;244";
-              /* grow follows the view's axis: view 1 = rss delta, view 2 (over configured) =
-                 alloc delta - the percentage is allocation over configuration. */
-              double base = lens==2 ? r->prev_mapped : r->prev_rss;
-              double cur  = lens==2 ? r->mapped      : r->rss;
+              double base = r->prev_rss;
+              double cur  = r->rss;
               double d    = cur-base;
               double a=d<0?-d:d;
               /* With no baseline (previous frame) the delta is undefined - print '-'.
@@ -6094,13 +6069,12 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
               else { snprintf(cg,sizeof cg,"%s%s",d>0?"+":"-",H(a)); cc="1;38;5;214"; }
               cv_put(VAL_X+27,yy,padf(cg,6,1),cc); }
             sm+=r->mapped; ssr+=r->rss; if(r->cfg>0) sc+=(double)r->cfg;
-            if(r->prev_mapped>0 || r->mapped<=0) sdm+=r->mapped-r->prev_mapped; else mbase_ok=0;
             /* Baseline test: a region where both rss and prev are 0 (an arena) has no change - it
                is not missing a baseline.  Treating it as such would leave the total's
                grow at '-' forever. */
             if(r->prev_rss<=0){ if(r->rss>0) base_ok=0; }
             else sd+=r->rss-r->prev_rss;
-            r->prev_rss=r->rss; r->prev_mapped=r->mapped;
+            r->prev_rss=r->rss;
         }
         /* ---- Total row ----
            The rss total equals process RSS by definition (all smaps mappings, held by
@@ -6122,8 +6096,8 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
           cv_put(VAL_X+18,yy,padf(sc>0?H(sc):"-",7,1),"250");
           cv_put(VAL_X+26,yy,"|","38;5;240");
           { char cg[24]; const char *cc="38;5;244";
-            double dv = lens==2 ? sdm : sd;
-            int ok    = lens==2 ? mbase_ok : base_ok;
+            double dv = sd;
+            int ok    = base_ok;
             double a=dv<0?-dv:dv;
             if(!ok)        snprintf(cg,sizeof cg,"-");
             else if(a<1.0) snprintf(cg,sizeof cg,"·");
@@ -6420,13 +6394,11 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int lens,int paused,
     {
       const char *seg[8]; int nseg=0;
       if(g_ascii){
-          seg[nseg++]="[1/2] alloc/over";
           seg[nseg++]="heap [r]eflash [a]uto";
           if(g_ninst>1) seg[nseg++]="[<>]inst";
           seg[nseg++]="[p]plot";
           seg[nseg++]="[l]lang"; seg[nseg++]="[h]help"; seg[nseg++]="[q]quit";
       } else {
-          seg[nseg++]="[1/2] 할당/초과";
           seg[nseg++]="힙 [r]재측정 [a]자동";
           if(g_ninst>1) seg[nseg++]="[<>]인스턴스";
           seg[nseg++]="[p]시계열";
@@ -7447,12 +7419,9 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
         srg_t*x=&SR[NSR++];
         snprintf(x->name,sizeof x->name,"%s",RGN[i].name);
         x->mapped=strtod(b,NULL);
-        x->prev_rss=x->prev_mapped=0;
+        x->prev_rss=0;
         for(int j=0;j<nold;j++)
-            if(!strcmp(old[j].name,x->name)){
-                x->prev_rss=old[j].prev_rss;
-                x->prev_mapped=old[j].prev_mapped; break;
-            }
+            if(!strcmp(old[j].name,x->name)){ x->prev_rss=old[j].prev_rss; break; }
         snprintf(k,sizeof k,"region.%s.rss_bytes",RGN[i].slug);   x->rss=rp_num(t,k,0);
         snprintf(k,sizeof k,"region.%s.cfg_bytes",RGN[i].slug);   x->cfg=(long long)rp_num(t,k,-1);
         x->grade=RGN[i].grade;
@@ -7784,7 +7753,7 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
         free(fr);
         return 0;
     }
-    int view=view0, paused=0, lens=1, rebuild=0; size_t i=0;
+    int view=view0, paused=0, rebuild=0; size_t i=0;
     size_t pushed=(size_t)-1;      /* the last frame added to the history */
     double t0=rp_time(fr[0]);
     tui_enter();
@@ -7808,15 +7777,14 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
         g_replaying=1; g_rep_i=(int)i; g_rep_n=(int)n;
         g_rep_ts=(time_t)rp_num(fr[i],"ts_epoch",0);
         if(view) render_plot(&P,&M,&T,&IO,paused);
-        else     render_dash(&P,&M,&T,&IO,lens,paused,0,-1,g_rp_have_a);
+        else     render_dash(&P,&M,&T,&IO,paused,0,-1,g_rp_have_a);
         int k, step=0;
         while((k=tui_key())>=0){
             if(k=='q'){ g_stop=1; break; }
             else if(k==' ') paused=!paused;
             else if(k=='p'||k=='g') view=!view;
             else if(k=='l') g_ascii=!g_ascii;
-            else if(k>='1'&&k<='4'){ if(view) g_plot_zoom=(k=='1'||g_plot_zoom==k-'0')?0:k-'0';
-                                     else if(k<='2') lens=k-'0'; }
+            else if(k>='1'&&k<='4'){ if(view) g_plot_zoom=(k=='1'||g_plot_zoom==k-'0')?0:k-'0'; }
             else if(k=='.') step=1;                       /* step forward while paused */
             else if(k==','){ if(i>0){ i--; rebuild=1; step=-1; } }   /* step back: history is rebuilt */
         }
@@ -8307,7 +8275,7 @@ static void help_keys_dash(void){
 "    맨 윗줄        수집 시간(이 프레임에 든 실작업 ms) · 현재 시각\n"
 "    ① OS 컨텍스트  호스트 CPU·메모리 · 가동 인스턴스 목록(▶ = 지금 보는 DB)\n"
 "    ② RSS·프로세스 master / server / pl / broker / CAS 티어별 상주(top 기준)와 코어\n"
-"    ③ RSS·서버     영역별 alloc·rss·conf·grow — 1/2 키로 보기 전환\n"
+"    ③ RSS·서버     영역별 alloc·rss·conf·grow, 게이지 = 상주/할당\n"
 "    ④ 동적 메모리  [B] 정확 · [A] 청크 추정 · ④' 버퍼풀 상태 · ⓐ 용량\n"
 "    ⑤ 메모리 추이  서버 전체·동적 힙 증감 + load(OS) 겹침\n"
 "    ⑥ I/O          iowait · 장치 · D스레드 → 맨 아래 한 줄 판정문\n"
@@ -8367,14 +8335,8 @@ static void help_keys_dash(void){
 "  Σ 합계          4열의 합. rss 합 = 프로세스 RSS(항등)로 프로세스 박스의 server 와 같다.\n"
 "                  라벨의 PSS 는 공유 .so 를 나눠 배분한 값이다(오류 아님).\n"
 "\n"
-"  1/2 키로 바꾸는 것은 게이지·퍼센트와 grow 열뿐이다(영역 행은 그대로).\n"
-"\n"
-"    보기          alloc      rss        conf(3번째 열)   grow(4번째 열)\n"
-"    ───────────   ────────   ────────   ──────────────   ─────────────────────\n"
-"    1 할당·상주   할당       상주       설정값           rss 증감      (주황)\n"
-"    2 설정 초과   할당       상주       설정값(주황)     alloc 증감    (주황)\n"
-"\n"
-"  게이지: 6점 글리프 = 보기 지표(녹→적), 끝의 주황 = 이번 프레임 증가분\n"
+"  열: alloc 할당 · rss 상주 · conf 설정값 · grow rss 증감(주황)\n"
+"  게이지: 6점 글리프 = 상주/할당(녹→적), 끝의 주황 = 이번 프레임 증가분\n"
 "  최근 접근 비율(핫)은 보여주지 않는다 — 재려면 대상 페이지 테이블을 전수 순회하는\n"
 "  clear_refs 쓰기가 필요하고, 모니터가 그 부하를 만들면 안 되기 때문이다.\n"
 "\f\n"
@@ -8525,7 +8487,6 @@ static void help_keys_dash(void){
 "\n"
 "    키            동작\n"
 "    ───────────   ─────────────────────────────────────────────────────────\n"
-"    1  2          ③ 보기 전환   1 할당·상주   2 설정 초과\n"
 "    d             ④' 대형 버퍼풀의 페이지 단위 스캔 켬/끔 (기본 끔 — 엔진 집계만)\n"
 "    r             ④ [A] 청크 추정을 지금 1회 다시 측정\n"
 "    a             ④ [A] 자동 측정 켬/끔 (주기는 측정 시간에 맞춰 자동)\n"
@@ -8547,7 +8508,7 @@ static void help_keys_dash(void){
 "    · 파라미터 귀속률 — 설정으로 설명되는 몫을 셀 수 없어 표시되지 않는다\n"
 "    · DB 페이지 크기 — data_buffer_size/pages 로 역산한다(실패 시 16KB 로 가정)\n"
 "    · 방법 B 자기검증 — num_buffers 와 data_buffer_pages 대조가 불가해 힙 B 가 꺼진다\n"
-"    · 렌즈2(설정초과)·하단 '메모리 파라미터' 표 전체\n"
+"    · 하단 '메모리 파라미터' 표 전체\n"
 "  즉 RSS/PSS 같은 실측은 그대로 나오지만, '왜 이만큼인가' 를 설명하는 축이 사라진다.\n"
 "\n"
 "── 여러 데이터베이스(인스턴스) ──\n"
@@ -8741,7 +8702,7 @@ static void help_keys_plot(void){
 "    · 파라미터 귀속률 — 설정으로 설명되는 몫을 셀 수 없어 표시되지 않는다\n"
 "    · DB 페이지 크기 — data_buffer_size/pages 로 역산한다(실패 시 16KB 로 가정)\n"
 "    · 방법 B 자기검증 — num_buffers 와 data_buffer_pages 대조가 불가해 힙 B 가 꺼진다\n"
-"    · 렌즈2(설정초과)·하단 '메모리 파라미터' 표 전체\n"
+"    · 하단 '메모리 파라미터' 표 전체\n"
 "  즉 RSS/PSS 같은 실측은 그대로 나오지만, '왜 이만큼인가' 를 설명하는 축이 사라진다.\n"
 "\n"
 "── 여러 데이터베이스(인스턴스) ──\n"
@@ -8941,7 +8902,7 @@ int main(int argc,char **argv){
 
     if(live){
         /* ---- Live dashboard ---- */
-        int lens=1,paused=0,a_pending=0,help=0,view=view0; double a_at=now_ms();   /* When the startup measurement finished */
+        int paused=0,a_pending=0,help=0,view=view0; double a_at=now_ms();   /* When the startup measurement finished */
         g_pd_idle=&pd;
         tui_enter();
         while(!g_stop){
@@ -8965,7 +8926,7 @@ int main(int argc,char **argv){
                 g_ts_frac=fr_t; rp_record(&P,&M,&T,&IO,with_a,rts,(long)rt); g_ts_frac=-1;
             }
             if(view) render_plot(&P,&M,&T,&IO,paused);
-            else     render_dash(&P,&M,&T,&IO,lens,paused,work_ms,
+            else     render_dash(&P,&M,&T,&IO,paused,work_ms,
                                  a_at>=0?(now_ms()-a_at)/1000.0:-1,with_a);
             /* Key handling */
             int k;
@@ -8976,7 +8937,6 @@ int main(int argc,char **argv){
                        So 1 restores the four-panel view and 2-4 zoom that panel (the
                        same key again restores). */
                     if(view) g_plot_zoom = (k=='1' || g_plot_zoom==k-'0') ? 0 : k-'0';
-                    else if(k<='2') lens=k-'0';
                 }
                 else if(k==' ') paused=!paused;
                 else if(k=='r'){ with_a=1; a_pending=1; }            /* Reanalyse once */
