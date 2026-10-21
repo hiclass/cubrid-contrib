@@ -1804,6 +1804,23 @@ volmap_walk_extdata (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const char *iopage, 
   free (cur);
 }
 
+/* The LSA a header must carry for its sector list to be trusted on a later refresh.
+   Pages of temporary volumes carry the constant PGBUF_TEMP_LSA {-2, -2} (page_buffer.h:
+   pgbuf_init_temp_page_lsa; pgbuf_set_lsa leaves it alone), so their LSA never moves
+   while their tables do - a temporary file's list is never re-applied.  0 = no cache. */
+static UINT64
+volmap_hdr_lsa_for_cache (const char *iopage)
+{
+  UINT64 raw;
+
+  memcpy (&raw, iopage + offsetof (FILEIO_PAGE_RESERVED, lsa), sizeof (raw));
+  if (volmap_lsa_pageid (raw) == -2 && volmap_lsa_offset (raw) == -2)
+    {
+      return 0;
+    }
+  return raw;
+}
+
 /*
  * volmap_try_file_header () - validate a candidate page as FILE_HEADER (self VFID must match its own
  *                             VPID) and, on success, harvest counts + sector ownership.
@@ -1874,7 +1891,7 @@ volmap_try_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, ch
   volmap_fidx_put (ctx, ctx->nfiles - 1);
 
   f->nsects = 0;
-  memcpy (&f->hdr_lsa, iopage + offsetof (FILEIO_PAGE_RESERVED, lsa), sizeof (f->hdr_lsa));
+  f->hdr_lsa = volmap_hdr_lsa_for_cache (iopage);
   if (fhead->offset_to_partial_ftab >= 0)
     {
       volmap_walk_extdata (ctx, vol, iopage, fhead->offset_to_partial_ftab, true, ctx->nfiles - 1);
@@ -4106,7 +4123,7 @@ volmap_refresh (VOLMAP_CTX * ctx)
       f->alloc_pages = 0;
       f->sectors_seen = 0;
       f->nsects = 0;
-      memcpy (&f->hdr_lsa, iopage + offsetof (FILEIO_PAGE_RESERVED, lsa), sizeof (f->hdr_lsa));
+      f->hdr_lsa = volmap_hdr_lsa_for_cache (iopage);
       if (fhead->offset_to_partial_ftab >= 0)
 	{
 	  volmap_walk_extdata (ctx, vol, iopage, fhead->offset_to_partial_ftab, true, fi);

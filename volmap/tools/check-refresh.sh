@@ -49,11 +49,18 @@ PY
 # 1. nothing changed: three refreshes, all from cache, tracker skipped, same report
 "$BIN" --format=json "$RUNDB" > "$TMP/a.json" 2>/dev/null
 VOLMAP_REFRESH_LOOPS=3 "$BIN" --format=json "$RUNDB" > "$TMP/b.json" 2> "$TMP/b.err"
-nf=$(python3 -c "import json; print(len(json.load(open('$TMP/a.json'))['files']))")
-if same "$TMP/a.json" "$TMP/b.json" && [ "$(grep -c "files from cache, 0 re-walked, tracker unchanged, skipped" "$TMP/b.err")" = 3 ] \
-   && grep -q "refresh 1: $nf files from cache" "$TMP/b.err"; then
-  echo "  ok     unchanged database: 3 refreshes re-applied all $nf files from cache, tracker walk skipped, report identical"
-else echo "  FAIL   unchanged database:"; cat "$TMP/b.err"; rc=1; fi
+# files on temporary-purpose volumes carry the constant temp LSA, so they are never
+# served from the cache: they are re-walked every time, and that is the expected count
+read nf nt <<EOT
+$(python3 -c "
+import json; d=json.load(open('$TMP/a.json'))
+tv={v['volid'] for v in d['volumes'] if v['purpose']=='temporary'}
+nt=sum(1 for f in d['files'] if int(f['vfid'].split('|')[0]) in tv)
+print(len(d['files'])-nt, nt)")
+EOT
+if same "$TMP/a.json" "$TMP/b.json" && [ "$(grep -c "refresh [123]: $nf files from cache, $nt re-walked, tracker unchanged, skipped" "$TMP/b.err")" = 3 ]; then
+  echo "  ok     unchanged database: 3 refreshes re-applied $nf files from cache ($nt on temporary volumes re-walked, as they must be), tracker walk skipped, report identical"
+else echo "  FAIL   unchanged database (want $nf from cache, $nt re-walked):"; cat "$TMP/b.err"; rc=1; fi
 # 2. a table created and filled during the pause: the refresh must reach the fresh state
 T=volmap_rt_$$
 cat > "$TMP/mk.sql" <<SQL
