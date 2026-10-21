@@ -194,10 +194,13 @@ LT=$TMP/live; LR=$LT/root; mkdir -p $LR/lib $LR/bin
 head -c 8192 /dev/zero > $LR/lib/libcubrid.so.11.5
 printf '#!/bin/sh\nexec %s/${PD_HANG:-hang}\n' "$LT" > $LR/bin/cubrid; printf '#!/bin/sh\nsleep 60\n' > $LT/hang
 printf '#!/bin/sh\nexec >/dev/null 2>&1\nsleep 60\n' > $LT/hang2; chmod +x $LR/bin/cubrid $LT/hang $LT/hang2
+# The live scenarios run a private copy of the binary under this run's directory, so
+# nothing is ever matched by a path another monitor or a parallel test could share.
+TB=$LT/cub_top; /bin/cp -f "$ROOT/cub_top" "$TB" || { echo "→ FAIL (cannot copy the binary)"; exit 1; }
 # Whatever a scenario left (its own cleanup not reached: timeout, exception): the hang
-# groups and the pty cub_top
+# groups and the pty cub_top - found only by this run's private paths
 sweep(){ for p in $(pgrep -f -- "$LT/hang"); do kill -9 -- -$(ps -o pgid= -p $p | tr -d ' ') 2>/dev/null; done
-         for p in $(pgrep -x -f -- "$ROOT/cub_top -b --interval 0.3"); do kill -9 $p 2>/dev/null; done; }
+         for p in $(pgrep -f -- "^$TB "); do kill -9 $p 2>/dev/null; done; }
 hangs(){ pgrep -f -- "$LT/hang" | wc -l; }
 waithang(){ n=0; for i in $(seq 40); do n=$(hangs); [ "$n" -ge 1 ] && break; sleep 0.1; done; echo $n; }   # a loaded host starts slowly
 cat > $LT/srv.c <<'C'
@@ -248,19 +251,19 @@ sys.exit(0 if ok else 1)
 PY2
 env CUBRID=$LR CUBRID_DATABASES=$LT $LT/cub_server $LR/lib/libcubrid.so.11.5 & ls_=$!
 sleep 0.3
-live(){ timeout "$1" python3 $LT/live.py "$ROOT/cub_top" "$LT" "$2" || { echo "  FAIL   live scenario $2 did not finish cleanly"; rc=1; }; sweep; }
+live(){ timeout "$1" python3 $LT/live.py "$TB" "$LT" "$2" || { echo "  FAIL   live scenario $2 did not finish cleanly"; rc=1; }; sweep; }
 live 40 pause
 live 40 help
 live 20 quit
 # One-shot cut by a signal: INT (the default action is kept), and a crash (SIGSEGV)
 for sig in INT SEGV; do
-    (ulimit -c 0; exec "$ROOT/cub_top" -d >/dev/null 2>&1) & op=$!
+    (ulimit -c 0; exec "$TB" -d >/dev/null 2>&1) & op=$!
     n0=$(waithang); kill -$sig $op; wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
     if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     one-shot cut by SIG$sig while paramdump hangs: $n0 waiting, $n1 after"
     else echo "  FAIL   one-shot cut by SIG$sig: $n0 waiting, $n1 after"; rc=1; fi
 done
 # The child closes its output, then hangs: EOF with the group still up is stopped at once
-PD_HANG=hang2 "$ROOT/cub_top" -d >/dev/null 2>&1 & op=$!
+PD_HANG=hang2 "$TB" -d >/dev/null 2>&1 & op=$!
 n0=$(waithang); wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
 if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     paramdump closed its output and hung: $n0 while the run waited, $n1 after"
 else echo "  FAIL   paramdump closed its output and hung: $n0 while the run waited, $n1 after"; rc=1; fi
