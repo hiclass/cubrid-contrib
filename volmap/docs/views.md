@@ -116,7 +116,7 @@ cub_top 이 `--bcb-dump FILE` 로 남긴 cub_server 버퍼풀(BCB 배열) 스냅
 
 | 배경 | 의미 | 우선순위 |
 |---|---|---|
-| 자주(53) | 셀 안에 **dirty**(수정됐으나 볼륨에 아직 안 쓴) 버퍼 페이지가 있다 | 파일 마킹(남색/초록/갈색)·체인(빨강) 아래, 나머지 위 |
+| 자주(53) | 셀 안에 **볼륨에 아직 반영되지 않은** 버퍼 페이지가 있다 — BCB 의 DIRTY 비트 또는 FLUSHING 비트(쓰기 시작, 완료 전)가 선 페이지. 엔진은 flush 를 시작할 때 DIRTY 를 내리고 FLUSHING 을 세우며 쓰기가 끝나야 FLUSHING 을 내리므로, 두 비트가 모두 꺼진 페이지만 볼륨과 같다고 볼 수 있다 | 파일 마킹(남색/초록/갈색)·체인(빨강) 아래, 나머지 위 |
 | 청록(23) | 셀 안에 버퍼풀 상주 페이지가 있다(전부 clean) | 자주 아래 |
 | 회색(240/237) | -m 페이지캐시 상주 | 청록 아래 |
 | 하늘(24) | 하이워터마크 | 맨 아래 |
@@ -125,13 +125,14 @@ cub_top 이 `--bcb-dump FILE` 로 남긴 cub_server 버퍼풀(BCB 배열) 스냅
 
 | 위치 | 표기 | 의미 |
 |---|---|---|
-| 볼륨 헤더(2행) | `buf 2080 pages (dirty 59, freed 26)` | 이 볼륨의 버퍼 상주 페이지 수 / dirty / 미할당인데 버퍼에 남은 페이지(해제 후 victim 대기 — 정상) |
-| 하단 인스펙션 | `[buf 4/64 DIRTY 1]` (브레드크럼 바로 뒤) | 이 셀 64페이지 중 4장이 버퍼에, 그중 1장 dirty |
-| 페이지 박스 제목 | `page 642 (3/64) buf:DIRTY unflushed` | 메모리 페이지 LSA > 디스크 페이지 LSA — 아직 볼륨에 반영 안 됨 |
-| | `buf:DIRTY flushed` | 스냅샷엔 dirty 였지만 지금 디스크 LSA 가 같다 — 그 사이 flush 됨(연속성이 실시간으로 닫히는 모습) |
+| 볼륨 헤더(2행) | `buf 2080 pages (unflushed 59, flushing 3, freed 26)` | 이 볼륨의 버퍼 상주 페이지 수 / 미반영(dirty 또는 flushing) / 그중 flushing / 미할당인데 버퍼에 남은 페이지(해제 후 victim 대기 — 정상). flushing·freed 는 0 이면 생략 |
+| 하단 인스펙션 | `[buf 4/64 UNFLUSHED 1]` (브레드크럼 바로 뒤) | 이 셀 64페이지 중 4장이 버퍼에, 그중 1장이 미반영 |
+| 페이지 박스 제목 | `page 642 (3/64) buf:DIRTY unflushed` | 메모리 페이지 LSA > 디스크 페이지 LSA — 아직 볼륨에 반영 안 됨. 비트 상태는 `DIRTY` / `FLUSHING` / `DIRTY+FLUSHING` / `clean` 으로 구분 |
+| | `buf:FLUSHING flushed`, `buf:DIRTY flushed` | 스냅샷엔 미반영이었지만 지금 디스크 LSA 가 같다 — 그 사이 쓰기가 끝남(연속성이 실시간으로 닫히는 모습) |
+| | `buf:clean unflushed (in DWB?)` | 두 비트가 모두 꺼졌는데 디스크가 뒤처져 있다 — 이중 쓰기 버퍼(DWB)에서 볼륨 쓰기를 기다리는 페이지. 비트로는 안 보이고 LSA 비교로만 드러난다 |
 | | `buf:clean` / `buf:-` | 버퍼에 있음(동일 내용) / 버퍼에 없음 |
 | | `buf:clean disk-newer!` | 디스크가 더 새롭다 — 정상 경로에서는 나오지 않음(스냅샷 오염 의심) |
-| 상태바(`b`) | `buffer pool @03:46:20: 14540/32768 pages resident, 59 dirty \| log append 564167\|16152 flushed 564167\|16152 \| oldest dirty LSA 564033\|0` | 스냅샷 요약: 시각·상주·dirty·로그 꼬리/반영 경계·최고령 dirty LSA |
+| 상태바(`b`) | `buffer pool @03:46:20: 14540/32768 pages resident, 59 unflushed \| log append 564167\|16152 flushed 564167\|16152 \| oldest dirty LSA 564033\|0` | 스냅샷 요약: 시각·상주·미반영(cub_top 이 DIRTY 또는 FLUSHING 으로 센 수)·로그 꼬리/반영 경계·최고령 dirty LSA |
 
 갱신: 자동 새로고침 틱과 `r` 에서 파일 mtime 이 바뀌었으면 다시 읽는다(cub_top 라이브가 매 프레임 덧쓴다).
 페이지 박스의 디스크 LSA 는 그 페이지 헤더 8B 를 pread 한다(캐시 영향 1페이지).

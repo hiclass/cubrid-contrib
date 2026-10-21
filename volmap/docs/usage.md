@@ -16,7 +16,7 @@ cub_volmap [옵션] <database-name | vinf-경로>
   -f, --full           1칸=1페이지(16KB), 줄 수 무제한
   -m, --residency      배경색 = OS 페이지캐시 상주 (mmap+mincore). 볼륨 파일의 소유자·쓰기 권한자·root 가 아니면
                        커널이 mincore 에 가짜 값(전부 상주)을 주므로 "resident unknown" 으로 표시한다
-  -B, --bufmap=FILE    배경색 = cub_server 버퍼풀 상주(청록)/dirty(자주) — FILE 은 `cub_top --bcb-dump FILE` 스냅샷.
+  -B, --bufmap=FILE    배경색 = cub_server 버퍼풀 상주(청록)/미반영(자주: dirty 또는 flushing) — FILE 은 `cub_top --bcb-dump FILE` 스냅샷.
                        인터랙티브는 b 토글, 틱(--tick)·r 마다 파일이 바뀌었으면 자동 재읽기. db 이름 불일치 스냅샷은 거부
                        (DB 이름·`<db>_vinf` 경로 어느 쪽으로 실행해도 `_vinf` 를 뗀 DB 이름으로 대조)
       --deep           전수 스캔: 레코드 밀도·포워딩 비율 (+ TUI 패널 L0 del/dead 집계).
@@ -179,7 +179,7 @@ volmap --format json cbench | python3 -m json.tool
 
 최상위에 `db`(이름)·`timestamp`(생성 시각)·`release`(로그의 릴리스)·`shutdown_state`(로그 헤더의 마지막 종료 상태:
 `clean`/`not_clean`/`unknown` — `not_clean` 은 실행 중이거나 비정상 종료 후 복구 전) 메타, `volumes[]`(볼륨별 예약/할당, `purpose`=permanent/temporary, `tde_pages_probed`=프로브된 페이지 중 TDE 암호 페이지 수,
-`--bufmap` 시 `buffered_pages`/`dirty_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
+`--bufmap` 시 `buffered_pages`/`unflushed_pages`(dirty 또는 flushing)/`flushing_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
 `skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`cause`(`unreadable`/`damaged`/`unrecognized`/`unsupported_release`)·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
 
 - **stdout 은 JSON 문서만 담는다.** 볼륨 열기 실패·레이아웃 판별 경고 같은 진단 메시지는 stderr 로만 나간다
@@ -202,7 +202,7 @@ cubrid volmap --format json cbench > m.json
 cubrid volmap -f -o map.txt cbench         # 페이지 단위 전량 덤프
 cub_top -b --bcb-dump /tmp/cbench.bcb cbench &          # (터미널 1) 버퍼풀 스냅샷을 매 프레임 갱신
 ./cub_volmap -i -m -B /tmp/cbench.bcb cbench            # (터미널 2) 페이지캐시(-m)+버퍼풀(-B) 층을 한 지도에
-./cub_volmap --plain --check -B /tmp/cbench.bcb cbench  # 볼륨별 buf/dirty/freed + 스냅샷 정합 소견
+./cub_volmap --plain --check -B /tmp/cbench.bcb cbench  # 볼륨별 buf/unflushed/freed + 스냅샷 정합 소견
 ./cub_volmap /backup/olddb_vinf     # 서버 없는 장비에서 10.x 백업 볼륨 분석
 ```
 

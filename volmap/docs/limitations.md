@@ -19,7 +19,7 @@
 | 빌드 의존 | 온디스크 구조체를 엔진 헤더에서 `#include` 하므로(오프셋 하드코딩 0 원칙의 대가) 헤더가 필요하다. **소스 체크아웃은 불필요** — `tools/build_fetch.sh` 가 헤더 23개만 내려받고 CMake 생성물(`config.h`·`version.h`)은 직접 만든다. 10.2~develop 6개 태그에서 빌드·실행 확인. 소스가 이미 있으면 `build_standalone.sh` 를 쓰되, 이쪽은 CMake 를 한 번 돌린 빌드 디렉터리가 필요하다 — [build.md](build.md) |
 | 메시지 카탈로그 | cubrid.msg 미등록 — usage는 fprintf 직접 출력. 엔진 트리 밖에서 단독으로 배포되는 유틸이라 카탈로그에 묶지 않는다(UI 한/영은 `[l]` 토글이 담당) |
 | dead version 판정 | HOME/NEWHOME 레코드만 집계 (BIGONE의 MVCC 헤더는 오버플로 페이지에 있어 제외) |
-| `--bufmap` 층 | 스냅샷 파일 경유(직접 서버 메모리를 읽지 않음 — 무접촉 원칙 유지). 스냅샷 시각과 지도 시각의 차이만큼 시차가 있고, dirty 표시는 "스냅샷 당시"다(페이지 박스의 LSA 비교가 현재를 말해준다). 해제된 페이지가 버퍼에 남는 것은 정상이라 `freed N` 으로 표기하고 90% 이상 불일치만 소견. db 이름이 다른 스냅샷은 거부. 포맷 계약 `CBCBMAP1` v1(32B 레코드) — cub_top 쪽 변경 시 함께 올릴 것 |
+| `--bufmap` 층 | 스냅샷 파일 경유(직접 서버 메모리를 읽지 않음 — 무접촉 원칙 유지). 스냅샷 시각과 지도 시각의 차이만큼 시차가 있고, 미반영(DIRTY 또는 FLUSHING 비트) 표시는 "스냅샷 당시"다(페이지 박스의 LSA 비교가 현재를 말해준다). 두 비트가 모두 꺼져도 DWB 에서 볼륨 쓰기를 기다리는 페이지가 있을 수 있고, 그것은 LSA 비교로만 드러난다(`buf:clean unflushed (in DWB?)`). 해제된 페이지가 버퍼에 남는 것은 정상이라 `freed N` 으로 표기하고 90% 이상 불일치만 소견. db 이름이 다른 스냅샷은 거부. 포맷 계약 `CBCBMAP1` v1(32B 레코드) — cub_top 쪽 변경 시 함께 올릴 것 |
 
 ### 알려진 문제 (Known issues)
 
@@ -42,6 +42,6 @@
 | TUI 프레임 | write 는 행 경계(글리프-완결)에서만 — strace 전수 실측 최대 1.6KB(<pty 4KB), 부분 리페인트 누적 화면 == 전체 리페인트 화면 (행 diff 0) |
 | 입력 응답 | 강제 콜드(90GB): refresh·스캔 중에도 키→프레임 ≤0.1s, 유휴 CPU 0.0%, 랜덤키 소크 10/10 클린 |
 | JSON | `json.load` 파싱 검증, 테이블/인덱스명 해석 포함 |
-| `--bufmap` 정합 | 볼륨별 buf 페이지 수 = cub_top `pgbuf.vol<N>.resident` (cbench 9/9, demodb 5/5 일치). 스냅샷 dirty 55장은 디스크 LSA 대비 전부 unflushed, 다른 db 스냅샷은 거부 |
+| `--bufmap` 정합 | 볼륨별 buf 페이지 수 = cub_top `pgbuf.vol<N>.resident` (cbench 9/9, demodb 5/5 일치). 스냅샷 dirty 55장은 디스크 LSA 대비 전부 unflushed, 다른 db 스냅샷은 거부. `tools/check-bufmap-flags.sh`: DIRTY / FLUSHING / 둘 다 / clean 레코드 하나씩의 스냅샷에서 unflushed 3·flushing 2 |
 | 빌드 | CUBRID 트리 릴리스·디버그 양 모드 + 단독 정적 바이너리. `-Wall -Wextra` 경고 0 |
 | 버전 호환 빌드 | `build_fetch.sh` 로 **10.2 / 11.0 / 11.2 / 11.3 / 11.4 / develop** 6개 태그 빌드·실행 확인. 헤더 차이 3건(`memory_cwrapper.h` 부재 · lz4/lzo include · `pflag` 필드명)은 자동 처리 — [build.md](build.md) |

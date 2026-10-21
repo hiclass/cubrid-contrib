@@ -37,7 +37,7 @@ volmap은 서버에 접속하지 않고 볼륨 파일을 읽기 전용으로 연
                 REC_RELOCATION→REC_NEWHOME 추적, REC_BIGONE→오버플로 first-part 파싱)
   인덱스명: 클래스 레코드 property list의 BTID 문자열("vol|file|root") 역방향 탐색
   -m: mmap+mincore → OS 페이지캐시 상주율 (커널 메타데이터만 — 읽기·폴트·락 0)
-  -B: cub_top --bcb-dump 스냅샷(CBCBMAP1) → 볼륨별 페이지 배열(0/clean/dirty) + 접두합 → 셀 배경 층,
+  -B: cub_top --bcb-dump 스냅샷(CBCBMAP1) → 볼륨별 페이지 배열(0/clean/unflushed = DIRTY 또는 FLUSHING) + 접두합 → 셀 배경 층,
       (volid,pageid) 정렬 배열 → 페이지 박스에서 메모리 LSA vs 디스크 prv.lsa 비교
 
 ```

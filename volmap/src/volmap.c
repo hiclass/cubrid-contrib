@@ -135,7 +135,8 @@ struct volmap_volume
   unsigned int *buf_prefix;	/* prefix sums of (bufpg != 0)  (npages+1) */
   unsigned int *dirty_prefix;	/* prefix sums of (bufpg == 2)  (npages+1) */
   long buf_total;		/* pages of this volume in the buffer pool */
-  long buf_dirty;		/* ... of which dirty (not yet written back) */
+  long buf_dirty;		/* ... of which unflushed: DIRTY or FLUSHING (not yet on the volume) */
+  long buf_flushing;		/* ... of which FLUSHING (write in progress at the snapshot) */
   long buf_freed;		/* ... buffered but not allocated on disk (deallocated pages linger in BCBs) */
   /* --deep results */
   INT64 deep_free_bytes;	/* sum of spage total_free over data pages */
@@ -236,6 +237,11 @@ struct volmap_bufrec
   UINT64 oldest_lsa;		/* BCB oldest_unflush_lsa (raw) */
 };
 #define VOLMAP_BUFREC_DIRTY 0x80000000u
+#define VOLMAP_BUFREC_FLUSHING 0x40000000u	/* flush started: dirty bit already cleared, write not yet done */
+/* not yet on the volume: the engine clears DIRTY when a flush starts and keeps FLUSHING
+   until the write is done (pgbuf_bcb_mark_is_flushing / mark_was_flushed), so only a
+   page with both bits off can be taken for the volume's content */
+#define VOLMAP_BUFREC_UNFLUSHED (VOLMAP_BUFREC_DIRTY | VOLMAP_BUFREC_FLUSHING)
 #define VOLMAP_LSA_NULL (~(UINT64) 0)
 
 /* Why a volume listed in the vinf could not be shown.  DAMAGED and UNRECOGNIZED are
@@ -1208,7 +1214,7 @@ volmap_bufmap_load (VOLMAP_CTX * ctx)
 	{
 	  continue;
 	}
-      vol->buf_total = vol->buf_dirty = 0;
+      vol->buf_total = vol->buf_dirty = vol->buf_flushing = 0;
       (void) p;
     }
   for (k = 0; k < ctx->bm_nrec; k++)
@@ -1226,7 +1232,8 @@ volmap_bufmap_load (VOLMAP_CTX * ctx)
 	{
 	  continue;		/* volume grew after our sector table was read */
 	}
-      vol->bufpg[r->pageid] = (r->flags & VOLMAP_BUFREC_DIRTY) ? 2 : 1;
+      vol->bufpg[r->pageid] = (r->flags & VOLMAP_BUFREC_UNFLUSHED) ? 2 : 1;
+      vol->buf_flushing += (r->flags & VOLMAP_BUFREC_FLUSHING) != 0;
     }
   for (vi = 0; vi < ctx->nvols; vi++)
     {
@@ -1321,7 +1328,7 @@ volmap_bufmap_summary (VOLMAP_CTX * ctx, char *out, size_t n)
   volmap_lsa_str (ctx->bm_log_append, la, sizeof (la));
   volmap_lsa_str (ctx->bm_log_nxio, ln, sizeof (ln));
   volmap_lsa_str (ctx->bm_oldest, lo, sizeof (lo));
-  snprintf (out, n, "buffer pool @%s: %ld/%ld pages resident, %ld dirty | log append %s flushed %s | oldest dirty LSA %s",
+  snprintf (out, n, "buffer pool @%s: %ld/%ld pages resident, %ld unflushed | log append %s flushed %s | oldest dirty LSA %s",
 	    ts, ctx->bm_nrec, ctx->bm_nbuf, ctx->bm_dirty, la, ln, lo);
 }
 
@@ -3831,7 +3838,7 @@ volmap_describe_cell (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, long per_pages, con
 	  nd = (long) vol->dirty_prefix[pe] - (long) vol->dirty_prefix[p0];
 	  if (nd > 0)
 	    {
-	      snprintf (tok, sizeof (tok), "[buf %ld/%ld DIRTY %ld] ", nb, pe - p0, nd);
+	      snprintf (tok, sizeof (tok), "[buf %ld/%ld UNFLUSHED %ld] ", nb, pe - p0, nd);
 	    }
 	  else
 	    {
@@ -6405,9 +6412,14 @@ volmap_ov_box_page (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, VOLMAP_PANEL * pb, in
 	    {
 	      int c = volmap_lsa_cmp (br->page_lsa, disk);
 
-	      rel = (c > 0) ? " unflushed" : (c < 0) ? " disk-newer!" : ((br->flags & VOLMAP_BUFREC_DIRTY) ? " flushed" : "");
+	      /* both bits off yet the volume is behind: the page waits in the double write
+	         buffer for its volume write - only the LSA comparison shows it */
+	      rel = (c > 0) ? ((br->flags & VOLMAP_BUFREC_UNFLUSHED) ? " unflushed" : " unflushed (in DWB?)")
+		: (c < 0) ? " disk-newer!" : ((br->flags & VOLMAP_BUFREC_UNFLUSHED) ? " flushed" : "");
 	    }
-	  snprintf (t1 + tl, sizeof (t1) - tl, " buf:%s%s", (br->flags & VOLMAP_BUFREC_DIRTY) ? "DIRTY" : "clean", rel);
+	  snprintf (t1 + tl, sizeof (t1) - tl, " buf:%s%s",
+		    ((br->flags & VOLMAP_BUFREC_UNFLUSHED) == VOLMAP_BUFREC_UNFLUSHED) ? "DIRTY+FLUSHING"
+		    : (br->flags & VOLMAP_BUFREC_DIRTY) ? "DIRTY" : (br->flags & VOLMAP_BUFREC_FLUSHING) ? "FLUSHING" : "clean", rel);
 	}
     }
   /* The grid uses rows-2 (the last 2 rows are the legend).  Counting -3 loses a
@@ -8831,14 +8843,17 @@ volmap_top_bar_draw (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, int vi, int cols, in
       {
 	size_t rl = strlen (resinfo);
 
-	snprintf (resinfo + rl, sizeof (resinfo) - rl, "  buf %ld pages (dirty %ld%s%ld)", vol->buf_total,
-		  vol->buf_dirty, vol->buf_freed > 0 ? ", freed " : "", vol->buf_freed);
-	if (vol->buf_freed == 0)
+	char fl[40] = "", fr[40] = "";
+
+	if (vol->buf_flushing > 0)
 	  {
-	    rl = strlen (resinfo);
-	    resinfo[rl - 2] = ')';	/* drop the trailing "0" of an empty freed field */
-	    resinfo[rl - 1] = '\0';
+	    snprintf (fl, sizeof (fl), ", flushing %ld", vol->buf_flushing);
 	  }
+	if (vol->buf_freed > 0)
+	  {
+	    snprintf (fr, sizeof (fr), ", freed %ld", vol->buf_freed);
+	  }
+	snprintf (resinfo + rl, sizeof (resinfo) - rl, "  buf %ld pages (unflushed %ld%s%s)", vol->buf_total, vol->buf_dirty, fl, fr);
       }
     {
       INT64 idlep = res * (INT64) VOLMAP_SECT_NPAGES - alloc;
@@ -11305,14 +11320,17 @@ volmap_render (VOLMAP_CTX * ctx)
 	    {
 	      size_t rl = strlen (resinfo);
 
-	      snprintf (resinfo + rl, sizeof (resinfo) - rl, "  buf %ld pages (dirty %ld%s%ld)", vol->buf_total, vol->buf_dirty,
-			vol->buf_freed > 0 ? ", freed " : "", vol->buf_freed);
-	      if (vol->buf_freed == 0)
+	      char fl[40] = "", fr[40] = "";
+
+	      if (vol->buf_flushing > 0)
 		{
-		  rl = strlen (resinfo);
-		  resinfo[rl - 2] = ')';
-		  resinfo[rl - 1] = '\0';
+		  snprintf (fl, sizeof (fl), ", flushing %ld", vol->buf_flushing);
 		}
+	      if (vol->buf_freed > 0)
+		{
+		  snprintf (fr, sizeof (fr), ", freed %ld", vol->buf_freed);
+		}
+	      snprintf (resinfo + rl, sizeof (resinfo) - rl, "  buf %ld pages (unflushed %ld%s%s)", vol->buf_total, vol->buf_dirty, fl, fr);
 	    }
 	  fprintf (fp, "%s[%3d] %s  sectors %ld/%d reserved (x64 = %lld pages)  (cell = %ld pages = %s)%s%s\n",
 		   ctx->plain ? "" : VM_BOLD, vol->volid, h1, res, vol->nsect_total,
@@ -12140,7 +12158,7 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	       " \"unknown_sectors\": %ld, \"tde_pages_probed\": %ld,"
 	       " \"idle_pages\": %lld, \"idle_pct\": %.3f, \"fragmentation_pct\": %.3f,"
 	       " \"media_rotational\": %d,"
-	       " \"buffered_pages\": %ld, \"dirty_pages\": %ld, \"buffered_freed_pages\": %ld}%s\n",
+	       " \"buffered_pages\": %ld, \"unflushed_pages\": %ld, \"flushing_pages\": %ld, \"buffered_freed_pages\": %ld}%s\n",
 	       vol->volid, volmap_json_escape (vol->path, epath, (int) sizeof (epath)),
 	       (vol->purpose == DB_TEMPORARY_DATA_PURPOSE) ? "temporary" : "permanent", vol->iopagesize,
 	       vol->nsect_total, res, (long long) alloc, switches,
@@ -12156,7 +12174,8 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	       (res > 0) ? 100.0 * (double) switches / (double) res : 0.0,
 	       volmap_media_rotational (vol->path),
 	       ctx->bufmap_loaded ? vol->buf_total : -1L,
-	       ctx->bufmap_loaded ? vol->buf_dirty : -1L, ctx->bufmap_loaded ? vol->buf_freed : -1L,
+	       ctx->bufmap_loaded ? vol->buf_dirty : -1L, ctx->bufmap_loaded ? vol->buf_flushing : -1L,
+	       ctx->bufmap_loaded ? vol->buf_freed : -1L,
 	       (nvol_printed < nvol_selected - 1) ? "," : "");
       nvol_printed++;
     }
