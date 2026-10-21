@@ -2250,6 +2250,7 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
   VPID cur = *first;
   int guard, registered = 0, pages = 0;
   bool trk_ok = true;
+  VPID seen[4096];		/* the pages of this walk, for the cycle check (independent of trk_ok) */
 
   if (page == NULL || hpage == NULL)
     {
@@ -2319,18 +2320,19 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
       {
 	int k;
 
-	for (k = 0; k < ctx->trk_npages; k++)
+	for (k = 0; k < pages; k++)
 	  {
-	    if (VPID_EQ (&ctx->trk_pages[k], &cur))
+	    if (VPID_EQ (&seen[k], &cur))
 	      {
 		break;
 	      }
 	  }
-	if (k < ctx->trk_npages)
+	if (k < pages)
 	  {
 	    break;
 	  }
       }
+      seen[pages] = cur;
       pages++;
       /* remember this page and its LSA for the next walk's check; one failed realloc
          gives up the check for this walk (every refresh then walks) */
@@ -4177,7 +4179,7 @@ volmap_refresh (VOLMAP_CTX * ctx)
 	{
 	  /* the same VFID holds another file now: the entry is re-made in place (the hash
 	     maps the VFID here, so a new entry could never be found) */
-	  if (fhead->type < FILE_TRACKER || fhead->type >= FILE_LAST || fhead->n_sector_total <= 0)
+	  if (fhead->type < FILE_TRACKER || fhead->type >= FILE_LAST || fhead->n_sector_total <= 0 || fhead->n_page_total < 0)
 	    {
 	      f->sectors_seen = 0;
 	      f->nsects = 0;
