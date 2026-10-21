@@ -25,7 +25,8 @@
 # temporary directory - a read of the database), and a database with no server STOPDB
 # (a name or a vinf path; default: none, that check is skipped).
 #
-#   RUNDB=demodb STOPDB=/path/to/x_vinf sh tools/check-procstate.sh
+#   RUNDB=demodb STOPDB=/path/to/x_vinf OLDDB=/path/to/old_vinf sh tools/check-procstate.sh
+#   (OLDDB: a running server of a release before 11.1, optional)
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 BIN=${VOLMAP:-$ROOT/cub_volmap}
 RUNDB=${RUNDB:-demodb}
@@ -45,6 +46,40 @@ if [ -n "$STOPDB" ]; then
   st=$("$BIN" --format=json "$STOPDB" 2>/dev/null | j "d['server']['state'], d['maintenance']")
   if [ "$st" = "not_running None" ]; then echo "  ok     $STOPDB: no server, no utility"
   else echo "  FAIL   $STOPDB: '$st' (want not_running None)"; rc=1; fi
+fi
+# 2b. a running server of a release before 11.1 (OLDDB: name or vinf path): its registration
+#     socket has no pid in its name, so it must be "running_unverified", hold the active log
+#     lock, and not hold the interactive scan
+if [ -n "$OLDDB" ]; then
+  st=$("$BIN" --format=json "$OLDDB" 2>/dev/null | j "d['server']['state'], d['server']['registered'], d['server']['log_lock_pid']==d['server']['pid'], d['release']")
+  case "$st" in
+    "running_unverified None True "*) echo "  ok     $OLDDB: release ${st##* } server running_unverified, registration null, holds the log lock" ;;
+    *) echo "  FAIL   $OLDDB: '$st' (want running_unverified None True <release>)"; rc=1 ;;
+  esac
+  cat > "$TMP/old.py" <<'PY'
+import os, sys, pty, time, select, fcntl, termios, struct, signal, re
+binp, db = sys.argv[1], sys.argv[2]
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["TERM"] = "xterm"; os.execv(binp, [binp, "-i", db])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 50, 200, 0, 0))
+buf = b""; t0 = time.time()
+while time.time() - t0 < 3:
+    r, _, _ = select.select([fd], [], [], 0.2)
+    if r:
+        try: buf += os.read(fd, 65536)
+        except OSError: break
+txt = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", buf).decode("utf-8", "replace")
+print("held" if "paused" in txt else "not-held")
+os.write(fd, b"q"); time.sleep(0.5)
+try: os.waitpid(pid, 0)
+except ChildProcessError: pass
+try: os.kill(pid, signal.SIGKILL)
+except OSError: pass
+PY
+  held=$(timeout 20 python3 "$TMP/old.py" "$BIN" "$OLDDB" 2>/dev/null)
+  if [ "$held" = not-held ]; then echo "  ok     $OLDDB: -i starts without a hold"
+  else echo "  FAIL   $OLDDB: -i hold = $held"; rc=1; fi
 fi
 # 3. backupdb while it runs: batch head, JSON, interactive bar; and gone afterwards
 mkdir -p "$TMP/bk"

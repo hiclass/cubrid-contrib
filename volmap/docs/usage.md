@@ -71,8 +71,9 @@ JSON(`server`·`maintenance`·`disk`)에 적히고, 인터랙티브에서는 2�
 | 신호 | 어떻게 아는가 | 인터랙티브 동작 |
 |---|---|---|
 | 유틸리티 실행 중 (`backupdb`·`restoredb`·`checkdb`·`compactdb`·`vacuumdb`·`loaddb`·`unloaddb`·`addvoldb`·`optimizedb`·`copydb`·`deletedb`·`renamedb`·`diagdb`) | `cubrid`/`cub_admin <유틸> … <db>` 명령줄. 어느 계정이든 읽을 수 있다. 엔진은 "백업 중"을 메모리에만 두고 로그 헤더에 적지 않으므로 이 프로세스가 서버 밖의 유일한 표시다 | 헤더에 `⏸ backupdb running (pid, 경과) - scan/refresh paused, r = continue`. 초기 스캔과 자동 새로고침을 멈춘다. `r` 을 누르면 그 실행이 끝날 때까지 무시하고 계속한다. 끝나면 1초 안에 알아채고 스스로 재개한다 |
-| 서버 기동·복구 중 | `cub_server <db>` 프로세스는 있는데 `/proc/net/unix` 에 그 pid 의 `cubrid_tcp_setup_server<pid>` 가 없다. 서버는 `boot_restart_server`(재시작 복구 포함)를 마친 뒤에야 `css_init` 으로 마스터에 등록하고 이 소켓을 열며, 파일은 지워지지만 이름은 서버가 사는 동안 소켓 표에 남는다 | 같은 방식으로 멈추고 `⏸ cub_server starting or recovering` 을 표시 |
-| 서버 상태 | 위 둘을 로그 헤더의 `is_shutdown` 과 합치면 다섯 상태다: 정상 종료 / 기동 중 / 크래시 후 복구 전 / 복구 중 / 실행 중 | `server:` 줄 |
+| 서버 기동·복구 중 | `cub_server <db>` 프로세스는 있는데 `/proc/net/unix` 에 그 pid 의 `cubrid_tcp_setup_server<pid>` 가 없다. 서버는 `boot_restart_server`(재시작 복구 포함)를 마친 뒤에야 `css_init` 으로 마스터에 등록하고 이 소켓을 열며, 파일은 지워지지만 이름은 서버가 사는 동안 소켓 표에 남는다. **11.1 이상만** — 그 전 릴리스는 이 소켓 이름이 임시 난수(CBRD-23914 이전)라 등록을 볼 수 없다. 로그의 릴리스가 11.1 미만이면 이 판정을 쓰지 않고 `running, unverified` 로 적으며 멈추지 않는다 | 같은 방식으로 멈추고 `⏸ cub_server starting or recovering` 을 표시 |
+| 서버가 DB 를 열고 있는가 | 액티브 로그(`_lgat`)의 fcntl 쓰기 락을 `F_GETLK` 로 본다 — 락을 잡지 않고 보유자 pid 만 돌려준다. 모든 릴리스가 로그 초기화 때(복구보다 먼저) 락을 잡으므로 "어느 서버가 이 DB 를 열었다" 는 알지만 기동·복구·실행 중 어느 단계인지는 가리지 않는다 | `server:` 줄과 JSON `log_lock_pid` |
+| 서버 상태 | 위를 로그 헤더의 `is_shutdown` 과 합치면 정상 종료 / 기동 중 / 크래시 후 복구 전 / 복구 중 / 실행 중 / 실행 중(미확인, 11.1 미만)이다 | `server:` 줄 |
 | 디스크 혼잡 | 볼륨 0 이 놓인 블록 장치의 `/proc/diskstats`(누구나 읽음): 1초 간격 표본으로 busy%(요청이 걸려 있던 시간 비율)·처리량. 서버 자신의 I/O 는 `/proc/<cub_server pid>/io` 를 읽을 수 있는 계정(소유자·root)에서만 | busy ≥ 80% 면 헤더에 `disk sdb busy 97% - scanning slowly`. 초기 스캔은 슬라이스를 512 섹터·50ms 로 줄이고 슬라이스 사이 200ms 를 쉰다. 자동 새로고침(수백 KB)은 그대로 둔다 |
 
 멈춤은 사용자의 결정을 대신하지 않는다. 사실을 헤더에 보이고 기본값을 "기다림"으로 둘 뿐이며,
@@ -80,6 +81,7 @@ JSON(`server`·`maintenance`·`disk`)에 적히고, 인터랙티브에서는 2�
 
 **감지하지 못하는 것** — 그래서 주장하지 않는 것:
 
+- 11.1 미만 서버의 기동·복구 중과 실행 중의 구분. 등록 소켓에 pid 가 없어 볼 수 없고, 로그 락은 복구 전에 잡히므로 단계를 가리지 못한다.
 - 서버가 스스로 하는 일: vacuum, 체크포인트, 더티 페이지 플러시. 디스크 혼잡으로만 간접적으로 보인다.
 - 다른 호스트에서 도는 백업·유틸리티(공유 스토리지, HA). 이 호스트의 `/proc` 에 없다.
 - `hidepid=2` 로 마운트된 `/proc` 에서 다른 계정의 프로세스. `server:` 줄이 `no cub_server` 가 될 수 있다.

@@ -175,8 +175,12 @@ typedef struct volmap_proc
 {
   bool scanned;			/* /proc could be read at all */
   pid_t server_pid;		/* cub_server <db> on this host; 0 = none */
-  bool server_registered;	/* its registration socket is in /proc/net/unix: boot and
-				   restart recovery are over (css_init runs after boot_restart_server) */
+  int server_registered;	/* 1: its registration socket is in /proc/net/unix - boot and restart
+				   recovery are over (css_init runs after boot_restart_server);
+				   0: not there; -1: not observable - the socket got its pid-named
+				   form in 11.1 (CBRD-23914), earlier releases use a random temp name */
+  pid_t log_lock_pid;		/* who holds the fcntl write lock on the active log (every release
+				   mounts it locked, before recovery); 0 nobody, -1 not checked */
   long server_elapsed;		/* seconds since cub_server started */
   char util[24];		/* cubrid/cub_admin utility running on this database ("" = none) */
   pid_t util_pid;
@@ -7957,10 +7961,44 @@ volmap_proc_scan (VOLMAP_CTX * ctx)
 	}
     }
   closedir (d);
+  np.log_lock_pid = -1;
   if (np.server_pid > 0)
     {
-      np.server_registered = volmap_server_registered (np.server_pid);
+      int maj = 0, min = 0;
+
       np.server_elapsed = volmap_proc_elapsed (np.server_pid);
+      /* the pid-named socket exists from 11.1; before that the name is random, so the
+         registration cannot be observed and must not be read as "not registered" */
+      if (sscanf (ctx->db_release, "%d.%d", &maj, &min) == 2 && (maj > 11 || (maj == 11 && min >= 1)))
+	{
+	  np.server_registered = volmap_server_registered (np.server_pid) ? 1 : 0;
+	}
+      else
+	{
+	  np.server_registered = -1;
+	}
+      /* every release mounts the active log with an fcntl write lock (fileio_mount,
+         lock = true) at log initialization, before recovery: F_GETLK takes no lock and
+         names the holder.  It says a server has the database open, not which phase. */
+      {
+	char lg[PATH_MAX];
+
+	if (volmap_path_from_vinf (ctx->vinf_path, VOLMAP_LGAT_VOLID, lg, sizeof (lg)))
+	  {
+	    int fd = open (lg, O_RDONLY);
+
+	    if (fd >= 0)
+	      {
+		struct flock fl;
+
+		memset (&fl, 0, sizeof (fl));
+		fl.l_type = F_WRLCK;
+		fl.l_whence = SEEK_SET;
+		np.log_lock_pid = (fcntl (fd, F_GETLK, &fl) == 0) ? ((fl.l_type == F_UNLCK) ? 0 : fl.l_pid) : -1;
+		close (fd);
+	      }
+	  }
+      }
     }
   ctx->proc = np;
 }
@@ -7975,9 +8013,17 @@ volmap_server_state_str (const VOLMAP_CTX * ctx, char *out, size_t n)
     {
       snprintf (out, n, "unknown (/proc not readable)");
     }
-  else if (p->server_pid > 0 && p->server_registered)
+  else if (p->server_pid > 0 && p->server_registered == 1)
     {
       snprintf (out, n, "running (cub_server pid %ld, up %lds)", (long) p->server_pid, p->server_elapsed);
+    }
+  else if (p->server_pid > 0 && p->server_registered == -1)
+    {
+      snprintf (out, n, "running, unverified (cub_server pid %ld, up %lds; %s; before 11.1 the registration with"
+		" cub_master is not observable, so booting/recovering and running are not told apart)",
+		(long) p->server_pid, p->server_elapsed,
+		p->log_lock_pid == p->server_pid ? "it holds the active log lock"
+		: p->log_lock_pid > 0 ? "the active log is locked by another pid" : "the active log is not locked");
     }
   else if (p->server_pid > 0)
     {
@@ -8000,7 +8046,8 @@ volmap_server_state_name (const VOLMAP_CTX * ctx)
 {
   const VOLMAP_PROC *p = &ctx->proc;
 
-  return !p->scanned ? "unknown" : (p->server_pid > 0 && p->server_registered) ? "running"
+  return !p->scanned ? "unknown" : (p->server_pid > 0 && p->server_registered == 1) ? "running"
+    : (p->server_pid > 0 && p->server_registered == -1) ? "running_unverified"
     : (p->server_pid > 0) ? "starting_or_recovering" : "not_running";
 }
 
@@ -8298,8 +8345,9 @@ volmap_hold_reason (const VOLMAP_CTX * ctx, char *out, size_t n)
 	}
       return true;
     }
-  if (p->server_pid > 0 && !p->server_registered)
+  if (p->server_pid > 0 && p->server_registered == 0)
     {
+      /* only when the absence is meaningful (11.1+); an older server is never held for this */
       snprintf (out, n, "cub_server starting or recovering (pid %ld, %lds)", (long) p->server_pid, p->server_elapsed);
       return true;
     }
@@ -11764,9 +11812,11 @@ volmap_output_json (VOLMAP_CTX * ctx, const char *db_name)
 	     volmap_json_escape (ctx->tracker_why, ewhy, (int) sizeof (ewhy)));
     /* beside the database: the server, a utility on it, the disk (volmap_proc_scan) */
     volmap_io_window (ctx);
-    fprintf (fp, "  \"server\": {\"state\": \"%s\", \"pid\": %ld, \"registered\": %s, \"up_sec\": %ld},\n",
-	     volmap_server_state_name (ctx), (long) ctx->proc.server_pid, ctx->proc.server_registered ? "true" : "false",
-	     ctx->proc.server_pid > 0 ? ctx->proc.server_elapsed : -1L);
+    fprintf (fp, "  \"server\": {\"state\": \"%s\", \"pid\": %ld, \"registered\": %s, \"up_sec\": %ld, \"log_lock_pid\": %ld},\n",
+	     volmap_server_state_name (ctx), (long) ctx->proc.server_pid,
+	     ctx->proc.server_pid <= 0 || ctx->proc.server_registered == -1 ? "null"
+	     : ctx->proc.server_registered == 1 ? "true" : "false",
+	     ctx->proc.server_pid > 0 ? ctx->proc.server_elapsed : -1L, (long) ctx->proc.log_lock_pid);
     if (ctx->proc.util[0] != '\0')
       {
 	fprintf (fp, "  \"maintenance\": {\"utility\": \"%s\", \"pid\": %ld, \"elapsed_sec\": %ld},\n", ctx->proc.util,
