@@ -19,7 +19,7 @@
 # (names or vinf paths; default: every database in $CUBRID_DATABASES/databases.txt)
 # the JSON of a default run and of --no-tracker are compared: the set of files
 # (vfid, type), each volume's reserved/unknown sector counts and the findings must be
-# identical; the tracker run must have read the tracker and probed fewer sectors.
+# identical; the tracker run must have read the tracker and probed no more sectors.
 #
 #   sh tools/check-tracker.sh [db-or-vinf ...]
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
@@ -35,6 +35,7 @@ for db in $DBS; do
   "$BIN" --format=json "$db" > "$TMP/t.json" 2>"$TMP/t.err"; r1=$?
   "$BIN" --format=json --no-tracker "$db" > "$TMP/p.json" 2>"$TMP/p.err"; r2=$?
   if [ $r1 -ne 0 ] && [ $r1 -ne 2 ] && [ $r1 -ne 3 ]; then echo "  SKIP   $db: exit $r1 ($(head -1 "$TMP/t.err"))"; continue; fi
+  if [ $r2 -ne 0 ] && [ $r2 -ne 2 ] && [ $r2 -ne 3 ]; then echo "  FAIL   $db: --no-tracker exit $r2 ($(head -1 "$TMP/p.err"))"; rc=1; continue; fi
   python3 - "$TMP/t.json" "$TMP/p.json" "$db" <<'PY' || rc=1
 import json, sys
 t = json.load(open(sys.argv[1])); p = json.load(open(sys.argv[2])); db = sys.argv[3]

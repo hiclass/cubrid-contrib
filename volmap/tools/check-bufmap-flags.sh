@@ -31,7 +31,10 @@ python3 - "$BIN" "$DB" "$TMP" <<'PY' || exit 1
 import json, struct, subprocess, sys
 binp, db, tmp = sys.argv[1:4]
 base = json.load(open(tmp + "/base.json"))
-label = base["db"]
+# the snapshot names the database; volmap compares that to the name it derives from its
+# argument (a vinf path loses its directory and the _vinf suffix)
+label = db.rsplit("/", 1)[-1]
+if label.endswith("_vinf"): label = label[:-5]
 # pick 4 page ids that exist: the file headers of 4 files on volume 0
 pages = [int(f["vfid"].split("|")[1]) for f in base["files"] if f["vfid"].startswith("0|")][:4]
 if len(pages) < 4:
@@ -42,9 +45,10 @@ recs = b"".join(struct.pack("<hhiIiQQ", 0, 1, p, fl, 1, 0, 0) for p, fl in zip(p
 hdr = struct.pack("<8sIIqqiiiiQQQQ32s", b"CBCBMAP1", 1, 32, 0, 0, 100, 4, 3, 16384,
                   0, 0, 0, (1 << 64) - 1, label.encode())
 open(tmp + "/snap.bcb", "wb").write(hdr + recs)
-out = subprocess.run([binp, "--format=json", "-B", tmp + "/snap.bcb", db], capture_output=True, text=True).stdout
-d = json.load(open(tmp + "/base.json"))  # placeholder to keep the parser happy if out is empty
-d = json.loads(out)
+r = subprocess.run([binp, "--format=json", "-B", tmp + "/snap.bcb", db], capture_output=True, text=True)
+if not r.stdout.strip():
+    print("  FAIL   volmap gave no JSON with the snapshot: %s" % r.stderr.strip()[:200]); sys.exit(1)
+d = json.loads(r.stdout)
 v0 = [v for v in d["volumes"] if v["volid"] == 0][0]
 ok = v0["buffered_pages"] == 4 and v0["unflushed_pages"] == 3 and v0["flushing_pages"] == 2
 print("  %s   snapshot with dirty / flushing / both / clean: buffered %d, unflushed %d (want 3), flushing %d (want 2)"

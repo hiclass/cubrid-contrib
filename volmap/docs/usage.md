@@ -40,6 +40,9 @@ cub_volmap [옵션] <database-name | vinf-경로>
       --plain          ANSI 없이 ASCII
       --tick=SEC       인터랙티브 자동 새로고침 주기 (기본 2초)
       --warn-idle=PCT  볼륨 idle 공간이 PCT% 이상이면 소견(finding)으로 보고 — 종료코드 2 (용량 경보)
+      --temp-path=DIR  temp 볼륨을 이 디렉터리에서도 찾는다 (기본: cubrid.conf 의 temp_volume_path, 없으면 DB 디렉터리)
+      --no-overlay     받기만 하고 아무것도 하지 않는다 (이전 버전 호환)
+  -h, --help           도움말
   -o, --output-file=F  파일 저장 (자동 plain)
   -i, --interactive    전체화면 브라우저
 ```
@@ -74,8 +77,10 @@ JSON(`server`·`maintenance`·`disk`)에 적히고, 인터랙티브에서는 2�
 | 유틸리티 실행 중 (`backupdb`·`restoredb`·`checkdb`·`compactdb`·`vacuumdb`·`loaddb`·`unloaddb`·`addvoldb`·`optimizedb`·`copydb`·`deletedb`·`renamedb`·`diagdb`) | `cubrid`/`cub_admin <유틸> … <db>` 명령줄. 어느 계정이든 읽을 수 있다. 엔진은 "백업 중"을 메모리에만 두고 로그 헤더에 적지 않으므로 이 프로세스가 서버 밖의 유일한 표시다 | 헤더에 `⏸ backupdb running (pid, 경과) - scan/refresh paused, r = continue`. 초기 스캔과 자동 새로고침을 멈춘다. `r` 을 누르면 그 실행이 끝날 때까지 무시하고 계속한다. 끝나면 1초 안에 알아채고 스스로 재개한다 |
 | 서버 기동·복구 중 | `cub_server <db>` 프로세스는 있는데 `/proc/net/unix` 에 그 pid 의 `cubrid_tcp_setup_server<pid>` 가 없다. 서버는 `boot_restart_server`(재시작 복구 포함)를 마친 뒤에야 `css_init` 으로 마스터에 등록하고 이 소켓을 열며, 파일은 지워지지만 이름은 서버가 사는 동안 소켓 표에 남는다. **11.1 이상만** — 그 전 릴리스는 이 소켓 이름이 임시 난수(CBRD-23914 이전)라 등록을 볼 수 없다. 로그의 릴리스가 11.1 미만이면 이 판정을 쓰지 않고 `running, unverified` 로 적으며 멈추지 않는다 | 같은 방식으로 멈추고 `⏸ cub_server starting or recovering` 을 표시 |
 | 서버가 DB 를 열고 있는가 | 액티브 로그(`_lgat`)의 fcntl 쓰기 락을 `F_GETLK` 로 본다 — 락을 잡지 않고 보유자 pid 만 돌려준다. 모든 릴리스가 로그 초기화 때(복구보다 먼저) 락을 잡으므로 "어느 서버가 이 DB 를 열었다" 는 알지만 기동·복구·실행 중 어느 단계인지는 가리지 않는다 | `server:` 줄과 JSON `log_lock_pid` |
-| 서버 상태 | 위를 로그 헤더의 `is_shutdown` 과 합치면 정상 종료 / 기동 중 / 크래시 후 복구 전 / 복구 중 / 실행 중 / 실행 중(미확인, 11.1 미만)이다 | `server:` 줄 |
+| 서버 상태 | `server:` 줄의 상태는 `running`(등록 확인) / `starting_or_recovering`(프로세스는 있는데 미등록 — 기동 중과 복구 중은 가리지 않는다) / `running_unverified`(11.1 미만) / `not_running` / `unknown`(/proc 못 읽음). 프로세스가 없을 때는 로그 헤더의 `is_shutdown` 으로 정상 종료와 복구 전을 덧붙인다 | `server:` 줄, JSON `server.state` |
 | 디스크 혼잡 | 볼륨 0 이 놓인 블록 장치의 `/proc/diskstats`(누구나 읽음): 1초 간격 표본으로 busy%(요청이 걸려 있던 시간 비율)·처리량. 서버 자신의 I/O 는 `/proc/<cub_server pid>/io` 를 읽을 수 있는 계정(소유자·root)에서만 | busy ≥ 80% 면 헤더에 `disk sdb busy 97% - scanning slowly`. 초기 스캔은 슬라이스를 512 섹터·50ms 로 줄이고 슬라이스 사이 200ms 를 쉰다. 자동 새로고침(수백 KB)은 그대로 둔다 |
+
+이 신호들은 정보일 뿐 인증된 것이 아니다. 같은 호스트의 어느 계정이든 `cub_server <db>` 같은 명령줄이나 그 소켓 이름을 흉내 낼 수 있고, 그러면 표시와 멈춤이 따라간다(`r` 로 넘어가면 된다). 메모리나 파일에는 영향이 없다.
 
 멈춤은 사용자의 결정을 대신하지 않는다. 사실을 헤더에 보이고 기본값을 "기다림"으로 둘 뿐이며,
 `r` 한 번으로 계속할 수 있다. 배치 실행은 한 번 읽고 끝나므로 멈추지 않고 머리에 적기만 한다.
@@ -114,7 +119,7 @@ JSON(`server`·`maintenance`·`disk`)에 적히고, 인터랙티브에서는 2�
 | Enter / Bksp (포커스 중) | Enter = Space와 동일(전진) / Bksp = 후퇴. **슬롯(최심부)에서는 화살표=선택뿐이고 space/bksp 어느 쪽이든 지도 복귀** |
 | `[` `]` | (볼륨 맵에서) 패널 하단에 표시할 페이지를 커서 섹터의 할당 페이지 사이에서 순회 |
 | `f` | **파일 뷰** — 볼륨의 파일 목록 오버레이(이름·섹터 수). 위/아래로 고르면 **그 파일 소유 셀은 남색 배경으로 마킹, 나머지는 회색**(volume→file→sector 역방향 탐색). 열 때 선택 중인 것의 파일이 자동 선택되고(지도=커서 셀, **드릴다운 중=앵커 페이지의 파일**) 지도 커서 이동을 따라간다. 목록 행은 표준 종류 배지( H / I 색 칩)로 구분. space/enter=첫 섹터로 커서 점프, f=닫기. 하단바에 파일 상세(VFID·유형·섹터/페이지 통계) |
-| `r` | 즉시 새로고침 (증분 — 90GB DB 기준 1회 pread 128회) |
+| `r` | 즉시 새로고침 (증분 — 섹터 테이블과 파일·트래커 페이지의 32B LSA 만 보고 바뀐 것만 다시 읽는다; 틱당 수백 KB) |
 | `a` | 자동 새로고침 토글(주기 `--tick=SEC`, 기본 2초) — 라이브 모니터 |
 | `m` | 캐시 상주 배경색 토글 — **전 뎁스 적용**: 지도 + 오버레이 섹터 그리드 배경(≥80% 밝은 회색/≥30% 어두운 회색), 페이지 박스는 제목에 `res n/4` 표기. 반복 압축은 상주 음영이 다른 행을 서로 접지 않는다 |
 | `h` | 화면 해석 가이드 — 지도/패널/키 설명 + **[용어 5초 사전]**(페이지·섹터·슬롯·heap·idle·dead 등을 일상 비유로) |
@@ -152,10 +157,17 @@ FINDINGS
 | volume_header_unrecognized | magic 은 CUBRID 볼륨인데 자기검증 실패, 로그에서 릴리스를 못 읽음 — 10.1 미만 구포맷인지 손상인지 가릴 수 없다. 그 볼륨은 지도에 없다 |
 | unknown_owner_sectors | 예약·사용 중인데 소유 파일 미발견(볼륨 메타 영역 제외 — 지도·요약·JSON 모두 동일 정의) — 트래커/페이지 불일치 의심 |
 | alloc_exceeds_reserved | 라이브 볼륨 스냅샷 시차 — 재실행/새로고침 권고 |
-| tde_encrypted_pages | TDE 암호 페이지 존재 — 키 없이 내용 해석 불가 |
 | stale_file_entry | 헤더는 있으나 섹터 대응 실패 — 스캔 중 drop/재사용된 파일 |
 | idle_over_threshold | `--warn-idle=PCT` 지정 시: 볼륨 idle 공간이 임계 이상 — 회수 후보 (지정만으로 소견 리포트+종료코드 2 계약 활성) |
-| bufmap_snapshot_mismatch | `--bufmap` 스냅샷의 버퍼 페이지 중 90% 이상이 이 볼륨에 미할당 — 오래됐거나 다른 DB 의 스냅샷. 그 미만의 미할당분은 정상(해제 페이지가 BCB 에 남음)이라 볼륨 헤더 `freed N` 으로만 표기 |
+| fragmentation | 예약 섹터 1,000개 이상인 볼륨에서 소유자 교대(owner switches)가 예약 섹터의 2% 를 넘음 — 파일이 섞여 있다. 매체(회전/비회전) 병기 |
+| fragmented_object | 위 볼륨에서 가장 끼어 있는 객체 2개: 섹터 수·익스텐트 수·끼어든 상대 객체·경계 수 |
+| bufmap_snapshot_mismatch | `--bufmap` 스냅샷의 버퍼 페이지가 64장 이상이고 그중 90% 이상이 이 볼륨에 미할당 — 오래됐거나 다른 DB 의 스냅샷. 그 미만의 미할당분은 정상(해제 페이지가 BCB 에 남음)이라 볼륨 헤더 `freed N` 으로만 표기 |
+
+소견과 별도로 **note** 가 있다. DB 의 속성이라 이상 구조가 아니고 종료 코드에 들어가지 않는다(텍스트 `note:` 줄, JSON `notes[]`).
+
+| note | 뜻 |
+|---|---|
+| tde_encrypted_pages | TDE 암호 페이지 존재(표본 수) — 키 없이 내용 해석 불가 |
 
 열지 못한 볼륨은 소견과 별도로 지도 아래 `SKIPPED VOLUMES` 에 이유와 함께 나열한다(`--check` 와 무관).
 헤더 손상은 소견(`volume_header_damaged`, 종료코드 2)이고, 파일을 열 수 없는 경우(권한, 파일 없음)는 보고가
@@ -180,7 +192,7 @@ volmap --format json cbench | python3 -m json.tool
 최상위에 `db`(이름)·`timestamp`(생성 시각)·`release`(로그의 릴리스)·`shutdown_state`(로그 헤더의 마지막 종료 상태:
 `clean`/`not_clean`/`unknown` — `not_clean` 은 실행 중이거나 비정상 종료 후 복구 전) 메타, `volumes[]`(볼륨별 예약/할당, `purpose`=permanent/temporary, `tde_pages_probed`=프로브된 페이지 중 TDE 암호 페이지 수,
 `--bufmap` 시 `buffered_pages`/`unflushed_pages`(dirty 또는 flushing)/`flushing_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
-`skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`cause`(`unreadable`/`damaged`/`unrecognized`/`unsupported_release`)·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 모니터링·CI 연동용.
+`skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`cause`(`unreadable`/`damaged`/`unrecognized`/`unsupported_release`)·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 그 밖에 `discovery{tracker: read/off/unreadable, tracker_files, probed_sectors, reason}`, `server{state: running/running_unverified/starting_or_recovering/not_running/unknown, pid, registered(true/false/null), up_sec, log_lock_pid}`, `maintenance{utility, pid, elapsed_sec}` 또는 null, `disk{device, busy_pct, mb_s, server_mb_s}` 또는 null, `notes[]`, `by_kind`, `compaction_priority`, 그리고 `files[]` 의 `tracked`(true / "deleted" / false / null=트래커 못 읽음)가 있다. 모니터링·자동화용.
 
 - **stdout 은 JSON 문서만 담는다.** 볼륨 열기 실패·레이아웃 판별 경고 같은 진단 메시지는 stderr 로만 나간다
   (`-o` 파일도 같다). 라이브 서버에서 spill 볼륨이 스캔 도중 사라져도 문서는 깨지지 않는다.

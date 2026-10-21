@@ -184,6 +184,7 @@ struct volmap_file
   char index_name[64];		/* lazily resolved from class properties; "" = not yet, "?" = failed */
   signed char tracked;		/* 1 listed in the file tracker, 2 listed and marked deleted (dropped,
 				   awaiting vacuum), 0 found by probing only */
+  unsigned trk_seen;		/* the tracker walk (ctx->trk_gen) that last listed this file */
 };
 
 /* What runs beside the database, read from /proc (volmap_proc_scan).  Nothing here
@@ -319,6 +320,8 @@ struct volmap_ctx
   VPID *trk_pages;
   UINT64 *trk_lsa;
   int trk_npages;
+  unsigned trk_gen;		/* bumped by every complete tracker walk: files it did not list lose 'tracked' */
+  int tracker_self;		/* files[] index of the tracker file itself (never in its own list), -1 none */
   long rf_cached;		/* last refresh: files re-applied from their sector list */
   long rf_walked;		/* ... files whose header moved and were re-walked */
   bool rf_tracker_walked;	/* ... tracker pages had moved: walked again */
@@ -1804,6 +1807,44 @@ volmap_walk_extdata (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const char *iopage, 
   free (cur);
 }
 
+/* What a file entry takes from its header: identity, counts, the owning class.  Used
+   when a file is first seen and when a header page turns out to hold another file of
+   the same VFID (the entry is then re-made in place, the hash still finds it). */
+static void
+volmap_file_fill (VOLMAP_FILE * f, const FILE_HEADER * fhead)
+{
+  f->vfid = fhead->self;
+  f->ftype = fhead->type;
+  f->time_creation = fhead->time_creation;
+  f->root_page = fhead->vpid_sticky_first.pageid;
+  f->n_page_total = fhead->n_page_total;
+  f->n_page_user = fhead->n_page_user;
+  f->n_page_ftab = fhead->n_page_ftab;
+  f->n_page_free = fhead->n_page_free;
+  f->n_sector_total = fhead->n_sector_total;
+  f->class_name[0] = '\0';
+  f->index_name[0] = '\0';
+  switch (fhead->type)
+    {
+    case FILE_HEAP:
+    case FILE_HEAP_REUSE_SLOTS:
+      f->class_oid = fhead->descriptor.heap.class_oid;
+      break;
+    case FILE_MULTIPAGE_OBJECT_HEAP:
+      f->class_oid = fhead->descriptor.heap_overflow.class_oid;
+      break;
+    case FILE_BTREE:
+      f->class_oid = fhead->descriptor.btree.class_oid;
+      break;
+    case FILE_BTREE_OVERFLOW_KEY:
+      f->class_oid = fhead->descriptor.btree_key_overflow.class_oid;
+      break;
+    default:
+      OID_SET_NULL (&f->class_oid);
+      break;
+    }
+}
+
 /* The LSA a header must carry for its sector list to be trusted on a later refresh.
    Pages of temporary volumes carry the constant PGBUF_TEMP_LSA {-2, -2} (page_buffer.h:
    pgbuf_init_temp_page_lsa; pgbuf_set_lsa leaves it alone), so their LSA never moves
@@ -1858,34 +1899,7 @@ volmap_try_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, ch
 
   f = &ctx->files[ctx->nfiles];
   memset (f, 0, sizeof (*f));
-  f->vfid = fhead->self;
-  f->ftype = fhead->type;
-  f->time_creation = fhead->time_creation;
-  f->root_page = fhead->vpid_sticky_first.pageid;
-  f->n_page_total = fhead->n_page_total;
-  f->n_page_user = fhead->n_page_user;
-  f->n_page_ftab = fhead->n_page_ftab;
-  f->n_page_free = fhead->n_page_free;
-  f->n_sector_total = fhead->n_sector_total;
-  switch (fhead->type)
-    {
-    case FILE_HEAP:
-    case FILE_HEAP_REUSE_SLOTS:
-      f->class_oid = fhead->descriptor.heap.class_oid;
-      break;
-    case FILE_MULTIPAGE_OBJECT_HEAP:
-      f->class_oid = fhead->descriptor.heap_overflow.class_oid;
-      break;
-    case FILE_BTREE:
-      f->class_oid = fhead->descriptor.btree.class_oid;
-      break;
-    case FILE_BTREE_OVERFLOW_KEY:
-      f->class_oid = fhead->descriptor.btree_key_overflow.class_oid;
-      break;
-    default:
-      OID_SET_NULL (&f->class_oid);
-      break;
-    }
+  volmap_file_fill (f, fhead);
 
   ctx->nfiles++;
   volmap_fidx_put (ctx, ctx->nfiles - 1);
@@ -2052,7 +2066,7 @@ volmap_read_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, i
 {
   const FILE_HEADER *fhead;
 
-  if (vol == NULL || pageid <= vol->sys_lastpage || pageid >= (PAGEID) vol->nsect_total * VOLMAP_SECT_NPAGES
+  if (vol == NULL || pageid <= vol->sys_lastpage || (long) pageid >= (long) vol->nsect_total * VOLMAP_SECT_NPAGES
       || !volmap_read_iopage (vol, pageid, iopage))
     {
       return false;
@@ -2156,7 +2170,13 @@ volmap_tracker_locate (VOLMAP_CTX * ctx, VPID * first, char *why, size_t wn)
 	    }
 	  for (pg = 0; pg < VOLMAP_SECT_NPAGES && !found; pg++)
 	    {
-	      PAGEID pageid = s * VOLMAP_SECT_NPAGES + pg;
+	      long lp = (long) s * VOLMAP_SECT_NPAGES + pg;
+	      PAGEID pageid = (PAGEID) lp;
+
+	      if (lp > INT32_MAX)
+		{
+		  break;
+		}
 	      const FILEIO_PAGE_RESERVED *pr;
 	      const SPAGE_HEADER *sph;
 	      int slotid;
@@ -2202,6 +2222,7 @@ volmap_tracker_locate (VOLMAP_CTX * ctx, VPID * first, char *why, size_t wn)
 		      if (ti >= 0)
 			{
 			  ctx->files[ti].tracked = 1;
+			  ctx->tracker_self = ti;
 			}
 		    }
 		}
@@ -2228,6 +2249,7 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
   char *hpage = (char *) malloc (volmap_max_iopagesize (ctx));
   VPID cur = *first;
   int guard, registered = 0, pages = 0;
+  bool trk_ok = true;
 
   if (page == NULL || hpage == NULL)
     {
@@ -2269,7 +2291,8 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
     }
   ctx->rf_tracker_walked = true;
   ctx->trk_npages = 0;
-  for (guard = 0; guard < 100000 && !VPID_ISNULL (&cur); guard++)
+  ctx->trk_gen++;
+  for (guard = 0; guard < 4096 && !VPID_ISNULL (&cur); guard++)
     {
       VOLMAP_VOLUME *vol = volmap_find_vol (ctx, cur.volid);
       const FILEIO_PAGE_RESERVED *pr;
@@ -2291,9 +2314,27 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
 	{
 	  break;		/* not a tracker page: stop rather than guess */
 	}
+      /* a chain that comes back to a page already walked is damaged: stop here, as an
+         incomplete walk (nothing is unlisted on its account) */
+      {
+	int k;
+
+	for (k = 0; k < ctx->trk_npages; k++)
+	  {
+	    if (VPID_EQ (&ctx->trk_pages[k], &cur))
+	      {
+		break;
+	      }
+	  }
+	if (k < ctx->trk_npages)
+	  {
+	    break;
+	  }
+      }
       pages++;
-      /* remember this page and its LSA for the next walk's check */
-      if (pages > 0)
+      /* remember this page and its LSA for the next walk's check; one failed realloc
+         gives up the check for this walk (every refresh then walks) */
+      if (trk_ok)
 	{
 	  VPID *gp = (VPID *) realloc (ctx->trk_pages, (size_t) pages * sizeof (VPID));
 	  UINT64 *gl = (UINT64 *) realloc (ctx->trk_lsa, (size_t) pages * sizeof (UINT64));
@@ -2314,7 +2355,8 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
 	    }
 	  else
 	    {
-	      ctx->trk_npages = 0;	/* no memory for the check: every refresh walks */
+	      trk_ok = false;
+	      ctx->trk_npages = 0;
 	    }
 	}
       for (i = 0; i < extdata->n_items; i++)
@@ -2343,8 +2385,23 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
 	      registered++;
 	    }
 	  ctx->files[idx].tracked = (it.is_marked_deleted && (it.type == FILE_HEAP || it.type == FILE_HEAP_REUSE_SLOTS)) ? 2 : 1;
+	  ctx->files[idx].trk_seen = ctx->trk_gen;
 	}
       cur = extdata->vpid_next;
+    }
+  /* a walk that reached the end of the chain is the whole list: a file it did not
+     name is no longer tracked (dropped and unregistered, its header still on disk) */
+  if (pages > 0 && VPID_ISNULL (&cur))
+    {
+      int k;
+
+      for (k = 0; k < ctx->nfiles; k++)
+	{
+	  if (ctx->files[k].trk_seen != ctx->trk_gen && k != ctx->tracker_self)
+	    {
+	      ctx->files[k].tracked = 0;
+	    }
+	}
     }
   free (page);
   free (hpage);
@@ -2408,9 +2465,10 @@ volmap_tde_sample (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol)
   for (s = 0; s < vol->nsect_total; s += step)
     {
       FILEIO_PAGE_RESERVED prv_area;
-      PAGEID pageid = s * VOLMAP_SECT_NPAGES;
+      long lp = (long) s * VOLMAP_SECT_NPAGES;
+      PAGEID pageid = (PAGEID) lp;
 
-      if (!vol->w_stab[s] || vol->w_owner[s] < 0 || pageid <= vol->sys_lastpage || ((vol->tde_bm[s] >> 0) & 1))
+      if (lp > INT32_MAX || !vol->w_stab[s] || vol->w_owner[s] < 0 || pageid <= vol->sys_lastpage || ((vol->tde_bm[s] >> 0) & 1))
 	{
 	  continue;
 	}
@@ -4108,12 +4166,27 @@ volmap_refresh (VOLMAP_CTX * ctx)
 	  continue;
 	}
       fhead = (const FILE_HEADER *) (iopage + prv);
-      if (fhead->self.fileid != f->vfid.fileid || fhead->self.volid != f->vfid.volid || fhead->type != f->ftype)
+      if (fhead->self.fileid != f->vfid.fileid || fhead->self.volid != f->vfid.volid)
 	{
-	  f->sectors_seen = 0;	/* file was destroyed/reused; its sectors go unowned */
+	  f->sectors_seen = 0;	/* file was destroyed; its sectors go unowned */
 	  f->nsects = 0;
 	  f->hdr_lsa = 0;
 	  continue;
+	}
+      if (fhead->type != f->ftype)
+	{
+	  /* the same VFID holds another file now: the entry is re-made in place (the hash
+	     maps the VFID here, so a new entry could never be found) */
+	  if (fhead->type < FILE_TRACKER || fhead->type >= FILE_LAST || fhead->n_sector_total <= 0)
+	    {
+	      f->sectors_seen = 0;
+	      f->nsects = 0;
+	      f->hdr_lsa = 0;
+	      continue;
+	    }
+	  volmap_file_fill (f, fhead);
+	  f->tracked = 0;
+	  f->trk_seen = 0;
 	}
       f->n_page_total = fhead->n_page_total;
       f->n_page_user = fhead->n_page_user;
@@ -6795,7 +6868,7 @@ static const char *volmap_help_lines[] = {
   "   \xed\x86\xa4   \xea\xb0\x99\xec\x9d\x80 \xec\x83\x89 \xeb\x91\x90 \xed\x86\xa4 \xea\xb5\x90\xeb\x8c\x80 = \xed\x8c\x8c\xec\x9d\xbc \xea\xb2\xbd\xea\xb3\x84 \xe2\x80\x94 \x1b[1m\xec\x9e\xa6\xec\x9d\x80 \xeb\xb0\x98\xec\xa0\x84 = \xec\xa1\xb0\xea\xb0\x81\xed\x99\x94\x1b[0m",
   "   \xec\x83\x81\xed\x83\x9c \x1b[38;5;208m\xe2\xa0\x82\x1b[0m \xec\x98\x88\xec\x95\xbd-\xeb\xb9\x88  \x1b[38;5;242m\xe2\xa0\x82\x1b[0m \xeb\xaf\xb8\xec\x98\x88\xec\x95\xbd  \x1b[38;5;238m#\x1b[0m \xeb\xa9\x94\xed\x83\x80  \x1b[38;5;243m?\x1b[0m \xec\x86\x8c\xec\x9c\xa0\xec\x9e\x90 \xeb\xaf\xb8\xec\x83\x81  \x1b[31mE\x1b[0m TDE",
   "   \xeb\xb0\xb0\xea\xb2\xbd \xed\x9a\x8c\xec\x83\x89(-m)=OS \xec\xba\x90\xec\x8b\x9c \xec\x83\x81\xec\xa3\xbc   \x1b[48;5;24m \xed\x95\x98\xeb\x8a\x98 \x1b[49m=\xed\x95\x98\xec\x9d\xb4\xec\x9b\x8c\xed\x84\xb0\xeb\xa7\x88\xed\x81\xac",
-  "        \x1b[48;5;23m \xec\xb2\xad\xeb\xa1\x9d \x1b[49m/\x1b[48;5;53m \xec\x9e\x90\xec\xa3\xbc \x1b[49m=(b) \xeb\xb2\x84\xed\x8d\xbc\xed\x92\x80 \xec\xa0\x81\xec\x9e\xac / \xea\xb7\xb8 \xec\xa4\x91 dirty",
+  "        \x1b[48;5;23m \xec\xb2\xad\xeb\xa1\x9d \x1b[49m/\x1b[48;5;53m \xec\x9e\x90\xec\xa3\xbc \x1b[49m=(b) \xeb\xb2\x84\xed\x8d\xbc\xed\x92\x80 \xec\xa0\x81\xec\x9e\xac / \xea\xb7\xb8 \xec\xa4\x91 \xeb\xaf\xb8\xeb\xb0\x98\xec\x98\x81(dirty\xc2\xb7flushing)",
   "",
   "\x1b[1m [\xed\x82\xa4]\x1b[0m  space\xc2\xb7" "enter \xeb\x93\x9c\xeb\xa6\xb4\xeb\x8b\xa4\xec\x9a\xb4   bksp \xec\x9c\x84   tab \xec\x97\xb4\xea\xb8\xb0/\xeb\x8b\xab\xea\xb8\xb0   1/2/3 \xeb\xb0\x95\xec\x8a\xa4 \xec\xa7\x81\xed\x96\x89",
   "   < > \xeb\xb3\xbc\xeb\xa5\xa8   [ ] \xed\x8e\x98\xec\x9d\xb4\xec\xa7\x80   r \xec\x83\x88\xeb\xa1\x9c\xea\xb3\xa0\xec\xb9\xa8   a \xec\x9e\x90\xeb\x8f\x99   m \xec\xba\x90\xec\x8b\x9c   l \xed\x95\x9c/\xec\x98\x81   q \xec\xa2\x85\xeb\xa3\x8c",
@@ -8472,21 +8545,8 @@ volmap_io_sample (VOLMAP_CTX * ctx)
     }
   if (!volmap_diskstats_row (io->major_n, io->minor_n, io->dev, sizeof (io->dev), &rd, &wr, &ticks, &q))
     {
-      /* a partition without its own row: try the parent disk once */
-      if (io->minor_n != 0)
-	{
-	  io->minor_n = 0;
-	  if (!volmap_diskstats_row (io->major_n, io->minor_n, io->dev, sizeof (io->dev), &rd, &wr, &ticks, &q))
-	    {
-	      io->state = -1;
-	      return;
-	    }
-	}
-      else
-	{
-	  io->state = -1;
-	  return;
-	}
+      io->state = -1;		/* no row for this device: unknown rather than another disk's figures */
+      return;
     }
   clock_gettime (CLOCK_MONOTONIC, &now);
   if (io->t.tv_sec != 0)
@@ -8494,12 +8554,12 @@ volmap_io_sample (VOLMAP_CTX * ctx)
       ms = (now.tv_sec - io->t.tv_sec) * 1000.0 + (now.tv_nsec - io->t.tv_nsec) / 1e6;
       if (ms >= 50)
 	{
-	  io->util_pct = 100.0 * (double) (ticks - io->io_ticks) / ms;
+	  io->util_pct = 100.0 * (double) (UINT32) (ticks - io->io_ticks) / ms;	/* 32-bit in the kernel */
 	  if (io->util_pct > 100.0)
 	    {
 	      io->util_pct = 100.0;
 	    }
-	  io->queue = (double) (q - io->in_queue) / ms;
+	  io->queue = (double) (UINT32) (q - io->in_queue) / ms;
 	  io->mb_s = ((double) (rd - io->rd_sect) + (double) (wr - io->wr_sect)) * 512.0 / (ms / 1000.0) / 1e6;
 	  io->busy = io->util_pct >= VOLMAP_IO_BUSY_PCT;
 	}
@@ -11240,12 +11300,12 @@ volmap_render (VOLMAP_CTX * ctx)
       volmap_bufmap_summary (ctx, bsum, sizeof (bsum));
       if (ctx->plain)
 	{
-	  fprintf (fp, "BUFMAP  %s\n        (per-volume 'buf N pages (dirty M)' = pages of that volume in cub_server's buffer pool)\n\n", bsum);
+	  fprintf (fp, "BUFMAP  %s\n        (per-volume 'buf N pages (unflushed M)' = pages of that volume in cub_server's buffer pool; unflushed = DIRTY or FLUSHING)\n\n", bsum);
 	}
       else
 	{
 	  fprintf (fp, "%sBUFMAP%s  %s\n        background \033[48;5;23m teal \033[49m = cell has buffered pages   "
-		   "\033[48;5;53m purple \033[49m = cell has DIRTY buffered pages (memory newer than volume)\n\n",
+		   "\033[48;5;53m purple \033[49m = cell has unflushed buffered pages, DIRTY or FLUSHING (memory newer than volume)\n\n",
 		   VM_BOLD, VM_RESET, bsum);
 	}
     }
@@ -12771,7 +12831,7 @@ volmap_usage (const char *argv0)
 	   "  -i, --interactive        full-screen browser: mouse to inspect, </> volume, q quit\n"
 	   "  -m, --residency          glyph ramp shows OS page-cache residency (mincore)\n"
 	   "  -B, --bufmap=FILE        overlay cub_server's buffer pool from a cub_top --bcb-dump snapshot\n"
-	   "                           (teal bg = buffered, purple bg = buffered+dirty; interactive: b toggles, reloads on tick)\n"
+	   "                           (teal bg = buffered, purple bg = buffered and not yet on the volume; interactive: b toggles, reloads on tick)\n"
 	   "      --check              append an integrity findings report\n"
 	   "      --format=json        machine-readable output (volumes, files, findings)\n"
 	   "      --deep               full scan: record density + forwarding ratio\n"
@@ -12816,6 +12876,7 @@ volmap (UTIL_FUNCTION_ARG * arg)
     }
 
   memset (&ctx, 0, sizeof (ctx));
+  ctx.tracker_self = -1;	/* no tracker file known yet */
   ctx.width = utility_get_option_int_value (arg_map, VOLMAP_WIDTH_S);
   ctx.rows = utility_get_option_int_value (arg_map, VOLMAP_ROWS_S);
   ctx.deep = utility_get_option_bool_value (arg_map, VOLMAP_DEEP_S);

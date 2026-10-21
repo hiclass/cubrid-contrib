@@ -22,13 +22,19 @@
 #      files whose header LSA moved, walks the tracker again, and the report equals a
 #      fresh run taken after the change.
 # Uses the VOLMAP_REFRESH_LOOPS / VOLMAP_REFRESH_SLEEP test hook of the batch run.
-# Needs a running database RUNDB (default demodb) that csql can change.
+# Needs a running database RUNDB (default demodb) that csql's dba can change without a
+# password; the online backup it takes to force a checkpoint leaves an entry in the
+# database's _bkvinf (the backup files themselves are deleted).
 #
 #   RUNDB=demodb sh tools/check-refresh.sh
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 BIN=${VOLMAP:-$ROOT/cub_volmap}
 RUNDB=${RUNDB:-demodb}
-TMP=$(mktemp -d /tmp/volmap-refresh.XXXXXX); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d /tmp/volmap-refresh.XXXXXX)
+vp=""; T=""
+# whatever is left when this script ends or is killed: the paused volmap, the test table
+cleanup(){ [ -n "$vp" ] && kill "$vp" 2>/dev/null; [ -n "$T" ] && csql -u dba "$RUNDB" -c "DROP TABLE IF EXISTS $T" >/dev/null 2>&1; rm -rf "$TMP"; }
+trap cleanup EXIT INT TERM
 rc=0
 [ -x "$BIN" ] || { echo "→ FAIL (no binary: $BIN)"; exit 1; }
 command -v csql >/dev/null || { echo "→ SKIP (no csql in PATH)"; exit 0; }
@@ -47,7 +53,9 @@ sys.exit(0 if ka == kb else 1)
 PY
 }
 # 1. nothing changed: three refreshes, all from cache, tracker skipped, same report
-"$BIN" --format=json "$RUNDB" > "$TMP/a.json" 2>/dev/null
+"$BIN" --format=json "$RUNDB" > "$TMP/a.json" 2>/dev/null || { echo "→ SKIP ($RUNDB not readable)"; exit 0; }
+if [ "$(python3 -c "import json; print(json.load(open('$TMP/a.json'))['server']['state'])")" != running ]; then
+  echo "→ SKIP ($RUNDB has no running server on this host)"; exit 0; fi
 VOLMAP_REFRESH_LOOPS=3 "$BIN" --format=json "$RUNDB" > "$TMP/b.json" 2> "$TMP/b.err"
 # files on temporary-purpose volumes carry the constant temp LSA, so they are never
 # served from the cache: they are re-walked every time, and that is the expected count
@@ -87,10 +95,31 @@ sleep 2
 csql -u dba "$RUNDB" -i "$TMP/mk.sql" > "$TMP/csql.out" 2>&1 || { echo "  FAIL   csql: $(tail -2 "$TMP/csql.out")"; rc=1; }
 mkdir -p "$TMP/bk"; cubrid backupdb -C -D "$TMP/bk" "$RUNDB" > "$TMP/bk.out" 2>&1 || { echo "  FAIL   backupdb (to force a checkpoint): $(tail -1 "$TMP/bk.out")"; rc=1; }
 rm -rf "$TMP/bk"
-wait $vp
+wait $vp; vp=""
 "$BIN" --format=json "$RUNDB" > "$TMP/d.json" 2>/dev/null
 if same "$TMP/c.json" "$TMP/d.json" && grep -q "tracker re-walked" "$TMP/c.err" && ! grep -q " 0 re-walked" "$TMP/c.err"; then
   echo "  ok     table created and filled during the pause: refresh equals a fresh run ($(cat "$TMP/c.err"))"
 else echo "  FAIL   changed database: $(cat "$TMP/c.err")"; rc=1; fi
-csql -u dba "$RUNDB" -c "DROP TABLE $T" > /dev/null 2>&1
+# 3. the table dropped during the pause: its files leave the tracker (the header may stay
+#    on disk until vacuum frees the sectors), so the refresh must show them as not tracked
+#    - or gone - never as tracked
+# the table's files by class name - schema-qualified on 11.2+ (owner.table), so only the
+# last part is compared (a VFID of an earlier dropped table may be reused, so
+# "not in the first report" would miss them)
+newf=$(python3 -c "
+import json
+print(' '.join(f['vfid'] for f in json.load(open('$TMP/d.json'))['files'] if f['class'].lower().split('.')[-1] == '$T'.lower()))")
+[ -n "$newf" ] || { echo "  FAIL   the table's files were not found in the fresh report (class $T)"; rc=1; }
+VOLMAP_REFRESH_LOOPS=1 VOLMAP_REFRESH_SLEEP=40 "$BIN" --format=json "$RUNDB" > "$TMP/e.json" 2> "$TMP/e.err" & vp=$!
+sleep 2
+csql -u dba "$RUNDB" -c "DROP TABLE $T" > /dev/null 2>&1; T=""
+mkdir -p "$TMP/bk"; cubrid backupdb -C -D "$TMP/bk" "$RUNDB" > "$TMP/bk.out" 2>&1; rm -rf "$TMP/bk"
+wait $vp; vp=""
+st=$(python3 -c "
+import json; d={f['vfid']: f['tracked'] for f in json.load(open('$TMP/e.json'))['files']}
+print(' '.join('%s=%s' % (v, d.get(v, 'gone')) for v in '$newf'.split()))")
+case " $st " in
+  *"=True "*) echo "  FAIL   dropped table's files still tracked after the refresh: $st"; rc=1 ;;
+  *) echo "  ok     table dropped during the pause: its files are no longer tracked ($st)" ;;
+esac
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
