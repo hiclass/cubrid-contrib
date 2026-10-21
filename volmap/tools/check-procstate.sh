@@ -98,7 +98,7 @@ mkdir -p "$TMP/bk"
 setsid sh -c 'exec cubrid backupdb -C -D "$0" "$1"' "$TMP/bk" "$RUNDB" > "$TMP/bk.out" 2>&1 & bp=$!
 sleep 1.5
 alive(){ kill -0 "$bp" 2>/dev/null; }
-alive || { echo "  SKIP   backupdb of $RUNDB finished in under 1.5s: too short to observe (use a larger RUNDB)"; bp=""; rc=$rc; }
+alive || { echo "  SKIP   backupdb of $RUNDB finished in under 1.5s: too short to observe (use a larger RUNDB)"; bp=""; }
 head=$(alive && "$BIN" --plain "$RUNDB" 2>/dev/null | grep -c 'maintenance: cubrid backupdb is running')
 mt=$(alive && "$BIN" --format=json "$RUNDB" 2>/dev/null | j "d['maintenance']['utility'] if d['maintenance'] else None")
 cat > "$TMP/bar.py" <<'PY'

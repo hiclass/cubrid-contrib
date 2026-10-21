@@ -161,7 +161,7 @@ FINDINGS
 | idle_over_threshold | `--warn-idle=PCT` 지정 시: 볼륨 idle 공간이 임계 이상 — 회수 후보 (지정만으로 소견 리포트+종료코드 2 계약 활성) |
 | fragmentation | 예약 섹터 1,000개 이상인 볼륨에서 소유자 교대(owner switches)가 예약 섹터의 2% 를 넘음 — 파일이 섞여 있다. 매체(회전/비회전) 병기 |
 | fragmented_object | 위 볼륨에서 가장 끼어 있는 객체 2개: 섹터 수·익스텐트 수·끼어든 상대 객체·경계 수 |
-| bufmap_snapshot_mismatch | `--bufmap` 스냅샷의 버퍼 페이지가 64장 이상이고 그중 90% 이상이 이 볼륨에 미할당 — 오래됐거나 다른 DB 의 스냅샷. 그 미만의 미할당분은 정상(해제 페이지가 BCB 에 남음)이라 볼륨 헤더 `freed N` 으로만 표기 |
+| bufmap_snapshot_mismatch | `--bufmap` 스냅샷의 버퍼 페이지가 64장 이상이고 그중 90% 를 넘는 수가 이 볼륨에 미할당 — 오래됐거나 다른 DB 의 스냅샷. 그 미만의 미할당분은 정상(해제 페이지가 BCB 에 남음)이라 볼륨 헤더 `freed N` 으로만 표기 |
 
 소견과 별도로 **note** 가 있다. DB 의 속성이라 이상 구조가 아니고 종료 코드에 들어가지 않는다(텍스트 `note:` 줄, JSON `notes[]`).
 
@@ -192,7 +192,7 @@ volmap --format json cbench | python3 -m json.tool
 최상위에 `db`(이름)·`timestamp`(생성 시각)·`release`(로그의 릴리스)·`shutdown_state`(로그 헤더의 마지막 종료 상태:
 `clean`/`not_clean`/`unknown` — `not_clean` 은 실행 중이거나 비정상 종료 후 복구 전) 메타, `volumes[]`(볼륨별 예약/할당, `purpose`=permanent/temporary, `tde_pages_probed`=프로브된 페이지 중 TDE 암호 페이지 수,
 `--bufmap` 시 `buffered_pages`/`unflushed_pages`(dirty 또는 flushing)/`flushing_pages`/`buffered_freed_pages`, 없으면 -1), `files[]`(VFID·유형·**해석된 테이블/인덱스명**·페이지 통계),
-`skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`cause`(`unreadable`/`damaged`/`unrecognized`/`unsupported_release`)·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 그 밖에 `discovery{tracker: read/off/unreadable, tracker_files, probed_sectors, reason}`, `server{state: running/running_unverified/starting_or_recovering/not_running/unknown, pid, registered(true/false/null), up_sec, log_lock_pid}`, `maintenance{utility, pid, elapsed_sec}` 또는 null, `disk{device, busy_pct, mb_s, server_mb_s}` 또는 null, `notes[]`, `by_kind`, `compaction_priority`, 그리고 `files[]` 의 `tracked`(true / "deleted" / false / null=트래커 못 읽음)가 있다. 모니터링·자동화용.
+`skipped_volumes[]`(열지 못한 볼륨: `listed_volid`·`path`·`damaged`·`cause`(`unreadable`/`damaged`/`unrecognized`/`unsupported_release`)·`reason`), `findings[]`, 그리고 `--bufmap` 시 `bufmap{snapshot_epoch, num_buffers, resident, dirty, log_append_lsa, log_flushed_lsa, log_eof_lsa, oldest_dirty_lsa}` 를 담는다. 그 밖에 `tool`("volmap"), `discovery{tracker: read/off/unreadable, tracker_files, probed_sectors, reason}`, `server{state: running/running_unverified/starting_or_recovering/not_running/unknown, pid, registered(true/false/null), up_sec, log_lock_pid}`, `maintenance{utility, pid, elapsed_sec}` 또는 null, `disk{device, busy_pct, mb_s, server_mb_s}` 또는 null, `notes[]`, `by_kind`, `compaction_priority`, 그리고 `files[]` 의 `tracked`(true / "deleted" / false / null=트래커 못 읽음)가 있다. 모니터링·자동화용.
 
 - **stdout 은 JSON 문서만 담는다.** 볼륨 열기 실패·레이아웃 판별 경고 같은 진단 메시지는 stderr 로만 나간다
   (`-o` 파일도 같다). 라이브 서버에서 spill 볼륨이 스캔 도중 사라져도 문서는 깨지지 않는다.

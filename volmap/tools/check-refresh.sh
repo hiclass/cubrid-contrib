@@ -34,7 +34,10 @@ TMP=$(mktemp -d /tmp/volmap-refresh.XXXXXX)
 vp=""; T=""
 # whatever is left when this script ends or is killed: the paused volmap, the test table
 cleanup(){ [ -n "$vp" ] && kill "$vp" 2>/dev/null; [ -n "$T" ] && csql -u dba "$RUNDB" -c "DROP TABLE IF EXISTS $T" >/dev/null 2>&1; rm -rf "$TMP"; }
-trap cleanup EXIT INT TERM
+# a signal must end the script, not just clean up and let it run on
+trap cleanup EXIT
+trap 'cleanup; trap - EXIT; exit 143' TERM
+trap 'cleanup; trap - EXIT; exit 130' INT
 rc=0
 [ -x "$BIN" ] || { echo "→ FAIL (no binary: $BIN)"; exit 1; }
 command -v csql >/dev/null || { echo "→ SKIP (no csql in PATH)"; exit 0; }
@@ -109,7 +112,7 @@ else echo "  FAIL   changed database: $(cat "$TMP/c.err")"; rc=1; fi
 newf=$(python3 -c "
 import json
 print(' '.join(f['vfid'] for f in json.load(open('$TMP/d.json'))['files'] if f['class'].lower().split('.')[-1] == '$T'.lower()))")
-[ -n "$newf" ] || { echo "  FAIL   the table's files were not found in the fresh report (class $T)"; rc=1; }
+if [ -z "$newf" ]; then echo "  FAIL   the table's files were not found in the fresh report (class $T)"; rc=1; else
 VOLMAP_REFRESH_LOOPS=1 VOLMAP_REFRESH_SLEEP=40 "$BIN" --format=json "$RUNDB" > "$TMP/e.json" 2> "$TMP/e.err" & vp=$!
 sleep 2
 csql -u dba "$RUNDB" -c "DROP TABLE $T" > /dev/null 2>&1; T=""
@@ -122,4 +125,5 @@ case " $st " in
   *"=True "*) echo "  FAIL   dropped table's files still tracked after the refresh: $st"; rc=1 ;;
   *) echo "  ok     table dropped during the pause: its files are no longer tracked ($st)" ;;
 esac
+fi
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
