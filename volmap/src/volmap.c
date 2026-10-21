@@ -2534,8 +2534,9 @@ volmap_discover_files (VOLMAP_CTX * ctx)
 }
 
 /* DONTNEED the 4KB OS pages in [o0, o1) that were not cached when the scan began
-   (prevec), in coalesced runs.  count: add to the returned/kept figures (the per-sector
-   pass); the closing whole-volume pass only mops up readahead and counts nothing. */
+   (prevec), in coalesced runs.  count: add to the returned/kept figures (the sector
+   itself); the readahead window after it is returned without counting, or the same
+   pages would be counted at every sector whose window covers them. */
 static void
 volmap_deep_return (VOLMAP_VOLUME * vol, const unsigned char *prevec, size_t o0, size_t o1, bool count)
 {
@@ -2594,6 +2595,36 @@ volmap_deep_scan (VOLMAP_CTX * ctx)
       size_t maplen = (size_t) vol->nsect_total * sect_bytes;
       size_t pre_os_pages = (maplen + 4095) / 4096;
       unsigned char *prevec = NULL;	/* 1B per 4KB OS page: cached BEFORE the scan began */
+      /* How far past a read the kernel may have pulled pages in: the device's
+         read_ahead_kb, or 4MB when the device is not known (overlay) - the largest
+         value seen.  Only that window after each sector is given back, never the
+         whole volume: what the server loads elsewhere during a long scan stays. */
+      size_t ra_os_pages = 4 * 1024 * 1024 / 4096;
+      {
+	int maj, min;
+	char sys[256];
+	FILE *f;
+	long kb;
+
+	if (volmap_blockdev_of (vol->path, &maj, &min) == 0)
+	  {
+	    snprintf (sys, sizeof (sys), "/sys/dev/block/%d:%d/queue/read_ahead_kb", maj, min);
+	    f = fopen (sys, "r");
+	    if (f == NULL)
+	      {
+		snprintf (sys, sizeof (sys), "/sys/dev/block/%d:%d/../queue/read_ahead_kb", maj, min);
+		f = fopen (sys, "r");
+	      }
+	    if (f != NULL)
+	      {
+		if (fscanf (f, "%ld", &kb) == 1 && kb >= 0)
+		  {
+		    ra_os_pages = (size_t) kb * 1024 / 4096;
+		  }
+		fclose (f);
+	      }
+	  }
+      }
 
       /* What the OS had cached when the scan began (the server's warm set, the discovery
          pass) is what stays.  The snapshot is not retaken right before each sector: the
@@ -2683,14 +2714,19 @@ volmap_deep_scan (VOLMAP_CTX * ctx)
 		    }
 		}
 	    }
-	  /* Give this sector back now, not after the whole volume: the scan holds at most
-	     a sector (1MB at 16KB pages) plus readahead of cache it pulled in. */
-	  volmap_deep_return (vol, prevec, (size_t) s * os_per_sect, (size_t) (s + 1) * os_per_sect, true);
+	  /* Give this sector back now, not after the whole volume, and with it the
+	     readahead window behind it (the next sectors, whether the scan reads them or
+	     skips them): the scan holds at most a sector (1MB at 16KB pages) plus that
+	     window.  Nothing outside the window is touched, so pages the server loads
+	     elsewhere while the scan runs are not evicted. */
+	  {
+	    size_t o1 = (size_t) (s + 1) * os_per_sect;
+	    size_t o2 = (o1 + ra_os_pages < pre_os_pages) ? o1 + ra_os_pages : pre_os_pages;
+
+	    volmap_deep_return (vol, prevec, (size_t) s * os_per_sect, o1, true);
+	    volmap_deep_return (vol, prevec, o1, o2, false);
+	  }
 	}
-      /* Readahead past the last sector read, or into sectors the scan skipped, is
-         returned by one more pass over the whole volume (nothing is counted twice:
-         pages already returned are no longer cached, and only cold ones are touched). */
-      volmap_deep_return (vol, prevec, 0, pre_os_pages, false);
       free (prevec);
       free (sectbuf);
     }
