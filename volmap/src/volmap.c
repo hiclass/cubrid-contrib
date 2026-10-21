@@ -287,6 +287,11 @@ struct volmap_ctx
   int notes_len;
   VOLMAP_FILE *files;
   int nfiles;
+  /* (volid, fileid) -> index into files[] + 1, open addressing.  The tracker walk and
+     every probe ask "is this file known"; a linear search made that quadratic in the
+     file count on each refresh. */
+  int *fidx;
+  size_t fidx_cap;		/* power of two, 2 x VOLMAP_MAX_FILES */
   int width;
   int rows;
   bool plain;
@@ -341,6 +346,8 @@ static int volmap_resolve_volumes (VOLMAP_CTX * ctx, const char *db_name_or_vinf
 static int volmap_scan_temp_volumes (VOLMAP_CTX * ctx);
 static bool volmap_try_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, char *iopage);
 static void volmap_discover_tracker (VOLMAP_CTX * ctx);
+static int volmap_file_index (VOLMAP_CTX * ctx, INT16 volid, INT32 fileid);
+static void volmap_fidx_put (VOLMAP_CTX * ctx, int k);
 static int volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn);
 static void volmap_tde_sample (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol);
 static void volmap_proc_scan (VOLMAP_CTX * ctx);
@@ -1763,6 +1770,16 @@ volmap_try_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, ch
     }
   if (ctx->nfiles >= VOLMAP_MAX_FILES)
     {
+      /* Said once: a file left out silently would make its sectors unowned and its
+         pages idle in every figure that follows */
+      static bool said = false;
+
+      if (!said)
+	{
+	  said = true;
+	  fprintf (stderr, "volmap: more than %d files - the rest are not shown; their sectors appear as unowned"
+		   " and their pages as idle\n", VOLMAP_MAX_FILES);
+	}
       return false;
     }
 
@@ -1798,6 +1815,7 @@ volmap_try_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, ch
     }
 
   ctx->nfiles++;
+  volmap_fidx_put (ctx, ctx->nfiles - 1);
 
   if (fhead->offset_to_partial_ftab >= 0)
     {
@@ -1845,14 +1863,8 @@ volmap_probe_sector (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, DKNSECTS s, char *io
 	{
 	  continue;
 	}
-      for (k = 0; k < ctx->nfiles; k++)
-	{
-	  if (ctx->files[k].vfid.volid == vol->volid && ctx->files[k].vfid.fileid == pageid)
-	    {
-	      known = true;
-	      break;
-	    }
-	}
+      known = volmap_file_index (ctx, vol->volid, pageid) >= 0;
+      (void) k;
       if (!known && volmap_read_iopage (vol, pageid, iopage))
 	{
 	  (void) volmap_try_file_header (ctx, vol, pageid, iopage);
@@ -1889,18 +1901,71 @@ typedef struct volmap_track_item
   unsigned char pad[7];
 } VOLMAP_TRACK_ITEM;
 
+static size_t
+volmap_fidx_hash (INT16 volid, INT32 fileid)
+{
+  unsigned long long h = ((unsigned long long) (unsigned short) volid << 32) ^ (unsigned int) fileid;
+
+  h *= 0x9E3779B97F4A7C15ULL;
+  return (size_t) (h >> 20);
+}
+
+/* record files[k] in the index (built on first use from the files already registered) */
+static void
+volmap_fidx_put (VOLMAP_CTX * ctx, int k)
+{
+  size_t i;
+
+  if (ctx->fidx == NULL)
+    {
+      return;
+    }
+  i = volmap_fidx_hash (ctx->files[k].vfid.volid, ctx->files[k].vfid.fileid) & (ctx->fidx_cap - 1);
+  while (ctx->fidx[i] != 0)
+    {
+      i = (i + 1) & (ctx->fidx_cap - 1);
+    }
+  ctx->fidx[i] = k + 1;
+}
+
 /* the index of the file with this VFID, or -1 */
 static int
 volmap_file_index (VOLMAP_CTX * ctx, INT16 volid, INT32 fileid)
 {
-  int k;
+  size_t i;
 
-  for (k = 0; k < ctx->nfiles; k++)
+  if (ctx->fidx == NULL)
     {
-      if (ctx->files[k].vfid.volid == volid && ctx->files[k].vfid.fileid == fileid)
+      int k;
+
+      ctx->fidx_cap = 2 * VOLMAP_MAX_FILES;	/* load factor <= 0.5: short probe runs */
+      ctx->fidx = (int *) calloc (ctx->fidx_cap, sizeof (int));
+      if (ctx->fidx == NULL)
 	{
-	  return k;
+	  for (k = 0; k < ctx->nfiles; k++)	/* no memory for the index: the slow way */
+	    {
+	      if (ctx->files[k].vfid.volid == volid && ctx->files[k].vfid.fileid == fileid)
+		{
+		  return k;
+		}
+	    }
+	  return -1;
 	}
+      for (k = 0; k < ctx->nfiles; k++)
+	{
+	  volmap_fidx_put (ctx, k);
+	}
+    }
+  i = volmap_fidx_hash (volid, fileid) & (ctx->fidx_cap - 1);
+  while (ctx->fidx[i] != 0)
+    {
+      const VOLMAP_FILE *f = &ctx->files[ctx->fidx[i] - 1];
+
+      if (f->vfid.volid == volid && f->vfid.fileid == fileid)
+	{
+	  return ctx->fidx[i] - 1;
+	}
+      i = (i + 1) & (ctx->fidx_cap - 1);
     }
   return -1;
 }
