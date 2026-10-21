@@ -148,10 +148,26 @@ struct volmap_volume
   INT64 deep_cache_kept;	/* bytes kept because they were already cached before the scan */
 };
 
+/* one sector a file's sector tables list, as the last walk saw it */
+typedef struct volmap_sectref
+{
+  INT16 volid;
+  INT32 sectid;
+  UINT64 bitmap;		/* allocated pages (all ones for a full sector) */
+} VOLMAP_SECTREF;
+
 typedef struct volmap_file VOLMAP_FILE;
 struct volmap_file
 {
   VFID vfid;
+  /* A refresh re-applies this list instead of re-reading the header page and its
+     sector tables when the header page's LSA has not moved: every allocation,
+     deallocation and sector change updates the header counters, so an unchanged LSA
+     means unchanged tables. */
+  UINT64 hdr_lsa;		/* page LSA of the header when the tables were last walked */
+  VOLMAP_SECTREF *sects;
+  int nsects;
+  int sects_cap;
   FILE_TYPE ftype;
   OID class_oid;		/* heap only */
   int n_page_total;
@@ -292,6 +308,14 @@ struct volmap_ctx
      file count on each refresh. */
   int *fidx;
   size_t fidx_cap;		/* power of two, 2 x VOLMAP_MAX_FILES */
+  /* the tracker pages as last walked, with their LSAs: a refresh re-reads only the 32-byte
+     page prefix of each and skips the walk when none has moved */
+  VPID *trk_pages;
+  UINT64 *trk_lsa;
+  int trk_npages;
+  long rf_cached;		/* last refresh: files re-applied from their sector list */
+  long rf_walked;		/* ... files whose header moved and were re-walked */
+  bool rf_tracker_walked;	/* ... tracker pages had moved: walked again */
   int width;
   int rows;
   bool plain;
@@ -1724,11 +1748,36 @@ volmap_walk_extdata (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, const char *iopage, 
 	    VOLMAP_VOLUME *sv = volmap_find_vol (ctx, vsid.volid);
 	    if (sv != NULL && vsid.sectid >= 0 && vsid.sectid < sv->nsect_total)
 	      {
+		VOLMAP_FILE *f = &ctx->files[file_idx];
+
 		sv->w_owner[vsid.sectid] = file_idx;
 		sv->w_alloc[vsid.sectid] += npages;
 		sv->w_pagebm[vsid.sectid] |= bitmap;
-		ctx->files[file_idx].sectors_seen++;
-		ctx->files[file_idx].alloc_pages += npages;
+		f->sectors_seen++;
+		f->alloc_pages += npages;
+		/* remembered for the refreshes whose header LSA has not moved */
+		if (f->nsects == f->sects_cap)
+		  {
+		    int want = (f->sects_cap > 0) ? f->sects_cap * 2 : 8;
+		    VOLMAP_SECTREF *grown = (VOLMAP_SECTREF *) realloc (f->sects, (size_t) want * sizeof (*grown));
+
+		    if (grown != NULL)
+		      {
+			f->sects = grown;
+			f->sects_cap = want;
+		      }
+		  }
+		if (f->nsects < f->sects_cap)
+		  {
+		    f->sects[f->nsects].volid = vsid.volid;
+		    f->sects[f->nsects].sectid = vsid.sectid;
+		    f->sects[f->nsects].bitmap = bitmap;
+		    f->nsects++;
+		  }
+		else
+		  {
+		    f->hdr_lsa = 0;	/* list incomplete (no memory): never re-applied */
+		  }
 	      }
 	  }
 	}
@@ -1817,6 +1866,8 @@ volmap_try_file_header (VOLMAP_CTX * ctx, VOLMAP_VOLUME * vol, PAGEID pageid, ch
   ctx->nfiles++;
   volmap_fidx_put (ctx, ctx->nfiles - 1);
 
+  f->nsects = 0;
+  memcpy (&f->hdr_lsa, iopage + offsetof (FILEIO_PAGE_RESERVED, lsa), sizeof (f->hdr_lsa));
   if (fhead->offset_to_partial_ftab >= 0)
     {
       volmap_walk_extdata (ctx, vol, iopage, fhead->offset_to_partial_ftab, true, ctx->nfiles - 1);
@@ -2161,6 +2212,39 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
       snprintf (why, wn, "out of memory");
       return -1;
     }
+  /* A walk already done: when no tracker page has moved (32-byte prefix each), the list
+     is as it was and nothing needs looking at.  A page appended to the chain changes
+     the previous last page's vpid_next, so that too moves an LSA. */
+  ctx->rf_tracker_walked = false;
+  if (ctx->trk_npages > 0)
+    {
+      int k;
+      bool same = true;
+
+      for (k = 0; k < ctx->trk_npages && same; k++)
+	{
+	  VOLMAP_VOLUME *vol = volmap_find_vol (ctx, ctx->trk_pages[k].volid);
+	  FILEIO_PAGE_RESERVED pr;
+	  UINT64 lsa;
+
+	  same = vol != NULL
+	    && pread (volmap_vol_fd (vol), &pr, sizeof (pr), (off_t) ctx->trk_pages[k].pageid * vol->iopagesize) == (ssize_t) sizeof (pr)
+	    && pr.pageid == ctx->trk_pages[k].pageid && pr.volid == vol->volid;
+	  if (same)
+	    {
+	      memcpy (&lsa, &pr.lsa, sizeof (lsa));
+	      same = lsa == ctx->trk_lsa[k];
+	    }
+	}
+      if (same)
+	{
+	  free (page);
+	  free (hpage);
+	  return 0;
+	}
+    }
+  ctx->rf_tracker_walked = true;
+  ctx->trk_npages = 0;
   for (guard = 0; guard < 100000 && !VPID_ISNULL (&cur); guard++)
     {
       VOLMAP_VOLUME *vol = volmap_find_vol (ctx, cur.volid);
@@ -2184,6 +2268,31 @@ volmap_tracker_walk (VOLMAP_CTX * ctx, const VPID * first, char *why, size_t wn)
 	  break;		/* not a tracker page: stop rather than guess */
 	}
       pages++;
+      /* remember this page and its LSA for the next walk's check */
+      if (pages > 0)
+	{
+	  VPID *gp = (VPID *) realloc (ctx->trk_pages, (size_t) pages * sizeof (VPID));
+	  UINT64 *gl = (UINT64 *) realloc (ctx->trk_lsa, (size_t) pages * sizeof (UINT64));
+
+	  if (gp != NULL)
+	    {
+	      ctx->trk_pages = gp;
+	    }
+	  if (gl != NULL)
+	    {
+	      ctx->trk_lsa = gl;
+	    }
+	  if (gp != NULL && gl != NULL)
+	    {
+	      ctx->trk_pages[pages - 1] = cur;
+	      memcpy (&ctx->trk_lsa[pages - 1], &pr->lsa, sizeof (UINT64));
+	      ctx->trk_npages = pages;
+	    }
+	  else
+	    {
+	      ctx->trk_npages = 0;	/* no memory for the check: every refresh walks */
+	    }
+	}
       for (i = 0; i < extdata->n_items; i++)
 	{
 	  VOLMAP_TRACK_ITEM it;
@@ -3918,16 +4027,53 @@ volmap_refresh (VOLMAP_CTX * ctx)
          counted is not counted twice, whichever probe reaches it. */
     }
 
-  /* re-walk known files (counts + ownership); vanished files simply stop matching */
+  /* re-walk known files (counts + ownership); vanished files simply stop matching.
+     First only the 32-byte page prefix of the header is read: an LSA that has not moved
+     since the last walk means the sector tables have not either (every allocation,
+     deallocation and sector change writes the header counters), so the remembered
+     list is re-applied without reading the page. */
+  ctx->rf_cached = 0;
+  ctx->rf_walked = 0;
   for (fi = 0; fi < ctx->nfiles; fi++)
     {
       VOLMAP_FILE *f = &ctx->files[fi];
       VOLMAP_VOLUME *vol = volmap_find_vol (ctx, f->vfid.volid);
       const FILE_HEADER *fhead;
+      FILEIO_PAGE_RESERVED pr;
+      UINT64 lsa_now;
 
       if (vol == NULL)
 	{
 	  continue;
+	}
+      if (pread (volmap_vol_fd (vol), &pr, sizeof (pr), (off_t) f->vfid.fileid * vol->iopagesize) == (ssize_t) sizeof (pr)
+	  && pr.pageid == f->vfid.fileid && pr.volid == f->vfid.volid && f->sects != NULL && f->hdr_lsa != 0)
+	{
+	  memcpy (&lsa_now, &pr.lsa, sizeof (lsa_now));
+	  if (lsa_now == f->hdr_lsa)
+	    {
+	      int k;
+
+	      f->alloc_pages = 0;
+	      f->sectors_seen = 0;
+	      for (k = 0; k < f->nsects; k++)
+		{
+		  VOLMAP_VOLUME *sv = volmap_find_vol (ctx, f->sects[k].volid);
+		  int np = __builtin_popcountll (f->sects[k].bitmap);
+
+		  if (sv == NULL || f->sects[k].sectid < 0 || f->sects[k].sectid >= sv->nsect_total)
+		    {
+		      continue;
+		    }
+		  sv->w_owner[f->sects[k].sectid] = fi;
+		  sv->w_alloc[f->sects[k].sectid] += np;
+		  sv->w_pagebm[f->sects[k].sectid] |= f->sects[k].bitmap;
+		  f->sectors_seen++;
+		  f->alloc_pages += np;
+		}
+	      ctx->rf_cached++;
+	      continue;
+	    }
 	}
       if (iopage == NULL)
 	{
@@ -3941,6 +4087,8 @@ volmap_refresh (VOLMAP_CTX * ctx)
       if (fhead->self.fileid != f->vfid.fileid || fhead->self.volid != f->vfid.volid || fhead->type != f->ftype)
 	{
 	  f->sectors_seen = 0;	/* file was destroyed/reused; its sectors go unowned */
+	  f->nsects = 0;
+	  f->hdr_lsa = 0;
 	  continue;
 	}
       f->n_page_total = fhead->n_page_total;
@@ -3950,6 +4098,8 @@ volmap_refresh (VOLMAP_CTX * ctx)
       f->n_sector_total = fhead->n_sector_total;
       f->alloc_pages = 0;
       f->sectors_seen = 0;
+      f->nsects = 0;
+      memcpy (&f->hdr_lsa, iopage + offsetof (FILEIO_PAGE_RESERVED, lsa), sizeof (f->hdr_lsa));
       if (fhead->offset_to_partial_ftab >= 0)
 	{
 	  volmap_walk_extdata (ctx, vol, iopage, fhead->offset_to_partial_ftab, true, fi);
@@ -3958,6 +4108,7 @@ volmap_refresh (VOLMAP_CTX * ctx)
 	{
 	  volmap_walk_extdata (ctx, vol, iopage, fhead->offset_to_full_ftab, false, fi);
 	}
+      ctx->rf_walked++;
     }
 
   /* files created since: the tracker lists them, for the cost of its few pages */
@@ -12820,6 +12971,26 @@ volmap (UTIL_FUNCTION_ARG * arg)
 
 	  volmap_bufmap_summary (&ctx, bsum, sizeof (bsum));
 	  fprintf (stderr, "volmap: %s\n", bsum);
+	}
+    }
+  /* Test hook (tools/check-refresh.sh): run the incremental refresh N times before the
+     report, after an optional pause in which the database can be changed, and say what
+     each refresh re-read.  Not an option: it is for checking that a refresh reaches
+     the same state a fresh run does. */
+  if (!ctx.interactive && getenv ("VOLMAP_REFRESH_LOOPS") != NULL)
+    {
+      int loops = atoi (getenv ("VOLMAP_REFRESH_LOOPS")), li;
+      const char *rs = getenv ("VOLMAP_REFRESH_SLEEP");
+
+      if (rs != NULL && atoi (rs) > 0)
+	{
+	  sleep ((unsigned) atoi (rs));
+	}
+      for (li = 0; li < loops; li++)
+	{
+	  (void) volmap_refresh (&ctx);
+	  fprintf (stderr, "refresh %d: %ld files from cache, %ld re-walked, tracker %s\n", li + 1, ctx.rf_cached,
+		   ctx.rf_walked, ctx.rf_tracker_walked ? "re-walked" : "unchanged, skipped");
 	}
     }
   if (ctx.deep && !ctx.interactive)
