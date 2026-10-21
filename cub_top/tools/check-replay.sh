@@ -268,4 +268,18 @@ else
     echo "  FAIL older build's recording: exit $e, $(grep -c '^ts=' "$TMP/older.out") frame(s) shown"; bad=1
 fi
 
+# 8) the DB disk's utilization is its own key: a recording that lacks cap.dev_util (made
+#    before it was written) must replay as "DB disk unknown", never with the host's busiest
+#    device standing in (hostdev.util_pct) and never as 0%
+if command -v python3 >/dev/null; then
+    python3 - "$REC" "$TMP/nodev.jsonl" <<'PY'
+import re,sys
+s=open(sys.argv[1]).read(); open(sys.argv[2],"w").write(re.sub(r'"cap\.dev_util":\s*[0-9.\-]+,\s*','',s))
+PY
+    d1=$("$BIN" --replay "$REC" -d 2>/dev/null | grep -o 'cap.dev_util=[0-9.-]*' | head -1)
+    d0=$("$BIN" --replay "$TMP/nodev.jsonl" -d 2>/dev/null | grep -o 'cap.device="[^"]*"\|cap.device_reason="[^"]*"' | head -2 | tr '\n' ' ')
+    case "$d1" in cap.dev_util=-1*|"") echo "  FAIL replay with cap.dev_util: $d1"; bad=1 ;; *) ;; esac
+    case "$d0" in 'cap.device="" cap.device_reason="'*cap.dev_util*) echo "  ok   recording without cap.dev_util replays as DB disk unknown ($d0)" ;;
+                  *) echo "  FAIL recording without cap.dev_util: $d0"; bad=1 ;; esac
+fi
 [ $bad -eq 0 ] && { echo "-> PASS"; exit 0; } || { echo "-> FAIL"; exit 1; }

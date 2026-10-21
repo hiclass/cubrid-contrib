@@ -208,6 +208,7 @@ cub_volmap 페이지 박스의 `buf:DIRTY unflushed / flushed` 는 마지막 두
 | `cap.device_via` | 찾은 경로: `st_dev`(일반 마운트) · `mount`(마운트 원본) · `statfs_fsid`(overlay 등 익명 장치, 하위 XFS 의 fsid) | |
 | `cap.device_reason` | 장치를 못 찾은 사유(tmpfs·네트워크·ext4/btrfs 위 overlay, DB 파일 위치 미확인) | |
 | `cap.dev_iops` | `cap.device` 의 초당 I/O 완료 수 = `(rd_ios+wr_ios) 델타 ÷ 경과` | 디스크 단위 값이다(같은 디스크의 다른 프로세스 포함) |
+| `cap.dev_util` | `cap.device` 의 사용률 % = `io_ticks 델타 ÷ 경과` | DB 디스크의 값. 4번 패널(flush)의 쓰기 병목 판정이 이것을 쓴다 — `hostdev.util_pct`(호스트에서 가장 바쁜 장치)가 아니다. 없으면(구 기록) DB 디스크 미확인으로 재생 |
 | `cap.proc_iops` | 이 인스턴스의 `syscr+syscw` 초당 = 엔진이 발행한 요청 수 | 장치 IOPS 보다 크면 정상(페이지 캐시가 흡수한 분) |
 | `cap.read_bps` / `write_bps` | `/proc/<pid>/io` 의 `read_bytes`/`write_bytes` 초당 | 블록 계층 실제 디스크 바이트 |
 

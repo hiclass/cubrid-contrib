@@ -4009,6 +4009,8 @@ typedef struct {
        sums across processes and must therefore be PSS. */
     double srv_rss, db, lg, etc, vsz, rss, dynmap;
     double minflt, devutil, absorb, osused, cub, ram;
+    double dbdev_util;          /* The DB's own disk (CAP2.dev), -1 when it is not known: what panel D judges by;
+                                   devutil above is the host's busiest device and stays with the host panel */
     double cpu;                 /* Server CPU percentage, one core = 100 */
     /* A metric on the dashboard must also be in the plots, or finding a trend means
        working out which screen had it. */
@@ -4070,6 +4072,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->minflt  = IO->minflt; s->majflt = IO->majflt;
     s->rbps=IO->rb; s->wbps=IO->wb; s->riops=IO->ri;
     s->devutil = IO->devutil;
+    s->dbdev_util = CAP2.dev[0] ? CAP2.dev_util : -1.0;
     /* Idle stretches (below the denominator floor) are 0; drawing 100% would read as a
        perfect cache.  That makes 0 and "not measurable" the same pixel, so absorb_ok is
        kept and footnoted. */
@@ -4126,14 +4129,14 @@ static void hist_dump_last(void){
         "hist.srv_rss=%.0f hist.db=%.0f hist.lg=%.0f hist.dyn=%.0f hist.etc=%.0f\n"
         "hist.dynmap=%.0f hist.vsz=%.0f hist.rss=%.0f hist.cub=%.0f hist.osused=%.0f\n"
         "hist.minflt=%.0f hist.majflt=%.0f hist.rbps=%.0f hist.wbps=%.0f\n"
-        "hist.devutil=%.1f hist.absorb=%.1f hist.absorb_ok=%d\n"
+        "hist.devutil=%.1f hist.dbdev_util=%.1f hist.absorb=%.1f hist.absorb_ok=%d\n"
         "hist.pg_ok=%d hist.pg_res_pct=%.2f hist.pg_dirty=%.0f hist.pg_cold_pct=%.2f hist.pg_span=%.0f hist.pg_lag=%.0f\n"
         "hist.rss_srv=%.0f hist.rss_master=%.0f hist.rss_pl=%.0f hist.rss_broker=%.0f hist.rss_cas=%.0f\n"
         "hist.cap_iops=%.0f hist.cap_await=%.2f hist.cap_hit=%.2f hist.cap_miss=%.0f hist.cap_head=%.1f\n",
         s->srv_rss,s->db,s->lg,s->dyn,s->etc,
         s->dynmap,s->vsz,s->rss,s->cub,s->osused,
         s->minflt,s->majflt,s->rbps,s->wbps,
-        s->devutil,s->absorb,s->absorb_ok,
+        s->devutil,s->dbdev_util,s->absorb,s->absorb_ok,
         s->pg_ok,s->pg_res_pct,s->pg_dirty,s->pg_cold_pct,s->pg_span,s->pg_lag,
         s->rss_srv,s->rss_master,s->rss_pl,s->rss_broker,s->rss_cas,
         s->cap_iops,s->cap_await,s->cap_hit,s->cap_miss,s->cap_head);
@@ -5283,28 +5286,35 @@ static void vd_host(char*o,size_t n,const char**col,int ncores){
 static const char* readmit_s(double v){ static char b[24]; if(v<0) return "-"; snprintf(b,sizeof b,"%.0f%%",v); return b; }
 /* Flush span in log pages; -1 = not known (no page scan this frame) */
 static const char* span_s(double v){ static char b[24]; if(v<0) return "?"; snprintf(b,sizeof b,"%.0f",v); return b; }
+/* DB disk utilization as a percentage; the caller substitutes a word when it is unknown */
+static const char* dev_pct_s(double v){ static char b[24]; snprintf(b,sizeof b,"%.0f%%",v); return b; }
 /* D: the drain side, buffer back to volume */
 static void vd_flush(char*o,size_t n,const char**col){
     if(HN<1){ snprintf(o,n,"%s",g_ascii?"collecting...":"표본 수집 중…"); *col=VD_INFO; return; }
     const hsam_t*b=&HS[HN-1];
     double dmin=b->pg_dirty; for(int i=0;i<HN;i++) if(HS[i].pg_ok && HS[i].pg_dirty<dmin) dmin=HS[i].pg_dirty;
+    /* The device here is the DB's own disk (the capacity axis's), never the host's busiest:
+       a backup saturating another disk is not this database's write bottleneck.  Unknown
+       (no DB disk resolved) means no device judgement at all. */
+    const char*dv = b->dbdev_util>=0 ? dev_pct_s(b->dbdev_util) : (g_ascii?"-":"미확인");
+    int dev_busy = b->dbdev_util>=80 && b->wbps>=1.0*1024*1024;
     if(!b->pg_ok){
-        if(b->devutil>=80 && b->wbps>=1.0*1024*1024){ *col=VD_WARN;
-            snprintf(o,n,g_ascii?"! device %.0f%% busy with %s/s writes - write bottleneck":"⚠ 장치 %.0f%% · 쓰기 %s/s — 쓰기 병목",b->devutil,H(b->wbps)); }
-        else { *col=VD_INFO; snprintf(o,n,g_ascii?"write %s/s, device %.0f%% (buffer-pool state unavailable)":"· 쓰기 %s/s, 장치 %.0f%% (버퍼풀 상태 읽기 비활성)",H(b->wbps),b->devutil); }
+        if(dev_busy){ *col=VD_WARN;
+            snprintf(o,n,g_ascii?"! DB disk %s busy with %s/s writes - write bottleneck":"⚠ DB 디스크 %s · 쓰기 %s/s — 쓰기 병목",dv,H(b->wbps)); }
+        else { *col=VD_INFO; snprintf(o,n,g_ascii?"write %s/s, DB disk %s (buffer-pool state unavailable)":"· 쓰기 %s/s, DB 디스크 %s (버퍼풀 상태 읽기 비활성)",H(b->wbps),dv); }
         return; }
     if(b->pg_lag>0){ *col=VD_WARN;
         snprintf(o,n,g_ascii?"! fsync delay %.0f log pg (append ahead of flushed) - commit latency risk":"⚠ fsync 지연 %.0f 로그pg (append 가 flushed 앞) — 커밋 지연 위험",b->pg_lag); return; }
-    if(b->devutil>=80 && b->wbps>=1.0*1024*1024){ *col=VD_WARN;
-        snprintf(o,n,g_ascii?"! write bottleneck - device %.0f%%, write %s/s, dirty %.0f pages":"⚠ 쓰기 병목 — 장치 %.0f%%, 쓰기 %s/s, dirty %.0f 페이지",b->devutil,H(b->wbps),b->pg_dirty); return; }
+    if(dev_busy){ *col=VD_WARN;
+        snprintf(o,n,g_ascii?"! write bottleneck - DB disk %s, write %s/s, dirty %.0f pages":"⚠ 쓰기 병목 — DB 디스크 %s, 쓰기 %s/s, dirty %.0f 페이지",dv,H(b->wbps),b->pg_dirty); return; }
     if(b->pg_dirty>=100 && b->pg_dirty>1.5*dmin){ *col=VD_NOTE;
         snprintf(o,n,g_ascii?"! dirty pages accumulating %.0f (flush delay %s log pg) - grows until checkpoint/flush catches up"
                            :"⚠ dirty 누적 %.0f 페이지 (flush 지연 %s 로그pg) — 체크포인트·flush 가 따라잡기 전까지 증가",b->pg_dirty,span_s(b->pg_span)); return; }
     if(b->pg_dirty==0){ *col=VD_OK;
         snprintf(o,n,g_ascii?"all reflected to volumes - dirty 0, no flush delay, write %s/s":"· 볼륨 반영 완료 — dirty 0, flush 지연 없음, 쓰기 %s/s",H(b->wbps)); return; }
     *col=VD_INFO;
-    snprintf(o,n,g_ascii?"dirty %.0f pages - flush delay %s log pages - device %.0f%% - write %s/s":"· dirty %.0f 페이지 · flush 지연 span %s 로그pg · 장치 %.0f%% · 쓰기 %s/s",
-             b->pg_dirty,span_s(b->pg_span),b->devutil,H(b->wbps));
+    snprintf(o,n,g_ascii?"dirty %.0f pages - flush delay %s log pages - DB disk %s - write %s/s":"· dirty %.0f 페이지 · flush 지연 span %s 로그pg · DB 디스크 %s · 쓰기 %s/s",
+             b->pg_dirty,span_s(b->pg_span),dv,H(b->wbps));
 }
 
 
@@ -7044,7 +7054,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         if(CAP2.qdepth>=0)        printf("cap.queue_depth=%.2f\n",CAP2.qdepth);
         printf("cap.device=\"%s\" cap.device_via=\"%s\" cap.device_reason=\"%s\"\n",tq(CAP2.dev),
                g_dk_via==1?"st_dev":g_dk_via==2?"mount":g_dk_via==3?"statfs_fsid":"",tq(CAP2.dev_why));
-        printf("cap.dev_iops=%.0f cap.proc_iops=%.0f\n",CAP2.dev_iops,rnd_as_printed(CAP2.riops,0)+rnd_as_printed(CAP2.wiops,0));
+        printf("cap.dev_iops=%.0f cap.dev_util=%.1f cap.proc_iops=%.0f\n",CAP2.dev_iops,CAP2.dev_util,rnd_as_printed(CAP2.riops,0)+rnd_as_printed(CAP2.wiops,0));
         /* I/O profile: ceilings are compared only within this cell (block size x read share) */
         printf("cap.req_kb=%.1f cap.read_ratio=%.2f cap.profile=\"%s/%s\"\n",
                CAP2.req_kb,CAP2.read_ratio,CAP_BS_NAME[CAP2.prof_bs],CAP_RW_NAME[CAP2.prof_rw]);
@@ -7551,7 +7561,10 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     memset(&CAP2,0,sizeof CAP2);
     CAP2.read_bps =rp_num(t,"io.read_bps",0);   CAP2.write_bps=rp_num(t,"io.write_bps",0);
     CAP2.riops    =rp_num(t,"io.read_iops",0);  CAP2.wiops    =rp_num(t,"io.write_iops",0);
-    CAP2.dev_iops =rp_num(t,"cap.dev_iops",0);  CAP2.dev_util =rp_num(t,"hostdev.util_pct",0);
+    CAP2.dev_iops =rp_num(t,"cap.dev_iops",0);
+    /* The DB disk's own utilization.  hostdev.util_pct is the host's busiest device and
+       must not stand in for it: a recording without cap.dev_util has no DB-disk figure. */
+    CAP2.dev_util =rp_num(t,"cap.dev_util",-1);
     /* A key missing from the frame was not measured: -1 as in live, never 0 */
     CAP2.await_ms =rp_num(t,"cap.await_ms",-1);
     CAP2.r_await_ms=rp_num(t,"cap.read_await_ms",-1);
@@ -7596,6 +7609,10 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     rp_str(t,"cap.device_reason",CAP2.dev_why,sizeof CAP2.dev_why);
     { char v[16]=""; rp_str(t,"cap.device_via",v,sizeof v);
       g_dk_via = !strcmp(v,"st_dev")?1 : !strcmp(v,"mount")?2 : !strcmp(v,"statfs_fsid")?3 : 0; }
+    /* A recording made before cap.dev_util was written names the DB disk without its
+       utilization: that is "DB disk unknown" for every judgement, not 0% and not the host's */
+    if(CAP2.dev[0] && CAP2.dev_util<0){ CAP2.dev[0]=0;
+        snprintf(CAP2.dev_why,sizeof CAP2.dev_why,"%s",g_ascii?"recording has no cap.dev_util":"기록에 cap.dev_util 없음"); }
     rp_str(t,"cap.ceiling_device_id",g_cap_devid,sizeof g_cap_devid);
     { cap_dev_t *d=cap_dev_get(CAP2.dev); g_cap_mtx = d ? d->m : g_cap_none; }
     if(g_cap_mtx!=g_cap_none) memset(g_cap_mtx,0,sizeof(cap_cell_t)*CAP_BS_N*CAP_RW_N);

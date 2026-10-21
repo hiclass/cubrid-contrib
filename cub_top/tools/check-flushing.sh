@@ -37,6 +37,26 @@ int main(void){
     ok = PG.dirty==2 && PG.flushing==3 && PG.unflushed==4 && PG.flush_only==2 && PG.have_oldest && PG.oldest_dirty.pageid==500;
     printf("  %s   dirty %d, flushing %d, not yet written %d (want 4: either bit once), oldest dirty %lld excludes %d mid-flush (want 2)\n",
            ok?"ok  ":"FAIL",PG.dirty,PG.flushing,PG.unflushed,(long long)PG.oldest_dirty.pageid,PG.flush_only); bad|=!ok;
+    /* Panel D judges by the DB's own disk, never the host's busiest: a backup saturating
+       another disk (host 97%) with the DB disk at 3% and 5MB/s of writes is not a write
+       bottleneck; the same writes with the DB disk at 97% are; an unknown DB disk gives no
+       device judgement at all. */
+    { char vb[320]; const char*vc=VD_INFO;
+      memset(HS,0,sizeof HS); HN=1;
+      HS[0].pg_ok=1; HS[0].pg_dirty=50; HS[0].pg_span=10; HS[0].pg_lag=0; HS[0].wbps=5.0*1024*1024;
+      HS[0].devutil=97; HS[0].dbdev_util=3;
+      vd_flush(vb,sizeof vb,&vc); int ok1 = vc!=VD_WARN && !strstr(vb,"bottleneck") && !strstr(vb,"\xeb\xb3\x91\xeb\xaa\xa9");
+      printf("  %s   host device 97%%, DB disk 3%%, writes 5MB/s: not a write bottleneck -> \"%s\"\n",ok1?"ok  ":"FAIL",vb); bad|=!ok1;
+      HS[0].dbdev_util=97;
+      vd_flush(vb,sizeof vb,&vc); int ok2 = vc==VD_WARN && (strstr(vb,"bottleneck")||strstr(vb,"\xeb\xb3\x91\xeb\xaa\xa9")) && strstr(vb,"97%");
+      printf("  %s   DB disk 97%%: write bottleneck -> \"%s\"\n",ok2?"ok  ":"FAIL",vb); bad|=!ok2;
+      HS[0].dbdev_util=-1;
+      vd_flush(vb,sizeof vb,&vc); int ok3 = vc!=VD_WARN && (strstr(vb,"DB disk -")||strstr(vb,"\xeb\xaf\xb8\xed\x99\x95\xec\x9d\xb8"));   /* "-" or 미확인 */
+      printf("  %s   DB disk unknown: no device judgement -> \"%s\"\n",ok3?"ok  ":"FAIL",vb); bad|=!ok3;
+      HS[0].pg_ok=0; HS[0].dbdev_util=3;
+      vd_flush(vb,sizeof vb,&vc); int ok4 = vc!=VD_WARN;
+      printf("  %s   buffer-pool state unavailable, host 97%%, DB disk 3%%: not a write bottleneck -> \"%s\"\n",ok4?"ok  ":"FAIL",vb); bad|=!ok4;
+      HN=0; }
     g_pagesize=16384;
     { char b[]="[S ] double_write_buffer_size=2M\n"; paramdump_apply(b); }
     int d1=dwb_pages();
