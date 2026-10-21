@@ -262,6 +262,17 @@ for sig in INT SEGV; do
     if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     one-shot cut by SIG$sig while paramdump hangs: $n0 waiting, $n1 after"
     else echo "  FAIL   one-shot cut by SIG$sig: $n0 waiting, $n1 after"; rc=1; fi
 done
+# Live, signalled during its first frame (interval 3s plus the forced method-A walk, before
+# the live handlers are installed): the request must not outlive it.  SIGTERM, because a
+# command started with & from a non-interactive shell inherits SIGINT ignored; the wait is
+# bounded so a binary that ignores the signal fails the check instead of hanging it.
+"$TB" -b --interval 3 >/dev/null 2>&1 & op=$!
+n0=$(waithang); kill -TERM $op
+for i in $(seq 30); do kill -0 $op 2>/dev/null || break; sleep 0.1; done
+kill -0 $op 2>/dev/null && { kill -9 $op 2>/dev/null; echo "  FAIL   live did not end on SIGTERM in its first frame"; rc=1; }
+wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
+if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     live cut by SIGTERM in its first frame while paramdump hangs: $n0 waiting, $n1 after"
+else echo "  FAIL   live cut by SIGTERM in its first frame: $n0 waiting, $n1 after"; rc=1; fi
 # The child closes its output, then hangs: EOF with the group still up is stopped at once
 PD_HANG=hang2 "$TB" -d >/dev/null 2>&1 & op=$!
 n0=$(waithang); wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep

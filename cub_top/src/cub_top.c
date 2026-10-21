@@ -1057,6 +1057,9 @@ static void paramdump_abort(FILE **pd){
     fclose(*pd); *pd=NULL; pd_forget_child(); pd_reap_zombies();
     if(g_pd_state==PD_RUNNING) g_pd_state=PD_NONE;
 }
+/* main's request, stopped by exit() on whichever return main takes */
+static FILE **g_pd_atexit=NULL;
+static void pd_atexit(void){ if(g_pd_atexit) paramdump_abort(g_pd_atexit); }
 /* Drain the pipe.  wait_ms 0 never blocks (live frames); one-shot passes the deadline so the
    values reach its single frame.  Returns 1 once the attempt has ended (*pd closed). */
 static int paramdump_poll(FILE **pd,int wait_ms){
@@ -8895,11 +8898,19 @@ int main(int argc,char **argv){
         RPR.f=rf;
     }
     const char *cub=getenv("CUBRID");
-    FILE *pd=NULL;
-    if(!live){ signal(SIGINT,on_term_kids); signal(SIGTERM,on_term_kids);   /* live installs its own */
-               signal(SIGHUP,on_term_kids); signal(SIGQUIT,on_term_kids);
-               signal(SIGABRT,on_term_kids); signal(SIGSEGV,on_term_kids);   /* a crash too */
-               signal(SIGBUS,on_term_kids); signal(SIGFPE,on_term_kids); }
+    /* static: the exit handler below reaches it after main has returned */
+    static FILE *pd=NULL;
+    /* Before the first paramdump: the child is in its own process group, out of reach of
+       the terminal's ^C, so a signal here must stop it first.  Every mode, live too - its
+       first frame (interval plus the forced method-A walk) runs before tui_enter installs
+       the live handlers, which then replace these. */
+    signal(SIGINT,on_term_kids); signal(SIGTERM,on_term_kids);
+    signal(SIGHUP,on_term_kids); signal(SIGQUIT,on_term_kids);
+    signal(SIGABRT,on_term_kids); signal(SIGSEGV,on_term_kids);   /* a crash too */
+    signal(SIGBUS,on_term_kids); signal(SIGFPE,on_term_kids);
+    /* Every way out of main - each return, the error paths included - passes exit(), so
+       one handler stops a request still waiting instead of an abort before each return */
+    g_pd_atexit=&pd; atexit(pd_atexit);
     if(P.pid<0){
         /* Server not running: fill in what is observable rather than stopping */
         memset(&CAP,0,sizeof CAP);
