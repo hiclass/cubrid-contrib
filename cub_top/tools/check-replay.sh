@@ -25,7 +25,8 @@
 #
 # Frames with the server down (conf.* from cubrid.conf in place of param.*) are recorded
 # inside a new PID namespace, where no cub_server is visible, so that case runs with or
-# without a server.
+# without a server.  The other checks need a recording: one made now when a server runs,
+# else examples/10-recording.jsonl (CI), where only the key-for-key round trips are skipped.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/cub_top"
@@ -79,23 +80,29 @@ if $NS true 2>/dev/null && command -v python3 >/dev/null; then
     else echo "  FAIL no server-down frame recorded in a PID namespace"; bad=1; fi
 else echo "  SKIP server-down frames (no PID namespace: unshare -p not permitted)"; fi
 
-# The rest needs a live server frame
-if ! "$BIN" -d 2>/dev/null | grep -q '^server.up=1'; then
-    echo "  SKIP live frames: cub_server not running"
-    [ $bad -eq 0 ] && { echo "-> PASS"; exit 0; } || { echo "-> FAIL"; exit 1; }
+# The rest works on a recording.  With a cub_server running it is recorded now by this build;
+# without one (CI) the checks that need only a recording file run on examples/10-recording.jsonl,
+# and only the key-for-key round trips - which need a recording this build made - are skipped.
+LIVE=1
+if "$BIN" -d 2>/dev/null | grep -q '^server.up=1'; then
+    # --record is live-only (-b/-p); a short live run records a few frames without a tty.
+    "$BIN" -b --record "$REC" >/dev/null 2>&1 &
+    p=$!; sleep 3; kill -TERM $p 2>/dev/null; wait $p 2>/dev/null
+    [ -s "$REC" ] || { echo "  FAIL no frames recorded"; echo "-> FAIL"; exit 1; }
+else
+    LIVE=0
+    [ -s "$ROOT/examples/10-recording.jsonl" ] || { echo "  SKIP recorded frames: no cub_server and no examples/10-recording.jsonl"
+        [ $bad -eq 0 ] && { echo "-> PASS"; exit 0; } || { echo "-> FAIL"; exit 1; }; }
+    cp "$ROOT/examples/10-recording.jsonl" "$REC"
+    echo "  note cub_server not running: the recording checks use examples/10-recording.jsonl"
 fi
-
-# --record is live-only (-b/-p); a short live run records a few frames without a tty.
-"$BIN" -b --record "$REC" >/dev/null 2>&1 &
-p=$!; sleep 3; kill -TERM $p 2>/dev/null; wait $p 2>/dev/null
-[ -s "$REC" ] || { echo "  FAIL no frames recorded"; echo "-> FAIL"; exit 1; }
 
 N=$(grep -c '^{' "$REC")
 echo "recorded $N frame(s)"
 
 # 1) every line is one self-contained JSON object
 if command -v python3 >/dev/null; then
-    python3 - "$REC" <<'PY' || bad=1
+    python3 - "$REC" "$LIVE" <<'PY' || bad=1
 import json,sys
 n=0
 for ln in open(sys.argv[1]):
@@ -111,7 +118,7 @@ print(f"  ok   {n} line(s) valid JSON")
 ms=[json.loads(l)['ts_epoch_ms'] for l in open(sys.argv[1]) if l.strip()]
 if any(b<=a for a,b in zip(ms,ms[1:])):
     print("  FAIL ts_epoch_ms not strictly increasing"); sys.exit(1)
-if len(ms)>2 and not any(b-a<1000 for a,b in zip(ms,ms[1:])):
+if sys.argv[2]=="1" and len(ms)>2 and not any(b-a<1000 for a,b in zip(ms,ms[1:])):   # recorded here at 0.5s
     print("  FAIL no sub-second frame gap recorded"); sys.exit(1)
 print(f"  ok   frame times in ms, gaps {[int(b-a) for a,b in zip(ms,ms[1:])][:6]}")
 PY
@@ -122,7 +129,9 @@ fi
 # 2) round trip: replay re-emits what was recorded.  --dump-json keeps quoted strings whole
 #    and numbers typed, so text keys (reasons, verdict) compare exactly.
 "$BIN" --replay "$REC" --dump-json >"$TMP/out" 2>/dev/null
-if [ ! -s "$TMP/out" ]; then
+if [ $LIVE = 0 ]; then
+    echo "  SKIP key-for-key round trip (needs a recording made by this build; the example may predate newer keys)"
+elif [ ! -s "$TMP/out" ]; then
     echo "  FAIL --replay --dump-json produced nothing"; bad=1
 else
     if command -v python3 >/dev/null; then
@@ -152,7 +161,7 @@ PY
 fi
 
 # 2a) a frame whose paramdump was skipped (the server is another account's) keeps the reason
-if command -v python3 >/dev/null; then
+if command -v python3 >/dev/null && [ $LIVE = 1 ]; then
     python3 - "$REC" "$TMP/skip.jsonl" <<'PY'
 import json,sys
 d=json.loads(open(sys.argv[1]).readline()); d['param.skipped_reason']='서버 설치 위치를 읽을 수 없음(다른 계정) — paramdump 생략'
@@ -284,7 +293,7 @@ s=open(sys.argv[1]).read(); open(sys.argv[2],"w").write(re.sub(r'"cap\.dev_util"
 PY
     d1=$("$BIN" --replay "$REC" -d 2>/dev/null | grep -o 'cap.dev_util=[0-9.-]*' | head -1)
     d0=$("$BIN" --replay "$TMP/nodev.jsonl" -d 2>/dev/null | grep -o 'cap.device="[^"]*"\|cap.device_reason="[^"]*"' | head -2 | tr '\n' ' ')
-    case "$d1" in cap.dev_util=-1*|"") echo "  FAIL replay with cap.dev_util: $d1"; bad=1 ;; *) ;; esac
+    [ $LIVE = 1 ] && case "$d1" in cap.dev_util=-1*|"") echo "  FAIL replay with cap.dev_util: $d1"; bad=1 ;; *) ;; esac
     case "$d0" in 'cap.device="" cap.device_reason="'*cap.dev_util*) echo "  ok   recording without cap.dev_util replays as DB disk unknown ($d0)" ;;
                   *) echo "  FAIL recording without cap.dev_util: $d0"; bad=1 ;; esac
 fi
