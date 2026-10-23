@@ -2272,6 +2272,24 @@ static int ver_match_comp(const char*a,const char*b){
     }
 }
 
+/* sym_lookup of the same .so with the same name set returns the same answer: the ladder
+   tries a dozen tables against two name sets, so the ELF is read twice, not per table */
+static int sym_lookup_memo(const char *so,const char **names,unsigned long *out,int n,unsigned long *osz){
+    static char m_so[512]; static long long m_mt=-3; static const char **m_nm[2]; static int m_ret[2], m_n[2];
+    static unsigned long m_out[2][S_NSYM], m_sz[2][S_NSYM];
+    struct stat st; long long mt = stat(so,&st)==0 ? (long long)st.st_mtime : -2;
+    if(n>S_NSYM) return sym_lookup(so,names,out,n,osz);
+    if(strcmp(m_so,so) || m_mt!=mt){ snprintf(m_so,sizeof m_so,"%s",so); m_mt=mt; m_nm[0]=m_nm[1]=NULL; }
+    for(int k=0;k<2;k++) if(m_nm[k]==names && m_n[k]==n){
+        memcpy(out,m_out[k],sizeof(unsigned long)*(size_t)n); if(osz) memcpy(osz,m_sz[k],sizeof(unsigned long)*(size_t)n);
+        return m_ret[k]; }
+    int k = m_nm[0]==NULL ? 0 : 1;
+    unsigned long so_[S_NSYM]={0};
+    int r=sym_lookup(so,names,out,n,so_);
+    if(osz) memcpy(osz,so_,sizeof(unsigned long)*(size_t)n);
+    m_nm[k]=names; m_n[k]=n; m_ret[k]=r; memcpy(m_out[k],out,sizeof(unsigned long)*(size_t)n); memcpy(m_sz[k],so_,sizeof(unsigned long)*(size_t)n);
+    return r;
+}
 /* Pick the embedded table whose version best matches, and parse it with the same
    parser files use.  Embedded tables make the binary self-contained: without them a
    copy of cub_top on another host falls back to DWARF extraction or probing on any
@@ -2569,7 +2587,7 @@ static void method_b(proc_t *P){
        internal names use tb_/tm_ so they cannot collide with the caller's argument. */
     #define TRY_BTAB(bt_,exact_) do{ const btab_t*tb_=(bt_); int tm_=(exact_); tried++; \
         memset(B.sym,0,sizeof B.sym); memset(B.ssz,0,sizeof B.ssz); \
-        if(sym_lookup(so,tb_->syms,B.sym,S_NSYM,B.ssz)<=0){ \
+        if(sym_lookup_memo(so,tb_->syms,B.sym,S_NSYM,B.ssz)<=0){ \
             snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] symbol lookup failed":"[%s] 심볼 조회 실패",tb_->tag); break; } \
         if(!B.sym[S_PGBUF]){ \
             snprintf(lastwhy,sizeof lastwhy,g_ascii?"[%s] no pgbuf_Pool symbol":"[%s] pgbuf_Pool 심볼 없음",tb_->tag); break; } \
@@ -2631,10 +2649,11 @@ static void method_b(proc_t *P){
        best *.tbl of an --offsets directory or of offsets/ beside the executable, or the
        embedded copy.  It is "exact" when its #meta version equals the detected one. */
     static btab_t fbt; int f_ready=0, f_exact=0;
+    static char odir[512]="";        /* The offsets directory in use, for step 3 */
     {
         static char resolved[512]=""; static int rst=0;   /* 0 unparsed, 1 file, 2 none, 3 embedded */
         static int r_explicit=0; static unsigned rgen=0;
-        if(rgen!=g_lib_gen){ rgen=g_lib_gen; rst=0; resolved[0]=0; }
+        if(rgen!=g_lib_gen){ rgen=g_lib_gen; rst=0; resolved[0]=0; odir[0]=0; }
         if(rst==0){
             char cand[512]=""; r_explicit=0;
             if(g_offs_file[0]) snprintf(cand,sizeof cand,"%s",g_offs_file);
@@ -2652,6 +2671,7 @@ static void method_b(proc_t *P){
             if(cand[0]){
                 struct stat ds;
                 if(!stat(cand,&ds)&&S_ISDIR(ds.st_mode)){
+                    snprintf(odir,sizeof odir,"%s",cand);
                     if(offs_dir_pick(cand,g_cver,resolved,sizeof resolved)) rst=1;
                     else if(g_offs_file[0])   /* No matching table in the given directory leaves a reason */
                         snprintf(lastwhy,sizeof lastwhy,g_ascii?"no table for %.20s in the --offsets directory"
@@ -2720,10 +2740,93 @@ static void method_b(proc_t *P){
             snprintf(lastwhy,sizeof lastwhy,"DWARF: %s",u8n(dwwhy,80));
     }
 
-    /* 3. Tables of another build, on recorded symbol sizes and paramdump */
-    for(int ti=0; ti<NBTABS && !B.ok; ti++)
-        if(!(g_cver[0] && !strcmp(g_cver,BTABS[ti].ver))) TRY_BTAB(&BTABS[ti],0);
-    if(!B.ok && f_ready && !f_exact) TRY_BOTH(&fbt,0);
+    /* 3. Every other table known - the builtin ones, every embedded copy and every *.tbl of
+       the offsets directory - not just the one whose version string matches best: the
+       nearest patch release is often one that records no sizes (and can never be adopted)
+       while another does.  Tables recording no sizes are left out; the rest are tried with
+       the most recorded sizes first, then the most keys, then the closest version, and the
+       size gate keeps only a table whose recorded sizes all match this .so.  An embedded
+       table of this very build that an offsets directory hid in 1b is tried here as exact. */
+    if(!B.ok){
+        #define OB_MAX 64
+        static btab_t obt[OB_MAX]; static char over[OB_MAX][32]; static int obn=0; static unsigned ogen=0; static int obuilt=0;
+        static int ord[OB_MAX+8], ordn=0, oexact[OB_MAX+8];       /* >=0: obt index, <0: -1-BTABS index */
+        static int nosz=0;
+        if(!obuilt || ogen!=g_lib_gen){
+            ogen=g_lib_gen; obuilt=1; obn=0; ordn=0; nosz=0;
+            int rk_sz[OB_MAX+8], rk_keys[OB_MAX+8], rk_ver[OB_MAX+8];
+            /* builtin tables first in the dedup set: they are complete */
+            for(int ti=0; ti<NBTABS && ordn<OB_MAX+8; ti++){
+                int ns=0; for(int i=0;i<S_NSYM;i++) ns+=BTABS[ti].ssz[i]>0;
+                int ex = g_cver[0] && !strcmp(g_cver,BTABS[ti].ver);
+                if(ex) continue;                                  /* tried in 1a */
+                if(!ns){ nosz++; continue; }
+                ord[ordn]=-1-ti; oexact[ordn]=0; rk_sz[ordn]=ns; rk_keys[ordn]=DW_N; rk_ver[ordn]=ver_match_comp(BTABS[ti].ver,g_cver); ordn++;
+            }
+            /* embedded copies, then the directory's files */
+            for(int src=0; src<2; src++){
+                DIR *d = (src==1 && odir[0]) ? opendir(odir) : NULL;
+                struct dirent *de=NULL; int ei=0;
+                for(;;){
+                    char v[32]=""; long fv[DW_N]; int fss[S_NSYM]; int got=0;
+                    if(src==0){ if(ei>=EMB_TBL_N) break;
+                                snprintf(v,sizeof v,"%s",EMB_TBL[ei].ver); got=offs_text_load(EMB_TBL[ei].text,fv,fss); ei++; }
+                    else { if(!d || !(de=readdir(d))) break;
+                           size_t l=strlen(de->d_name); if(l<5 || strcmp(de->d_name+l-4,".tbl")) continue;
+                           char pth[600]; snprintf(pth,sizeof pth,"%s/%s",odir,de->d_name);
+                           if(!offs_tbl_version(pth,v,sizeof v)) continue;
+                           got=offs_file_load(pth,fv,fss); }
+                    if(got<=0 || ver_match_comp(v,g_cver)<2) continue;   /* below major.minor: no basis */
+                    int dup=0;
+                    for(int k=0;k<ordn && !dup;k++){ const char*kv = ord[k]<0 ? BTABS[-1-ord[k]].ver : over[ord[k]]; dup=!strcmp(kv,v); }
+                    if(dup) continue;
+                    if(g_cver[0] && !strcmp(v,g_cver) && f_ready && f_exact) continue;   /* the exact one, tried in 1b */
+                    int ns=0; for(int i=0;i<S_NSYM;i++) ns+=fss[i]>0;
+                    if(!ns){ nosz++; continue; }
+                    if(obn>=OB_MAX || ordn>=OB_MAX+8) break;
+                    btab_t *b=&obt[obn]; memset(b,0,sizeof *b);
+                    snprintf(over[obn],sizeof over[obn],"%s",v);
+                    /* an embedded copy of this very build keeps its usual tag */
+                    b->tag=(src==0 && g_cver[0] && !strcmp(v,g_cver)) ? "offsets-embedded" : "offsets-other"; b->ver=over[obn]; b->syms=SYMN;
+                    b->off_pgbuf_nbuf =(int)fv[DW_PGBUF];
+                    b->off_xc_entries =(int)fv[DW_XC_ENT];  b->off_xc_usage=(int)fv[DW_XC_USE];
+                    b->off_xc_clone   =(int)fv[DW_XC_CLN];
+                    b->off_qlist_npages=(int)fv[DW_QLIST];  b->off_qpool_nent=(int)fv[DW_QPOOL];
+                    b->off_lf_alloccnt=(int)fv[DW_LF];
+                    b->sz_lk_tran =(int)fv[DW_SZ_LK];   b->sz_session=(int)fv[DW_SZ_SESS];
+                    b->sz_catalog =(int)fv[DW_SZ_CAT];  b->sz_fpcache=(int)fv[DW_SZ_FP];
+                    b->sz_conn    =(int)fv[DW_SZ_CONN]; b->sz_vacuum =(int)fv[DW_SZ_VAC];
+                    b->off_lk_ntran=(int)fv[DW_LK_NTRAN];
+                    pg_from_dw(b,fv); ps_from_dw(b,fv); ag_from_dw(b,fv); hx_from_dw(b,fv);
+                    memcpy(b->ssz,fss,sizeof b->ssz);
+                    ord[ordn]=obn; oexact[ordn]= g_cver[0] && !strcmp(v,g_cver);
+                    rk_sz[ordn]=ns; rk_keys[ordn]=got; rk_ver[ordn]=ver_match_comp(v,g_cver); ordn++; obn++;
+                }
+                if(d) closedir(d);
+            }
+            /* exact first, then most sizes, most keys, closest version (insertion sort, small n) */
+            for(int a=1;a<ordn;a++)
+                for(int b2=a; b2>0; b2--){
+                    int x=b2-1, y=b2;
+                    int better = oexact[y]!=oexact[x] ? oexact[y]>oexact[x]
+                               : rk_sz[y]!=rk_sz[x] ? rk_sz[y]>rk_sz[x]
+                               : rk_keys[y]!=rk_keys[x] ? rk_keys[y]>rk_keys[x]
+                               : rk_ver[y]>rk_ver[x];
+                    if(!better) break;
+                    int t; t=ord[x]; ord[x]=ord[y]; ord[y]=t; t=oexact[x]; oexact[x]=oexact[y]; oexact[y]=t;
+                    t=rk_sz[x]; rk_sz[x]=rk_sz[y]; rk_sz[y]=t; t=rk_keys[x]; rk_keys[x]=rk_keys[y]; rk_keys[y]=t;
+                    t=rk_ver[x]; rk_ver[x]=rk_ver[y]; rk_ver[y]=t;
+                }
+        }
+        for(int k=0;k<ordn && !B.ok;k++){
+            if(ord[k]<0) TRY_BTAB(&BTABS[-1-ord[k]],oexact[k]);
+            else TRY_BOTH(&obt[ord[k]],oexact[k]);
+        }
+        if(!B.ok && !ordn && nosz)
+            snprintf(lastwhy,sizeof lastwhy,g_ascii?"%d table(s) of other builds record no symbol sizes - none adoptable"
+                                                   :"다른 빌드의 표 %d개는 심볼 크기 기록이 없어 채택 불가",nosz);
+        #undef OB_MAX
+    }
 
     /* Anchor probing - last resort when both the table and DWARF are unavailable
        on a stripped build of another version. */
@@ -6973,6 +7076,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
            tq(g_cver[0]?g_cver:"unknown"),
            tq(!B.ok?"-":(g_replaying&&g_rp_tbl[0])?g_rp_tbl:(B.partial?"probe-runtime":g_bt->tag)),
            tq(g_so_path[0]?g_so_path:"-"));   /* A map_files path means the running inode was read */
+    /* Whose build the adopted table was taken from: an offsets-other table is another release */
+    if(B.ok && !B.partial && !g_replaying) printf("heapB.table_version=\"%s\"\n",tq(g_bt->ver?g_bt->ver:"-"));
     printf("server.up=%d\n",P->pid<0?0:1);
     /* All instances.  The detailed keys (server, region) cover only the current one, so the
        other databases' totals are available nowhere else.  Keys are namespaced by db. */
