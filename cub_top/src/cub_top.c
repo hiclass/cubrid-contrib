@@ -944,7 +944,12 @@ static int g_pd_state=PD_NONE;
 static int g_pd_async=0;           /* Live: harvest without blocking; one-shot waits up to the deadline */
 static double g_pd_deadline=0;
 static char g_pd_buf[65536]; static size_t g_pd_used=0;
-static pid_t g_pd_zombie[8]; static int g_pd_nz=0;   /* Killed children not yet reaped */
+/* Killed children not yet reaped.  A child that gets SIGKILL is not gone at once: it must
+   be scheduled to die, and one blocked in uninterruptible sleep (a disk or NFS wait) only
+   dies when that wait ends.  Waiting for it with a blocking waitpid would freeze the live
+   frame for as long, so after a short bounded wait the pid is kept here and reaped with
+   WNOHANG on every frame and idle tick until it has gone. */
+static pid_t g_pd_zombie[64]; static int g_pd_nz=0;
 static void paramdump_apply(char *buf);
 static void pd_reap_zombies(void){
     int m=0;
@@ -958,7 +963,10 @@ static void pd_forget_child(void){
     if(g_pd_pid<0) return;
     int st; pid_t r=waitpid(g_pd_pid,&st,WNOHANG);
     if(r==0){ kill(-g_pd_pid,SIGKILL);
-              if(g_pd_nz<(int)(sizeof g_pd_zombie/sizeof g_pd_zombie[0])) g_pd_zombie[g_pd_nz++]=g_pd_pid; }
+              /* A killed child normally dies within a millisecond or two: wait up to 20ms so
+                 no zombie is left at all, without letting a stuck one hold the frame */
+              for(int i=0;i<20 && r==0;i++){ usleep(1000); r=waitpid(g_pd_pid,&st,WNOHANG); }
+              if(r==0 && g_pd_nz<(int)(sizeof g_pd_zombie/sizeof g_pd_zombie[0])) g_pd_zombie[g_pd_nz++]=g_pd_pid; }
     g_pd_pid=-1;
 }
 /* A child right after fork(): the parent's children are not its to stop, nor its terminal
@@ -1104,7 +1112,7 @@ static int paramdump_poll(FILE **pd,int wait_ms){
 /* Live loops that draw no frame (pause, help) still drain the request each tick, so the
    deadline is kept from one place and an answer is applied as soon as it comes */
 static FILE **g_pd_idle=NULL;
-static void pd_idle_tick(void){ if(g_pd_idle && *g_pd_idle) paramdump_poll(g_pd_idle,0); }
+static void pd_idle_tick(void){ pd_reap_zombies(); if(g_pd_idle && *g_pd_idle) paramdump_poll(g_pd_idle,0); }
 static void paramdump_apply(char *buf){
     long long dbp=-1;
     g_pd_applied = strchr(buf,'=')!=NULL;
@@ -8020,6 +8028,7 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
       last_pid=P->pid; g_blk_baseline_slot=&last_blk; }
     double t0=now_ms();
     usleep((useconds_t)(interval*1000000));
+    pd_reap_zombies();                  /* every frame, whether or not a request is open */
     if(*pd) paramdump_poll(pd,g_pd_async?0:PD_WAIT_MS);
     if(P->pid>=0){ parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P); }
     dstat_t d1[MAXDISK]; int nd1=parse_diskstats(d1,MAXDISK);

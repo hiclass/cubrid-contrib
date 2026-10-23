@@ -214,6 +214,15 @@ import os,sys,pty,time,select,signal,fcntl,termios,struct,subprocess
 binp,mark,mode=sys.argv[1:4]
 def kids():
     return [int(x) for x in subprocess.run(["pgrep","-f","--",mark+"/hang"],capture_output=True,text=True).stdout.split()]
+def zombies(parent):                      # children of cub_top left unreaped (state Z)
+    n=0
+    for d in os.listdir("/proc"):
+        if not d.isdigit(): continue
+        try: st=open("/proc/%s/stat"%d).read()
+        except OSError: continue
+        f=st[st.rfind(")")+2:].split()
+        if f[0]=="Z" and int(f[1])==parent: n+=1
+    return n
 def pump(fd,sec):
     end=time.time()+sec
     while time.time()<end:
@@ -224,14 +233,16 @@ def pump(fd,sec):
 pid,fd=pty.fork()
 if pid==0:
     os.environ["TERM"]="xterm"; os.execv(binp,[binp,"-b","--interval","0.3"])
-k0=k1=k2=[]
+k0=k1=k2=[]; z1=-1
 try:
     fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',50,160,0,0))
     pump(fd,1.5); k0=kids()
     if mode=="pause":
-        os.write(fd,b' '); pump(fd,13); k1=kids()
+        os.write(fd,b' '); pump(fd,13); k1=kids(); z1=zombies(pid)
     elif mode=="help":
-        os.write(fd,b'h'); pump(fd,13); k1=kids(); os.write(fd,b'q'); pump(fd,0.5)   # q closes the help
+        os.write(fd,b'h'); pump(fd,13); k1=kids(); z1=zombies(pid); os.write(fd,b'q'); pump(fd,0.5)   # q closes the help
+    elif mode=="run":
+        pump(fd,13); k1=kids(); z1=zombies(pid)   # frames go on with no request open after the kill
     os.write(fd,b'q'); pump(fd,1.5)
     try: os.waitpid(pid,0)
     except ChildProcessError: pass
@@ -242,9 +253,10 @@ finally:                                  # whatever happened above, nothing is 
     for p in set(k0+k1+k2+kids()):
         try: os.killpg(os.getpgid(p),signal.SIGKILL)
         except OSError: pass
-ok = len(k0)>=1 and len(k1)==0 and len(k2)==0
-if mode=="pause":  print("  %s   live, paused 13 s while paramdump hangs: %d waiting, %d after the deadline, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),len(k2)))
-elif mode=="help": print("  %s   live, help open 13 s while paramdump hangs: %d waiting, %d after the deadline, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),len(k2)))
+ok = len(k0)>=1 and len(k1)==0 and len(k2)==0 and z1<=0
+if mode=="pause":  print("  %s   live, paused 13 s while paramdump hangs: %d waiting, %d after the deadline (zombies %d), %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),z1,len(k2)))
+elif mode=="help": print("  %s   live, help open 13 s while paramdump hangs: %d waiting, %d after the deadline (zombies %d), %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k1),z1,len(k2)))
+elif mode=="run":  print("  %s   live, running 13 s while paramdump hangs: %d waiting, %d after the deadline, zombies %d (want 0 - killed and reaped)"%("ok  " if ok else "FAIL",len(k0),len(k1),z1))
 else:              print("  %s   live, quit while paramdump hangs: %d waiting, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k2)))
 sys.exit(0 if ok else 1)
 PY2
@@ -253,6 +265,7 @@ sleep 0.3
 live(){ timeout "$1" python3 $LT/live.py "$TB" "$LT" "$2" || { echo "  FAIL   live scenario $2 did not finish cleanly"; rc=1; }; sweep; }
 live 40 pause
 live 40 help
+live 40 run
 live 20 quit
 # One-shot cut by a signal: INT (the default action is kept), and a crash (SIGSEGV)
 for sig in INT SEGV; do
