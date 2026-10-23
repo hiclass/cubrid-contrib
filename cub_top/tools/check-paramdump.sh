@@ -189,7 +189,11 @@ kill $s1 $s2 $s3 $s4 2>/dev/null; wait $s1 $s2 $s3 $s4 2>/dev/null
 # nothing it started outlives the run - quit while it waits, a one-shot run interrupted by
 # SIGINT or crashing (SIGSEGV), a child that closed its output and then hung.  The
 # stand-in's cubrid execs a named script so its processes can be found and counted.
+# Every run names the stand-in's database: unnamed, cub_top would take the first instance
+# alphabetically, which on a host with real servers is not the stand-in (and the tree, -t,
+# walks them all) - a real DBA paramdump login to a real database.
 LT=$TMP/live; LR=$LT/root; mkdir -p $LR/lib $LR/bin
+DB=cubtop_pd_$$
 head -c 8192 /dev/zero > $LR/lib/libcubrid.so.11.5
 printf '#!/bin/sh\nexec %s/${PD_HANG:-hang}\n' "$LT" > $LR/bin/cubrid; printf '#!/bin/sh\nsleep 60\n' > $LT/hang
 printf '#!/bin/sh\nexec >/dev/null 2>&1\nsleep 60\n' > $LT/hang2; chmod +x $LR/bin/cubrid $LT/hang $LT/hang2
@@ -197,21 +201,21 @@ printf '#!/bin/sh\nexec >/dev/null 2>&1\nsleep 60\n' > $LT/hang2; chmod +x $LR/b
 # nothing is ever matched by a path another monitor or a parallel test could share.
 TB=$LT/cub_top; /bin/cp -f "$ROOT/cub_top" "$TB" || { echo "→ FAIL (cannot copy the binary)"; exit 1; }
 # Whatever a scenario left (its own cleanup not reached: timeout, exception): the hang
-# groups and the pty cub_top - found only by this run's private paths
+# groups, found by this run's private path, and the cub_top live.py forked, by its pid
 sweep(){ for p in $(pgrep -f -- "$LT/hang"); do kill -9 -- -$(ps -o pgid= -p $p | tr -d ' ') 2>/dev/null; done
-         for p in $(pgrep -f -- "^$TB "); do kill -9 $p 2>/dev/null; done; }
+         [ -s $LT/live.pid ] && kill -9 $(cat $LT/live.pid) 2>/dev/null; rm -f $LT/live.pid; }
 hangs(){ pgrep -f -- "$LT/hang" | wc -l; }
 waithang(){ n=0; for i in $(seq 40); do n=$(hangs); [ "$n" -ge 1 ] && break; sleep 0.1; done; echo $n; }   # a loaded host starts slowly
 cat > $LT/srv.c <<'C'
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-int main(int c,char**v){ int fd=open(v[1],O_RDONLY); void*p=mmap(0,8192,PROT_READ,MAP_PRIVATE,fd,0); (void)p; for(;;) pause(); }
+int main(int c,char**v){ int fd=open(v[2],O_RDONLY); void*p=mmap(0,8192,PROT_READ,MAP_PRIVATE,fd,0); (void)p; for(;;) pause(); }   /* cub_server <db> <lib> */
 C
 gcc -O1 -o $LT/cub_server $LT/srv.c
 cat > $LT/live.py <<'PY2'
 import os,sys,pty,time,select,signal,fcntl,termios,struct,subprocess
-binp,mark,mode=sys.argv[1:4]
+binp,mark,mode,db=sys.argv[1:5]
 def kids():
     return [int(x) for x in subprocess.run(["pgrep","-f","--",mark+"/hang"],capture_output=True,text=True).stdout.split()]
 def zombies(parent):                      # children of cub_top left unreaped (state Z)
@@ -232,7 +236,8 @@ def pump(fd,sec):
             except OSError: return
 pid,fd=pty.fork()
 if pid==0:
-    os.environ["TERM"]="xterm"; os.execv(binp,[binp,"-b","--interval","0.3"])
+    os.environ["TERM"]="xterm"; os.execv(binp,[binp,"-b","--interval","0.3",db])
+open(mark+"/live.pid","w").write(str(pid))   # for the sweep: only the process forked here
 k0=k1=k2=[]; z1=-1
 try:
     fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',50,160,0,0))
@@ -260,16 +265,16 @@ elif mode=="run":  print("  %s   live, running 13 s while paramdump hangs: %d wa
 else:              print("  %s   live, quit while paramdump hangs: %d waiting, %d after quit"%("ok  " if ok else "FAIL",len(k0),len(k2)))
 sys.exit(0 if ok else 1)
 PY2
-env CUBRID=$LR CUBRID_DATABASES=$LT $LT/cub_server $LR/lib/libcubrid.so.11.5 & ls_=$!
+env CUBRID=$LR CUBRID_DATABASES=$LT $LT/cub_server $DB $LR/lib/libcubrid.so.11.5 & ls_=$!
 sleep 0.3
-live(){ timeout "$1" python3 $LT/live.py "$TB" "$LT" "$2" || { echo "  FAIL   live scenario $2 did not finish cleanly"; rc=1; }; sweep; }
+live(){ timeout "$1" python3 $LT/live.py "$TB" "$LT" "$2" "$DB" || { echo "  FAIL   live scenario $2 did not finish cleanly"; rc=1; }; sweep; }
 live 40 pause
 live 40 help
 live 40 run
 live 20 quit
 # One-shot cut by a signal: INT (the default action is kept), and a crash (SIGSEGV)
 for sig in INT SEGV; do
-    (ulimit -c 0; exec "$TB" -d >/dev/null 2>&1) & op=$!
+    (ulimit -c 0; exec "$TB" -d $DB >/dev/null 2>&1) & op=$!
     n0=$(waithang); kill -$sig $op; wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
     if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     one-shot cut by SIG$sig while paramdump hangs: $n0 waiting, $n1 after"
     else echo "  FAIL   one-shot cut by SIG$sig: $n0 waiting, $n1 after"; rc=1; fi
@@ -278,7 +283,7 @@ done
 # the live handlers are installed): the request must not outlive it.  SIGTERM, because a
 # command started with & from a non-interactive shell inherits SIGINT ignored; the wait is
 # bounded so a binary that ignores the signal fails the check instead of hanging it.
-"$TB" -b --interval 3 >/dev/null 2>&1 & op=$!
+"$TB" -b --interval 3 $DB >/dev/null 2>&1 & op=$!
 n0=$(waithang); kill -TERM $op
 for i in $(seq 30); do kill -0 $op 2>/dev/null || break; sleep 0.1; done
 kill -0 $op 2>/dev/null && { kill -9 $op 2>/dev/null; echo "  FAIL   live did not end on SIGTERM in its first frame"; rc=1; }
@@ -286,7 +291,7 @@ wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
 if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     live cut by SIGTERM in its first frame while paramdump hangs: $n0 waiting, $n1 after"
 else echo "  FAIL   live cut by SIGTERM in its first frame: $n0 waiting, $n1 after"; rc=1; fi
 # The child closes its output, then hangs: EOF with the group still up is stopped at once
-PD_HANG=hang2 "$TB" -d >/dev/null 2>&1 & op=$!
+PD_HANG=hang2 "$TB" -d $DB >/dev/null 2>&1 & op=$!
 n0=$(waithang); wait $op 2>/dev/null; sleep 0.3; n1=$(hangs); sweep
 if [ "$n0" -ge 1 ] && [ "$n1" = 0 ]; then echo "  ok     paramdump closed its output and hung: $n0 while the run waited, $n1 after"
 else echo "  FAIL   paramdump closed its output and hung: $n0 while the run waited, $n1 after"; rc=1; fi
