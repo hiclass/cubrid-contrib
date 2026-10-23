@@ -7377,6 +7377,9 @@ static const char *tq(const char *s){
         unsigned c=*u; int len = c<0x80?1 : (c&0xE0)==0xC0?2 : (c&0xF0)==0xE0?3 : (c&0xF8)==0xF0?4 : 0;
         int ok = len>0 && !(len==2 && c<0xC2) && !(len==4 && c>0xF4);
         for(int i=1;ok && i<len;i++) if((u[i]&0xC0)!=0x80) ok=0;
+        /* Overlong forms, UTF-16 surrogates (CESU-8) and code points past U+10FFFF */
+        if(ok && ((c==0xE0 && u[1]<0xA0) || (c==0xED && u[1]>=0xA0) ||
+                  (c==0xF0 && u[1]<0x90) || (c==0xF4 && u[1]>=0x90))) ok=0;
         if(!ok){ o[n++]='?'; u++; continue; }
         if(len>1){ memcpy(o+n,u,(size_t)len); n+=(size_t)len; u+=len; continue; }
         if(c=='"'||c=='\\'){ o[n++]='\\'; o[n++]=(char)c; }
@@ -7444,6 +7447,20 @@ static void json_line_from_terse(FILE*,FILE*);
 typedef struct { char *buf; size_t cap; FILE *f; int n; } rp_rec_t;
 static rp_rec_t RPR={0,0,NULL,0};
 
+/* The four hex digits of a JSON "\u" escape */
+static int hex4(const char *h,unsigned *cp){
+    unsigned v=0;
+    for(int k=0;k<4;k++){ int c=(unsigned char)h[k]; if(!isxdigit(c)) return 0;
+                          v=v*16+(unsigned)(isdigit(c)?c-'0':tolower(c)-'a'+10); }
+    *cp=v; return 1;
+}
+/* One code point (not a surrogate, at most U+10FFFF) as UTF-8; the byte count */
+static int u8enc(unsigned cp,char *e){
+    if(cp<0x80){ e[0]=(char)cp; return 1; }
+    if(cp<0x800){ e[0]=(char)(0xC0|cp>>6); e[1]=(char)(0x80|(cp&63)); return 2; }
+    if(cp<0x10000){ e[0]=(char)(0xE0|cp>>12); e[1]=(char)(0x80|((cp>>6)&63)); e[2]=(char)(0x80|(cp&63)); return 3; }
+    e[0]=(char)(0xF0|cp>>18); e[1]=(char)(0x80|((cp>>12)&63)); e[2]=(char)(0x80|((cp>>6)&63)); e[3]=(char)(0x80|(cp&63)); return 4;
+}
 /* Look up one key in a recorded frame (a JSON object on one line). */
 static int rp_find(const char *txt,const char *key,char *out,size_t on){
     /* A recorded frame is one JSON object: "key": value.  The key is matched with its
@@ -7473,14 +7490,17 @@ static int rp_find(const char *txt,const char *key,char *out,size_t on){
             case 'r': out[n++]='\r'; v++; break;
             case 'b': out[n++]='\b'; v++; break;
             case 'f': out[n++]='\f'; v++; break;
-            case 'u': { unsigned cp=0; int k=1;
-                        for(;k<=4 && isxdigit((unsigned char)v[k]);k++)
-                            cp=cp*16+(unsigned)(isdigit((unsigned char)v[k])?v[k]-'0':(tolower((unsigned char)v[k])-'a'+10));
-                        if(k<=4){ out[n++]='?'; v++; break; }
-                        if(cp<0x80) out[n++]=(char)cp;
-                        else if(cp<0x800){ out[n++]=(char)(0xC0|cp>>6); out[n++]=(char)(0x80|(cp&63)); }
-                        else { out[n++]=(char)(0xE0|cp>>12); out[n++]=(char)(0x80|((cp>>6)&63)); out[n++]=(char)(0x80|(cp&63)); }
-                        v+=5; break; }
+            case 'u': { unsigned cp, lo;
+                        if(!hex4(v+1,&cp)){ out[n++]='?'; v++; break; }
+                        v+=5;
+                        /* A surrogate pair is one character (4 bytes); a lone surrogate, or NUL,
+                           has no UTF-8 form here and becomes '?' */
+                        if(cp>=0xD800 && cp<=0xDBFF && v[0]=='\\' && v[1]=='u' && hex4(v+2,&lo) && lo>=0xDC00 && lo<=0xDFFF){
+                            cp=0x10000+((cp-0xD800)<<10)+(lo-0xDC00); v+=6; }
+                        else if((cp>=0xD800 && cp<=0xDFFF) || cp==0) cp='?';
+                        char e[4]; int el=u8enc(cp,e);
+                        if(n+(size_t)el>=on){ out[n]=0; return 1; }
+                        memcpy(out+n,e,(size_t)el); n+=(size_t)el; break; }
             default:  out[n++]=*v++; break;      /* \" \\ \/ */
             }
         }

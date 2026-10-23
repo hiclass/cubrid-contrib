@@ -17,6 +17,10 @@
 # -d, --json and --record stay valid and round-trip.  A Korean reason cut by a fixed buffer
 # must not leave half a character (invalid UTF-8 in JSON); a value holding " \ or a tab
 # (a library path) must come back from a recording as it went in, not split into fake keys.
+# Valid UTF-8 means the strict form: no overlong sequence, no UTF-16 surrogate (CESU-8) and
+# nothing past U+10FFFF, from tq() and from a recording's \uXXXX escapes alike - a pair is
+# one 4-byte character, a lone surrogate '?' (a record rewritten by Python's json.dumps
+# with ensure_ascii writes an emoji as such a pair).
 # A bare token is a JSON number only by JSON's grammar: a database named 0123, 0x1f or 2024
 # stays a string (CUBRID allows names starting with a digit).
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
@@ -55,6 +59,32 @@ int main(void){
       int all=1; for(unsigned i=0;i<sizeof jn/sizeof jn[0];i++) if(json_number(jn[i].t,strlen(jn[i].t))!=jn[i].num){
           all=0; printf("        json_number(\"%s\") != %d\n",jn[i].t,jn[i].num); }
       printf("  %s   JSON number grammar: 0 -12 3.5 1e9 numbers; 0123 0x1f +5 inf nan 1. .5 not\n",all?"ok  ":"FAIL"); bad|=!all; }
+    { static const struct { const char *in,*want; } T[]={
+          {"\xF0\x9F\x98\x80","\xF0\x9F\x98\x80"},      /* U+1F600 kept */
+          {"\xED\x9F\xBF","\xED\x9F\xBF"},                /* U+D7FF, the last before the surrogates */
+          {"\xEE\x80\x80","\xEE\x80\x80"},                /* U+E000 */
+          {"\xF4\x8F\xBF\xBF","\xF4\x8F\xBF\xBF"},      /* U+10FFFF */
+          {"\xED\xA0\xBD","???"},                         /* a surrogate (CESU-8) */
+          {"\xE0\x80\xAF","???"},                         /* overlong '/' */
+          {"\xF0\x80\x80\xAF","????"},                   /* overlong '/' in 4 */
+          {"\xF4\x90\x80\x80","????"},                   /* past U+10FFFF */
+          {"\xC0\xAF","??"} };                            /* overlong in 2 (already refused) */
+      int all=1; for(unsigned i=0;i<sizeof T/sizeof T[0];i++) if(strcmp(tq(T[i].in),T[i].want)){ all=0; printf("        tq case %u gave \"%s\"\n",i,tq(T[i].in)); }
+      printf("  %s   tq keeps U+1F600 U+D7FF U+E000 U+10FFFF; surrogates, overlong forms, > U+10FFFF become '?'\n",all?"ok  ":"FAIL"); bad|=!all; }
+    { static const struct { const char *json,*want; } U[]={
+          {"{\"k\": \"a\\ud83d\\ude00b\"}","a\xF0\x9F\x98\x80" "b"},   /* a pair: one 4-byte character */
+          {"{\"k\": \"a\\ud83d b\"}","a? b"},                          /* a lone high surrogate */
+          {"{\"k\": \"a\\ude00b\"}","a?b"},                            /* a lone low one */
+          {"{\"k\": \"\\ude00\\ud83d\"}","??"},                      /* the pair reversed */
+          {"{\"k\": \"\\ud83d\\u0041\"}","?A"},                      /* high then not a low */
+          {"{\"k\": \"x\\u0000y\"}","x?y"},                            /* NUL would cut the value */
+          {"{\"k\": \"\\uac00\\u00e9\"}","\xEA\xB0\x80\xC3\xA9"} };  /* 3- and 2-byte */
+      int all=1; char b[64];
+      for(unsigned i=0;i<sizeof U/sizeof U[0];i++){ b[0]=0; rp_find(U[i].json,"k",b,sizeof b);
+          if(strcmp(b,U[i].want)){ all=0; printf("        \\u case %u gave \"%s\"\n",i,b); } }
+      { char sm[5]; rp_find("{\"k\": \"ab\\ud83d\\ude00\"}","k",sm,sizeof sm);   /* 4 bytes of room: the emoji does not fit */
+        if(strcmp(sm,"ab")){ all=0; printf("        short buffer gave \"%s\"\n",sm); } }
+      printf("  %s   \\u escapes: a surrogate pair is one 4-byte character, a lone surrogate or NUL is '?', never cut\n",all?"ok  ":"FAIL"); bad|=!all; }
     printf("%s",line);
     return bad;
 }
@@ -100,4 +130,22 @@ assert d["heapB.reason"]=='사유 "인용" \\ 끝', d["heapB.reason"]
 PY
     [ $? = 0 ] || rc=1
 else echo "  SKIP   replay round trip (no example recording)"; fi
+# End to end: a recording rewritten by json.dumps with ensure_ascii (an emoji becomes a
+# surrogate pair, a lone surrogate stays one), replayed to --dump-json and read back strictly
+if [ -s "$ROOT/examples/10-recording.jsonl" ]; then
+    python3 - "$ROOT/examples/10-recording.jsonl" "$TMP/a.jsonl" <<'PY'
+import json,sys
+d=json.loads(open(sys.argv[1]).readline())
+d["heapB.reason"]="이모지 \U0001F600 끝"; d["heapB.lib"]="lone \ud83d end"
+open(sys.argv[2],"w").write(json.dumps(d)+"\n")
+PY
+    "$BIN" --replay "$TMP/a.jsonl" --dump-json --replay-speed 0 > "$TMP/a.out" 2>/dev/null
+    python3 - "$TMP/a.out" <<'PY' && echo "  ok     ensure_ascii recording with an emoji and a lone surrogate: --dump-json is strict UTF-8, emoji intact" || { echo "  FAIL   ensure_ascii recording: --dump-json not strict UTF-8 or emoji lost"; exit 1; }
+import json,sys
+d=json.loads(open(sys.argv[1],"rb").read().decode("utf-8").splitlines()[0])
+assert d["heapB.reason"]=="이모지 \U0001F600 끝", d["heapB.reason"]
+assert d["heapB.lib"]=="lone ? end", d["heapB.lib"]
+PY
+    [ $? = 0 ] || rc=1
+fi
 if [ $rc = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi
