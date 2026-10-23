@@ -112,7 +112,7 @@ else
     echo "  note cub_server not running: the recording checks use examples/10-recording.jsonl"
     # This build must still accept the example, or every check below fails for the wrong reason
     want=$(grep -c '^{' "$REC"); got=$("$BIN" --replay "$REC" --dump-json --replay-speed 0 2>/dev/null | grep -c '^{')
-    [ "$got" = "$want" ] || { echo "  FAIL this build replays $got of the example's $want frame(s): re-record examples/10-recording.jsonl with this build"; finish; }
+    [ "$got" = "$want" ] || { echo "  FAIL this build replays $got of the example's $want frame(s): re-record examples/10-recording.jsonl with this build"; bad=1; finish; }
 fi
 
 N=$(grep -c '^{' "$REC")
