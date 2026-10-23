@@ -243,6 +243,7 @@ cub_volmap 페이지 박스의 `buf:DIRTY unflushed / flushed` 는 마지막 두
 | `cap.buffer_hit_pct` | perfmon: `1 − ioreads/fetches`. turnover: `100 − 회전율` (성격이 다르므로 출처를 반드시 함께 읽는다) |
 | `cap.turnover_pct` | 관측창에 **새로 들어온** 페이지 ÷ 상주 = 버퍼 교체율 |
 | `cap.miss_pages_per_s` | 초당 적재 페이지 = 미스 |
+| `server.smaps_age_s` / `server.smaps_ms` | 영역별 상주·PSS 를 마지막으로 읽은 뒤 지난 초 / 그 읽기에 걸린 ms. smaps 는 소요 시간의 100배 주기로만 읽는다(limitations 침습도 표) |
 | `cap.miss_source` | `scan`(BCB 스냅샷의 페이지 집합 차) / `perfmon`(스캔 안 한 대형 버퍼: 엔진 ioread 카운터 초당 델타, watcher 가 있고 창 안에 fetch 가 있을 때만) |
 | `cap.readmit_pct` | 적재분 중 **최근 nbuf건의 내보내기 안에서 빠졌다 다시 들어온** 비율((volid, pageid) 정확 집합으로 비교). 정확한 LRU 에서 이 페이지들은 버퍼가 2배였다면 상주했을 것이므로 **2배 증설로 줄어드는 읽기의 추정치(LRU 가정)** 다 — 하한이 아니다(중간점 삽입·프레임 안 적재·앨리어싱은 views.md 3번 패널 절). 30% 이상 = 작업집합 > 버퍼(증설 근거). 낮은 값은 재사용 거리가 버퍼 밖이라는 뜻이며, 스캔인지 버퍼의 수 배인 작업집합인지는 가르지 않는다 |
 | `cap.admit_frac_of_buffer` | 이 프레임의 적재 페이지 수 ÷ nbuf. **0.5 이상이면** 프레임 안에서 적재되고 내보내진 페이지를 스냅샷이 못 봐 재적재율이 부정확하고 적재율은 집합 차라 `nbuf/간격` 에서 포화된다 — 판정문이 '신뢰도 낮음' 으로 바뀐다 |

@@ -317,6 +317,9 @@ typedef struct {
     /* Whole-process totals summed from this frame's smaps, every region included (even past
        MAXREG): the same figures smaps_rollup gives, without reading it again */
     int smaps_ok; unsigned long s_rss_kb,s_pss_kb,s_swap_kb;
+    /* smaps is read on a period set by its own cost (see proc_read_mem); between reads the
+       regions are kept and the totals come from status */
+    double smaps_at_ms, smaps_ms, smaps_age_s; int smaps_pid; unsigned long maps_sig;
     unsigned long minflt,majflt,blkio_ticks;
     unsigned long utime,stime;     /* Cumulative CPU in clock ticks; utilization comes from the delta */
     int nthreads;
@@ -402,6 +405,7 @@ static int proc_name(const char *pid,char *out,size_t on){
     if(read_file(p,b,sizeof b)<=0) return 0;
     char *l=strchr(b,'('), *r=strrchr(b,')');
     if(!l || !r || r<l) return 0;
+    if(r[1]==' ' && (r[2]=='Z' || r[2]=='X')) return 0;   /* a zombie or dead process is not running */
     size_t n=(size_t)(r-l-1); if(n>=on) n=on-1;
     memcpy(out,l+1,n); out[n]=0; return 1;
 }
@@ -419,24 +423,72 @@ static unsigned long long proc_start(int pid){
     for(int f=3;f<22 && q;f++){ q=strchr(q,' '); if(q) q++; }
     return q ? strtoull(q,NULL,10) : 0;
 }
+/* One process of the /proc walk: a server, PL, master, broker or CAS is attributed; anything
+   else is ignored.  The pass over all of /proc (every pid's comm) runs every INST_WALK_MS;
+   between walks only the CUBRID pids found last time are read again (their comm, so one that
+   ended is noticed), and a pid that ended brings the full walk forward to this frame.  A
+   process started between walks (a new CAS, a restarted server) appears within one period. */
+#define INST_WALK_MS 2000
+static int *g_cand=NULL; static int g_ncand=0, g_cand_cap=0; static double g_walk_at=-1;
+static int g_walk_force=0;      /* the watched server is down: every frame walks, so its restart is seen at once */
+static void cand_add(int pid){
+    if(g_ncand==g_cand_cap){ int nc=g_cand_cap?g_cand_cap*2:64; int *t=realloc(g_cand,sizeof(int)*(size_t)nc); if(!t) return; g_cand=t; g_cand_cap=nc; }
+    g_cand[g_ncand++]=pid;
+}
+static int is_cubrid_proc(const char *b){
+    return !strcmp(b,"cub_server") || !strncmp(b,"cub_pl",6) || !strcmp(b,"cub_master") || !strcmp(b,"cub_broker") || !strcmp(b,"cub_cas");
+}
+static void inst_consider(int pid,const char *b);
 static int enum_instances(void){
     g_ninst=0; g_inst_lost=0;
-    DIR *d=opendir("/proc"); if(!d) return 0;
-    struct dirent *e; char b[256];
-    while((e=readdir(d))){
-        if(e->d_name[0]<'0'||e->d_name[0]>'9') continue;
-        if(!proc_name(e->d_name,b,sizeof b)) continue;
-        int pid=atoi(e->d_name);
+    char b[256];
+    int full = g_walk_at<0 || g_walk_force || now_ms()-g_walk_at>=INST_WALK_MS;
+    g_walk_force=0;
+    if(!full){
+        /* The cached pids: their comm again (a reused pid with another name counts as gone) */
+        static char (*nm)[32]=NULL; static int nmcap=0;
+        if(g_ncand>nmcap){ free(nm); nm=malloc(32*(size_t)g_ncand); nmcap=nm?g_ncand:0; }
+        for(int i=0;i<g_ncand && nm;i++){
+            char ps[16]; snprintf(ps,sizeof ps,"%d",g_cand[i]);
+            if(!proc_name(ps,b,sizeof b) || !is_cubrid_proc(b)){ full=1; break; }
+            snprintf(nm[i],32,"%.31s",b);
+        }
+        if(!nm) full=1;
+        if(!full) for(int i=0;i<g_ncand;i++) inst_consider(g_cand[i],nm[i]);
+    }
+    if(full){
+        g_ncand=0;
+        DIR *d=opendir("/proc"); if(!d) return 0;
+        struct dirent *e;
+        while((e=readdir(d))){
+            if(e->d_name[0]<'0'||e->d_name[0]>'9') continue;
+            if(!proc_name(e->d_name,b,sizeof b)) continue;
+            if(!is_cubrid_proc(b)) continue;
+            int pid=atoi(e->d_name);
+            cand_add(pid); inst_consider(pid,b);
+        }
+        closedir(d);
+        g_walk_at=now_ms();
+    }
+    if(g_enum_T) tcpu_sweep();
+    { int m=0; for(int i=0;i<g_ninst;i++) if(g_inst[i].pid>=0) g_inst[m++]=g_inst[i]; g_ninst=m; }
+    for(int i=0;i<g_ninst;i++) for(int j=i+1;j<g_ninst;j++)    /* Alphabetical by db */
+        if(strcmp(g_inst[i].db,g_inst[j].db)>0){
+            inst_t t=g_inst[i]; g_inst[i]=g_inst[j]; g_inst[j]=t; }
+    return g_ninst;
+}
+static void inst_consider(int pid,const char *b){
+    {
         if(!strcmp(b,"cub_server")){
             char db[64]; cmd_db(pid,db,sizeof db);
             if(!db[0]) snprintf(db,sizeof db,"-");
             inst_t *x=NULL;
             int uid=proc_uid(pid);
             for(int i=0;i<g_ninst;i++) if(g_inst[i].pid<0 && !strcmp(g_inst[i].db,db) && g_inst[i].uid==uid){ x=&g_inst[i]; break; }
-            if(!x){ x=inst_add(); if(!x) continue; snprintf(x->db,sizeof x->db,"%s",db); }
+            if(!x){ x=inst_add(); if(!x) return; snprintf(x->db,sizeof x->db,"%s",db); }
             x->pid=pid; x->uid=uid; x->start=proc_start(pid);
             status_mem(pid,&x->rss,&x->filemap,&x->swap);
-            continue;
+            return;
         }
         if(!strncmp(b,"cub_pl",6)){
             char db[64]; cmd_db(pid,db,sizeof db);
@@ -449,25 +501,18 @@ static int enum_instances(void){
             if(x){ x->pl_rss+=pl; x->pl_n++; }
             /* Only the current DB's PL is counted in the tiers */
             if(cur){ g_enum_T->pl+=pl; g_enum_T->npl++; g_enum_T->cpu_pl+=cpu; }
-            continue;
+            return;
         }
-        if(!g_enum_T) continue;
+        if(!g_enum_T) return;
         int is_master=!strcmp(b,"cub_master"), is_broker=!strcmp(b,"cub_broker");
         int is_cas=!strcmp(b,"cub_cas");
-        if(!is_master&&!is_broker&&!is_cas) continue;
+        if(!is_master&&!is_broker&&!is_cas) return;
         /* One /proc/PID/stat read gives both CPU ticks and RSS, as top reads it */
         double rss=0, cpu=tcpu_delta(pid,g_enum_dt,&rss);
         if(is_master){ g_enum_T->master+=rss; g_enum_T->cpu_master+=cpu; }
         else if(is_broker){ g_enum_T->broker+=rss; g_enum_T->cpu_broker+=cpu; }
         else { g_enum_T->cas+=rss; g_enum_T->ncas++; g_enum_T->cpu_cas+=cpu; }
     }
-    closedir(d);
-    if(g_enum_T) tcpu_sweep();
-    { int m=0; for(int i=0;i<g_ninst;i++) if(g_inst[i].pid>=0) g_inst[m++]=g_inst[i]; g_ninst=m; }
-    for(int i=0;i<g_ninst;i++) for(int j=i+1;j<g_ninst;j++)    /* Alphabetical by db */
-        if(strcmp(g_inst[i].db,g_inst[j].db)>0){
-            inst_t t=g_inst[i]; g_inst[i]=g_inst[j]; g_inst[j]=t; }
-    return g_ninst;
 }
 /* The server to follow after the watched one went away: the same db name under the same
    account (uid -1: any, when nothing was being watched).  -1 if none. */
@@ -580,6 +625,53 @@ static void parse_rollup(proc_t *P){
     }
 }
 
+/* smaps (and smaps_rollup) make the kernel walk the target's page tables under its mmap
+   read lock: about 6-9 ms per GB resident (measured), so a 100 GB server would be held for
+   most of a second every frame.  They are read on a period that keeps them within
+   SMAPS_BUDGET of wall time (at least the interval, at most SMAPS_MAX_MS), and earlier
+   when the mapping set changes (a hash of maps, which reads no page tables; adjacent
+   mappings merge, so a count of lines would miss a new one) - within SMAPS_BUDGET_CHG of
+   wall time, since a server that maps and unmaps often must not bring the read back to
+   every frame - or when the target changes.
+   Between reads the regions are kept and the totals come from status (O(1)); PSS is the
+   last read's.  The age of the regions is shown and recorded. */
+#define SMAPS_BUDGET 0.01
+#define SMAPS_BUDGET_CHG 0.10
+#define SMAPS_MAX_MS 60000.0
+static unsigned long maps_sig(int pid){
+    char f[64]; snprintf(f,sizeof f,"/proc/%d/maps",pid);
+    FILE *fp=fopen(f,"re"); if(!fp) return 0;
+    unsigned long h=1469598103934665603UL; int c;
+    while((c=getc(fp))!=EOF){ h^=(unsigned long)c; h*=1099511628211UL; }
+    fclose(fp); return h?h:1;
+}
+static void status_totals(proc_t *P){
+    char f[64],buf[4096]; snprintf(f,sizeof f,"/proc/%d/status",P->pid);
+    if(read_file(f,buf,sizeof buf)<=0) return;
+    char *q; unsigned long v;
+    if((q=strstr(buf,"VmRSS:"))&&sscanf(q+6,"%lu",&v)==1) P->rss_kb=v;
+    if((q=strstr(buf,"VmSwap:"))&&sscanf(q+7,"%lu",&v)==1) P->swap_kb=v;
+}
+static void parse_smaps(proc_t *P);
+static void parse_rollup(proc_t *P);
+static void proc_read_mem(proc_t *P,double interval_s,int force){
+    double now=now_ms();
+    int due = force || P->smaps_pid!=P->pid || P->nreg==0;
+    if(!due){
+        double period=P->smaps_ms/SMAPS_BUDGET;
+        if(period<interval_s*1000.0) period=interval_s*1000.0;
+        if(period>SMAPS_MAX_MS) period=SMAPS_MAX_MS;
+        due = now-P->smaps_at_ms>=period;
+    }
+    if(!due && now-P->smaps_at_ms>=P->smaps_ms/SMAPS_BUDGET_CHG && now-P->smaps_at_ms>=interval_s*1000.0){
+        unsigned long sg=maps_sig(P->pid); if(sg!=P->maps_sig) due=1; }
+    if(due){
+        parse_smaps(P); P->smaps_ms=now_ms()-now; P->smaps_at_ms=now_ms(); P->smaps_pid=P->pid;
+        P->maps_sig=maps_sig(P->pid);
+        parse_rollup(P);
+    } else status_totals(P);
+    P->smaps_age_s=(now_ms()-P->smaps_at_ms)/1000.0;
+}
 static void parse_status_stat(proc_t *P){
     char f[64],buf[8192];
     snprintf(f,sizeof f,"/proc/%d/status",P->pid);
@@ -6562,8 +6654,11 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
     double brk=T->broker+T->cas;
     double cub=P->rss_kb*1024.0+T->master+T->broker+T->cas+T->pl;
 
-    printf(g_ascii?"CUBRID memory drilldown (C)  db=%s  pid=%d  ⏱ %s\n"
-                  :"CUBRID 메모리 드릴다운 (C)  db=%s  pid=%d  ⏱ %s\n",P->db,P->pid,ts);
+    char age[48]="";
+    if(P->smaps_age_s>g_interval*1.5)
+        snprintf(age,sizeof age,g_ascii?"  regions %.0fs old":"  영역 %.0f초 전 값",P->smaps_age_s);
+    printf(g_ascii?"CUBRID memory drilldown (C)  db=%s  pid=%d  ⏱ %s%s\n"
+                  :"CUBRID 메모리 드릴다운 (C)  db=%s  pid=%d  ⏱ %s%s\n",P->db,P->pid,ts,age);
     if(g_ninst>1){
         /* States that only the db above is examined in detail; the rest give totals only. */
         printf(g_ascii?"  %d instances:":"  인스턴스 %d개:",g_ninst);
@@ -7101,9 +7196,10 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     printf("server.db=\"%s\" server.pid=%d server.mapped_kb=%lu server.rss_kb=%lu "
            "server.pss_kb=%lu server.swap_kb=%lu server.workers=%d"
            " server.minflt_per_s=%.0f server.majflt_per_s=%.0f"
-           " server.cpu_pct=%.1f server.host_cores=%d server.start_ticks=%llu\n",
+           " server.cpu_pct=%.1f server.host_cores=%d server.start_ticks=%llu"
+           " server.smaps_age_s=%.1f server.smaps_ms=%.1f\n",
            tq(ds),P->pid,P->vsize_kb,P->rss_kb,P->pss_kb,P->swap_kb,P->nthreads,
-           minflt_ps,majflt_ps,cpu_pct,ncpu,g_track_start); }
+           minflt_ps,majflt_ps,cpu_pct,ncpu,g_track_start,P->smaps_age_s,P->smaps_ms); }
     for(int i=0;i<NSR;i++){
         srg_t *r=&SR[i];
         /* Strip spaces and parentheses from keys so a key=value parser does not break */
@@ -7498,6 +7594,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     P->pid     =(int)rp_num(t,"server.pid",-1);
     g_seg_gen  =(unsigned)rp_num(t,"collect.segment",0);              /* the history follows the recorded segments */
     g_track_start=(unsigned long long)rp_num(t,"server.start_ticks",0);
+    P->smaps_age_s=rp_num(t,"server.smaps_age_s",0); P->smaps_ms=rp_num(t,"server.smaps_ms",0);
     P->rss_kb  =(unsigned long)rp_num(t,"server.rss_kb",0);
     P->pss_kb  =(unsigned long)rp_num(t,"server.pss_kb",0);
     P->vsize_kb=(unsigned long)rp_num(t,"server.mapped_kb",0);
@@ -8037,7 +8134,7 @@ again:
     usleep((useconds_t)(interval*1000000));
     pd_reap_zombies();                  /* every frame, whether or not a request is open */
     if(*pd) paramdump_poll(pd,g_pd_async?0:PD_WAIT_MS);
-    if(P->pid>=0){ parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P); }
+    if(P->pid>=0){ proc_read_mem(P,interval,0); parse_status_stat(P); parse_procio(P); }
     dstat_t d1[MAXDISK]; int nd1=parse_diskstats(d1,MAXDISK);
     /* The window's closing thread scan, at the same instant as the reads above */
     int dthr=0,nthr=0; unsigned long blk1=0; count_d_threads(P->pid,&dthr,&nthr,&blk1);
@@ -8057,6 +8154,7 @@ again:
        separately would differ by whatever changed between the two reads. */
     memset(T,0,sizeof *T);
     g_enum_T=T; g_enum_dt=dt;          /* This single enum serves as both the instance summary and the tier aggregation */
+    if(P->pid<0) g_walk_force=1;       /* waiting for a restart: look at all of /proc this frame */
     enum_instances();
     /* Detect a server that died or restarted under a new pid.  Without this, /proc
        reads on the dead pid fail silently and the previous values are redrawn, so
@@ -8097,7 +8195,7 @@ again:
                         if(g_inst[i].pid==newpid){ g_cur=i; g_track_uid=g_inst[i].uid; g_track_start=g_inst[i].start; break; }
                     snprintf(g_cur_db,sizeof g_cur_db,"%s",keep);
                     cap_probe(newpid);             /* The new process: re-probe rather than inherit the old flags */
-                    parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P);
+                    proc_read_mem(P,interval,1); parse_status_stat(P); parse_procio(P);
                     /* Heap A/B analyse a process address space and must be redone after a restart.
                        B runs every frame below, but A runs periodically, so without this a
                        dead server's measurement would linger - force an immediate remeasure. */
