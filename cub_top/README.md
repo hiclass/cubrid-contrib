@@ -237,7 +237,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-mmchunk.sh` | 방법 A 가 단독 mmapped 청크를 셈: malloc(100MB)·20MB×3(병합 VMA)·20MB×5·900MB(순회 상한 초과), 앞뒤로 익명 이웃이 합쳐진 VMA, 0 으로 찬 익명 영역은 0 |
 | `check-escape.sh` | `-d`·`--json`·`--record` 의 따옴표 값: 고정 버퍼에서 잘린 한글은 `?` 로 바뀌어 유효한 UTF-8, `"` `\` 탭이 든 값(라이브러리 경로)은 기록→재생에서 그대로 돌아오고 가짜 키로 쪼개지지 않음 |
 | `check-flushing.sh` | flush 중(flushing) 페이지는 clean 이 아님: dirty·flushing 을 한 번씩 센 `pgbuf.unflushed`, 가장 오래된 dirty LSA 가 놓치는 flush 중 페이지 수, DWB 가 담을 수 있는 "clean 이지만 볼륨 미반영" 페이지 상한 |
-| `check-dwarf.sh` | `-flto` 의 `.lto_priv.N` 루트 심볼(실제 LTO 빌드 포함)을 찾고 모호한 둘·함수는 거절 · `strip -s` 는 사유로 · 압축(-gz/.zdebug)·`.gnu_debuglink`·split DWARF·dwz 는 정확한 사유 · build-id 캐시 키 · 라이브 추출은 백그라운드, 끝난 자식은 캐시가 먼저 답해도 회수, 추출 중 라이브러리가 바뀌면 자식과 파이프를 함께 정리 |
+| `check-dwarf.sh` | `-flto` 의 `.lto_priv.N` 루트 심볼(실제 LTO 빌드 포함)을 찾고 모호한 둘·함수는 거절 · `strip -s` 는 사유로 · 압축(-gz/.zdebug)·`.gnu_debuglink`·split DWARF·dwz 는 정확한 사유 · build-id 캐시 키 · 라이브 추출은 백그라운드, 끝난 자식은 캐시가 먼저 답해도 회수, 추출 중 라이브러리가 바뀌면 자식과 파이프를 함께 정리 · 인스턴스 전환 뒤 끝난 다른 라이브러리의 자식은 채택 절차를 다시 돌리지 않고 그 자리에서 회수(좀비 0) |
 | `check-oldkernel.sh` | 구 커널: 프로세스 이름은 `/proc/<pid>/stat` 의 `(comm)`(2.6.33 미만엔 `comm` 파일 없음, `)`·공백이 든 이름 포함) · 2.6.39 미만 판정(그 커널의 `/proc/pid/mem` 거부는 권한이 아니라 커널 사유로 표시) · `RssFile`(4.5) 없으면 statm 으로 측정(0 아님) |
 | `check-histreset.sh` | 히스토리는 한 프로세스의 것: 재시작(새 pid)·대상 세대 변경·서버 다운에서 비워져, 죽은 서버와 새 서버를 비교한 "서버 −X GB 반납" 같은 판정이 나오지 않음 |
 | `check-libpath.sh` | maps 의 라이브러리 경로는 줄의 나머지 전체(공백 든 설치 경로) · 교체돼 "(deleted)" 인데 map_files 를 못 열면 방법 B 거부 · map_files 가 열리면 실행 중인 바이트를 읽음 |

@@ -1846,6 +1846,17 @@ static int dw_kid_done(void){
     siginfo_t si; si.si_pid=0;
     return waitid(P_PID,(id_t)g_dw_kid,&si,WEXITED|WNOHANG|WNOWAIT)==0 && si.si_pid==g_dw_kid;
 }
+/* Asked each frame before the cached table is reused.  1 = the extraction of THIS library
+   has finished: drop the cache so the ladder runs once more and its own offsets win.  A
+   finished child of another library (started before an instance switch) is no reason to
+   re-run the ladder - and would be every frame, since only dw_load_or_extract for that
+   library reaps it: it is reaped here instead (its cache file is already written). */
+static int dw_kid_finished_for(const char *so){
+    if(!dw_kid_done()) return 0;
+    if(!strcmp(g_dw_kso,so)) return 1;
+    dw_kid_stop();
+    return 0;
+}
 /* 1 = offsets in out, 2 = failed (why), 0 = extracting in the background */
 static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
     char cpath[256]; dw_cache_path(so,cpath,sizeof cpath);
@@ -2551,7 +2562,7 @@ static void method_b(proc_t *P){
         struct stat cst; long long mt = stat(so,&cst)==0 ? (long long)cst.st_mtime : -2;
         /* No short cut while this build's DWARF extraction has just finished: the cached
            table may be another build's, adopted while the child was still running. */
-        if(c_bt && dw_kid_done()) c_bt=NULL;
+        if(c_bt && dw_kid_finished_for(so)) c_bt=NULL;
         if(c_bt && c_pid==P->pid && c_mt==mt && !strcmp(c_so,so)){
             long long want=prm_get("data_buffer_pages");
             memcpy(B.sym,c_sym,sizeof B.sym);

@@ -139,6 +139,25 @@ int main(void){
     int wp=waitpid(kid,NULL,WNOHANG); ok = st==1 && d0==0 && d1==1 && still && g_dw_kid==0 && wp<0; if(!ok) printf("        st=%d still=%d g_dw_kid=%d wp=%d w=%s\n",st,still,(int)g_dw_kid,wp,w);
     printf("  %s   finished child noticed (%d then %d after %d poll(s)) without being reaped early; then adopted and reaped\n",
            ok?"ok  ":"FAIL",d0,d1,polls); bad|=!ok;
+    /* A child of another library that finished after an instance switch: asking for the
+       current library must not report it (which would re-run the ladder every frame) and
+       must reap it, so it is neither asked about again nor left a zombie */
+    { unlink(cp1);
+      st=dw_load_or_extract("lib.so",o,w,sizeof w); pid_t kid=g_dw_kid;
+      int polls=0; while(!dw_kid_done() && polls<200){ usleep(50000); polls++; }
+      int r1=dw_kid_finished_for("nobid.so"), r2=dw_kid_finished_for("nobid.so");
+      int wp=waitpid(kid,NULL,WNOHANG);
+      ok = st==0 && kid>0 && r1==0 && r2==0 && g_dw_kid==0 && g_dw_kfd<0 && wp<0;
+      printf("  %s   another library's finished child: not reported (%d, %d), reaped (kid %d, waitpid %d)\n",
+             ok?"ok  ":"FAIL",r1,r2,(int)g_dw_kid,wp); bad|=!ok;
+      /* the same library's: reported, so the ladder runs once more */
+      unlink(cp1);
+      st=dw_load_or_extract("lib.so",o,w,sizeof w);
+      polls=0; while(!dw_kid_done() && polls<200){ usleep(50000); polls++; }
+      int r3=dw_kid_finished_for("lib.so");
+      st=dw_load_or_extract("lib.so",o,w,sizeof w);
+      ok = r3==1 && st==1 && g_dw_kid==0;
+      printf("  %s   this library's finished child: reported (%d), then adopted and reaped\n",ok?"ok  ":"FAIL",r3); bad|=!ok; }
     /* Switching to another instance's library while a child still extracts: the child is
        stopped and its pipe closed, every time - no descriptor left per switch.  The child
        is held with SIGSTOP so it is still running when the switch comes. */
