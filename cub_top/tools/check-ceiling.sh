@@ -20,11 +20,28 @@
 # queue built (depth >= 4): one outstanding I/O shows util ~100% at depth ~1 and measures the
 # latency, which must be judged latency-bound.  Drives cap_collect() with synthetic diskstats;
 # the frame's device stands in as the DB's disk (check-dbdisk covers finding it).
+# The device identity is read from a fake /sys/class/block built here, so the keys are the
+# same on every host: wwid, device/serial (spaces folded), dm/uuid first when present, a
+# partition as its disk's identity plus ":p<n>", and the kernel name only with no identity.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
 TMP=${TMPDIR:-/tmp}/cub_top-ceiling.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
-sed -e 's/nk = P->pid>=0 ? db_disks(/nk = 1 ? test_db_disks(/' "$SRC" > "$TMP/src.c"
+SB="$TMP/sys"; mkdir -p "$SB/class/block"
+dev(){ # dev <name> <size> [file=content ...]: a device directory and its class/block link
+    d="$SB/devices/$1"; mkdir -p "$d"; echo "$2" > "$d/size"; n=$1; shift 2
+    for kv in "$@"; do f=${kv%%=*}; mkdir -p "$d/$(dirname "$f")"; printf '%s\n' "${kv#*=}" > "$d/$f"; done
+    ln -s "../../devices/$n" "$SB/class/block/$n"; }
+dev nvme0n1 1000215216 "wwid=eui.0025388b91c1d5e1"
+dev sda 1953525168 "device/wwid=naa.5000c500a1b2c3d4"
+dev sdb 23437770752 "device/serial=ST12000NM000J  ZR701W4Z"
+dev sdc 4096
+dev dm-0 2048 "dm/uuid=LVM-abc123" "wwid=not.this.one"
+mkdir -p "$SB/devices/sda/sda1"; echo 1024 > "$SB/devices/sda/sda1/size"; echo 1 > "$SB/devices/sda/sda1/partition"
+ln -s "../../devices/sda/sda1" "$SB/class/block/sda1"
+sed -e 's/nk = P->pid>=0 ? db_disks(/nk = 1 ? test_db_disks(/' \
+    -e "s|\"/sys/class/block/%s\"|\"$SB/class/block/%s\"|" "$SRC" > "$TMP/src.c"
 grep -q 'test_db_disks(' "$TMP/src.c" || { echo "→ FAIL (db_disks call not found)"; exit 1; }
+grep -q "$SB/class/block/%s" "$TMP/src.c" || { echo "→ FAIL (sysfs path not found)"; exit 1; }
 cat > "$TMP/t.c" <<C
 #include <stddef.h>
 static char g_test_dev[32];
@@ -72,8 +89,19 @@ int main(int argc,char**argv){
     { char o[400]; const char*c=VD_INFO; vd_capacity(o,sizeof o,&c);
       int v=strstr(o,"지연 병목")!=NULL && strstr(o,"직렬")!=NULL && !strstr(o,"용량 한계");
       printf("  %-4s %-44s \"%s\"\n",v?"ok":"FAIL","serial stream verdict",o); ok&=v; }
-    printf("  %-4s %-44s %s\n",strstr(g_cap_devid,"sdb")!=g_cap_devid?"ok":"FAIL","sdb keyed by identity, not name",g_cap_devid);
-    ok&= strstr(g_cap_devid,"sdb")!=g_cap_devid || access("/sys/class/block/sdb/device/wwid",R_OK)!=0;
+    { int v=!strcmp(g_cap_devid,"ST12000NM000J_ZR701W4Z@23437770752");
+      printf("  %-4s %-44s %s\n",v?"ok":"FAIL","the frame's device recorded by identity",g_cap_devid); ok&=v; }
+    { static const struct { const char *nm,*want,*what; } K[]={
+          {"nvme0n1","eui.0025388b91c1d5e1@1000215216","wwid"},
+          {"sda","naa.5000c500a1b2c3d4@1953525168","device/wwid"},
+          {"sdb","ST12000NM000J_ZR701W4Z@23437770752","device/serial, spaces folded"},
+          {"dm-0","LVM-abc123@2048","dm/uuid before wwid"},
+          {"sda1","naa.5000c500a1b2c3d4:p1@1024","partition: its disk's identity + :p1"},
+          {"sdc","sdc@4096","no identity: the kernel name, sized"},
+          {"nosuch","nosuch@0","no such device"} };
+      for(unsigned i=0;i<sizeof K/sizeof K[0];i++){ const char *k=dev_key(K[i].nm); int v=!strcmp(k,K[i].want);
+          char lbl[64]; snprintf(lbl,sizeof lbl,"key of %s (%s)",K[i].nm,K[i].what);
+          printf("  %-4s %-44s %s%s%s\n",v?"ok":"FAIL",lbl,k,v?"":" want ",v?"":K[i].want); ok&=v; } }
     return ok?0:1;
 }
 C
