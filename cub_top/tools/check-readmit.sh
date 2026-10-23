@@ -57,7 +57,7 @@ static int lru_case(int B,double mult){
         if(f>=100 && CAP2.readmit_pct>=0){ rs+=CAP2.readmit_pct; k++; }
     }
     double m1=1.0-(double)hit1/acc, m2=1.0-(double)hit2/acc, cut=100.0*(m1-m2)/m1, r=rs/k;
-    int ok = r<=cut+1.0 && r>=cut-6.0;      /* a lower bound, close to the doubled buffer's cut */
+    int ok = r<=cut+1.0 && r>=cut-6.0;      /* exact LRU, uniform: below and close to the doubled buffer's cut */
     printf("  %s   W=%4.1fB: re-admit %5.1f%%, misses a doubled buffer removes %5.1f%%\n",ok?"ok  ":"FAIL",mult,r,cut);
     free(pv1); free(nx1); free(in1); free(pv2); free(nx2); free(in2);
     return ok?0:1;
@@ -72,6 +72,32 @@ static void put(int i,int pageid){
     memcpy(b+g_bt->pg.vpid,&pageid,4); memcpy(b+g_bt->pg.vpid+4,&v,2); memcpy(b+g_bt->pg.flags,&f,4); memcpy(b+g_bt->pg.olsa,&ol,8);
     unsigned char*io=iopg_+(size_t)i*64; uint64_t ip=(uint64_t)(uintptr_t)io; memcpy(b+g_bt->pg.iopg,&ip,8);
     unsigned char*h=io+g_bt->pg.iobuf_iopg; uint64_t l=5; memcpy(h,&l,8); memcpy(h+8,&pageid,4); memcpy(h+12,&v,2);
+}
+/* Midpoint-insertion cache of B pages (CUBRID-like): a hit moves the page to the head; a
+   miss evicts the tail and inserts the new page with `mid` pages behind it, so a page
+   used once survives about `mid` further misses.  Array-backed, O(B) per access: small B. */
+typedef struct { int *a; int n, cap, mid; } mcache_t;
+static int mc_find(mcache_t*c,int p){ for(int i=0;i<c->n;i++) if(c->a[i]==p) return i; return -1; }
+static int mc_access(mcache_t*c,int p){
+    int i=mc_find(c,p);
+    if(i>=0){ memmove(c->a+1,c->a,(size_t)i*sizeof(int)); c->a[0]=p; return 1; }
+    if(c->n>=c->cap) c->n--;                                  /* evict the tail */
+    int at=c->n-c->mid; if(at<0) at=0;                        /* `mid` pages behind the new one */
+    memmove(c->a+at+1,c->a+at,(size_t)(c->n-at)*sizeof(int)); c->a[at]=p; c->n++; return 0;
+}
+static pgrec_t mrec_[1<<14];
+static void feed(const int*pages,int n,int B,double t){
+        PG.rec=mrec_; PG.reccap=1<<14; PG.nrec=0;
+    for(int i=0;i<n;i++){ pgrec_t*r=&mrec_[PG.nrec++]; memset(r,0,sizeof *r); r->pageid=pages[i]; }
+    PG.ok=1; PG.nbuf=B; PG.degraded=0; cap_turnover(t);
+}
+/* The panel-3 verdict for given figures: admitted MB/s, re-admit, admissions per frame / nbuf */
+static const char* vd_for(double readmit,double admfrac,const char**col){
+    static proc_t P; static mem_t M; static tier_t T; static iod_t IO; static char o[400];
+    AG.ok=1; AG.nbuf=1000; AG.z3=850; AG.z1=150; AG.z2=0; AG.dirty=0; PG.ok=0;
+    IO.rb=20.0*1024*1024; CAP2.readmit_pct=readmit; CAP2.miss_pps=1280; CAP2.adm_frac=admfrac; g_pagesize=16384;
+    hist_push(1,&P,&M,&T,&IO);
+    *col=VD_INFO; vd_buf(o,sizeof o,col); return o;
 }
 int main(void){
     int bad=0;
@@ -123,8 +149,70 @@ int main(void){
     g_pg_detail=0; pgbuf_scan(&P); cap_turnover(104.0);
     printf("  %s   not requested: scanned=%d re-admit=%.0f (want 0, -1)\n",(!PG.ok&&CAP2.readmit_pct<0)?"ok  ":"FAIL",PG.ok,CAP2.readmit_pct);
     if(PG.ok||CAP2.readmit_pct>=0) bad=1;
-    printf("3. re-admit estimates what doubling the buffer saves (exact LRU, uniform random)\n");
+    printf("3. re-admit estimates what doubling the buffer saves (exact LRU, uniform random - where it holds)\n");
     { double m[]={4,6,10,15}; for(int i=0;i<4;i++) bad|=lru_case(4096,m[i]); }
+    printf("4. where the estimate is not a bound (review A-3)\n");
+    { /* (a) every page read twice D = 1.2B apart, B accesses per frame: pages admitted and
+         evicted inside a frame are never seen, so re-admit is off and the frame must be
+         flagged low-confidence instead of driving a shortage verdict */
+      int B=1024, D=(int)(1.2*B); srand(3);
+      pv1=calloc(1<<17,4); nx1=calloc(1<<17,4); in1=calloc(1<<17,4); pv2=calloc(1<<17,4); nx2=calloc(1<<17,4); in2=calloc(1<<17,4);
+      h1=t1=h2=t2=-1; c1=c2=0; reset_instance_state();
+      static pgrec_t rec[1<<14]; PG.rec=rec; PG.reccap=1<<14;
+      long hit1=0,hit2=0,acc=0; double rs=0,fs=0; int k=0, next=0; int *pend=calloc(1<<17,4); int np=0;
+      for(int f=0;f<60;f++){
+          for(int a=0;a<B;a++){
+              int p; if(np>0 && pend[0]<=next-D){ p=pend[0]; memmove(pend,pend+1,(size_t)(--np)*4); }
+                     else { p=next++; pend[np++]=p; }
+              p%=(1<<17);
+              int g1=lru(p,B,pv1,nx1,in1,&h1,&t1,&c1), g2=lru(p,2*B,pv2,nx2,in2,&h2,&t2,&c2);
+              if(f>=10){ hit1+=g1; hit2+=g2; acc++; } }
+          PG.nrec=0; for(int q=h1;q>=0;q=nx1[q]){ pgrec_t*r=&rec[PG.nrec++]; memset(r,0,sizeof *r); r->pageid=q; }
+          PG.ok=1; PG.nbuf=B; PG.degraded=0; cap_turnover(200.0+f*0.5);
+          if(f>=10 && CAP2.readmit_pct>=0){ rs+=CAP2.readmit_pct; fs+=CAP2.adm_frac; k++; } }
+      double m1=1.0-(double)hit1/acc, m2=1.0-(double)hit2/acc, cut=m1>0?100.0*(m1-m2)/m1:0, r=rs/k, af=fs/k;
+      const char*c; const char*o=vd_for(r,af,&c);
+      int ok = af>=0.5 && strstr(o,"신뢰도 낮음") && !strstr(o,"버퍼 2배면");
+      printf("  %s   two reads 1.2B apart, 1B per frame: re-admit %.0f%%, real cut %.0f%%, admitted %.0f%% of the buffer per frame -> \"%s\"\n",
+             ok?"ok  ":"FAIL",r,cut,af*100,o); bad|=!ok;
+      free(pv1); free(nx1); free(in1); free(pv2); free(nx2); free(in2); free(pend); }
+    { /* (b) midpoint insertion, every page read twice 0.8B apart, B/10 per frame: the window
+         counts reuse in (0.6B, 1.6B] while doubling helps only (0.6B, 1.2B] - the figure is
+         an estimate under LRU, and the verdict must say so rather than call it a bound */
+      int B=512, D=(int)(0.8*B); mcache_t c1m={calloc(B,4),0,B,(int)(0.6*B)}, c2m={calloc(2*B,4),0,2*B,(int)(1.2*B)};
+      reset_instance_state();
+      long hit1=0,hit2=0,acc=0; double rs=0; int k=0, next=0, *pend=calloc(1<<16,4), np=0;
+      for(int f=0;f<300;f++){
+          int miss_f=0;
+          while(miss_f<B/10){
+              int p; if(np>0 && pend[0]<=next-D){ p=pend[0]; memmove(pend,pend+1,(size_t)(--np)*4); }
+                     else { p=next++; pend[np++]=p; }
+              int g1=mc_access(&c1m,p), g2=mc_access(&c2m,p); miss_f+=!g1;
+              if(f>=50){ hit1+=g1; hit2+=g2; acc++; } }
+          feed(c1m.a,c1m.n,B,400.0+f*0.5);
+          if(f>=50 && CAP2.readmit_pct>=0){ rs+=CAP2.readmit_pct; k++; } }
+      double m1=1.0-(double)hit1/acc, m2=1.0-(double)hit2/acc, cut=m1>0?100.0*(m1-m2)/m1:0, r=rs/k;
+      const char*c; const char*o=vd_for(r,0.1,&c);
+      int ok = strstr(o,"LRU 가정")!=NULL && !strstr(o,"하한");
+      printf("  %s   midpoint insertion, reuse 0.8B, B/10 per frame: re-admit %.0f%% vs real cut %.0f%% - labelled an LRU estimate -> \"%s\"\n",
+             ok?"ok  ":"FAIL",r,cut,o); bad|=!ok;
+      free(c1m.a); free(c2m.a); free(pend); }
+    { /* (c) aliasing: a cycle over 1.5B pages, 1.5B accesses per frame - every access misses,
+         yet the frames' resident sets are identical, so nothing is seen admitted.  Snapshots
+         cannot detect this; the case is reproduced so the documented limit stays true */
+      int B=1024, W=(int)(1.5*B);
+      pv1=calloc(W,4); nx1=calloc(W,4); in1=calloc(W,4); h1=t1=-1; c1=0; reset_instance_state();
+      static pgrec_t rec2[1<<14]; PG.rec=rec2; PG.reccap=1<<14;
+      long miss=0,acc=0; double ms=0; int k=0, pos=0;
+      for(int f=0;f<40;f++){
+          for(int a=0;a<W;a++){ int g=lru(pos,B,pv1,nx1,in1,&h1,&t1,&c1); pos=(pos+1)%W; if(f>=5){ miss+=!g; acc++; } }
+          PG.nrec=0; for(int q=h1;q>=0;q=nx1[q]){ pgrec_t*r=&rec2[PG.nrec++]; memset(r,0,sizeof *r); r->pageid=q; }
+          PG.ok=1; PG.nbuf=B; PG.degraded=0; cap_turnover(600.0+f*0.5);
+          if(f>=5 && CAP2.miss_pps>=0){ ms+=CAP2.miss_pps; k++; } }
+      int ok = acc>0 && miss==acc && ms/k==0;
+      printf("  %s   aliasing, 1.5B cycle at 1.5B per frame: real hit %.0f%%, seen admitted %.0f pages/s (documented limit, not detectable from snapshots)\n",
+             ok?"ok  ":"FAIL",100.0*(acc-miss)/acc,ms/k); bad|=!ok;
+      free(pv1); free(nx1); free(in1); }
     return bad;
 }
 C

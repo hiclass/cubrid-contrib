@@ -3971,6 +3971,9 @@ typedef struct {
     char   dev_why[160];                        /* Why no DB disk was found */
     double turnover_pct;                        /* Share of resident pages replaced within the window */
     double readmit_pct;                         /* Share evicted and read back: the signal that the working set exceeds the buffer */
+    double adm_frac;                            /* This frame's admissions over nbuf; -1 unknown.  At 0.5 and above, pages
+                                                   admitted and evicted inside the frame are not seen: the window
+                                                   counts too few evictions and the set difference saturates */
     /* Ceiling and latency */
     double await_ms, r_await_ms, w_await_ms;    /* Wait per device request */
     double qdepth;                              /* Mean queue depth (time_in_queue over elapsed) */
@@ -3992,7 +3995,7 @@ typedef struct {
 static cap_t CAP2;
 /* Clear the values only, keeping the reasons and remembered ceilings, so a budget-exceeded or server-down frame shows no half values */
 static void cap_reset_values(void){
-    CAP2.miss_pps=-1; CAP2.hit_pct=-1; CAP2.turnover_pct=-1; CAP2.readmit_pct=-1;
+    CAP2.miss_pps=-1; CAP2.hit_pct=-1; CAP2.turnover_pct=-1; CAP2.readmit_pct=-1; CAP2.adm_frac=-1;
     CAP2.await_ms=CAP2.r_await_ms=CAP2.w_await_ms=-1; CAP2.qdepth=-1;
     CAP2.headroom_pct=-1; CAP2.ps_ok=0;
     CAP2.dev_rbps=CAP2.dev_wbps=0; CAP2.req_kb=0; CAP2.read_ratio=0.5;
@@ -4045,6 +4048,7 @@ typedef struct {
        sparse samples would draw a trend that is not there. */
     double heapb;
     double cap_readmit;   /* Refill percentage: what separates a short buffer from a scan */
+    double cap_admfrac;   /* Frame admissions over nbuf (-1 unknown); >= 0.5 makes the two above low-confidence */
     char hh[12];
 } hsam_t;
 static hsam_t HS[HIST_MAX]; static int HN=0, HCAP=HIST_MAX;
@@ -4100,6 +4104,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->rss_broker=T->broker; s->rss_cas=T->cas;
     s->cap_iops=CAP2.dev_iops; s->cap_await=CAP2.await_ms<0?0:CAP2.await_ms;
     s->cap_readmit=CAP2.readmit_pct;          /* -1 = not measured: it alone separates shortage from scan */
+    s->cap_admfrac=CAP2.adm_frac;
     s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps;   /* -1 = not measured */
     s->cap_head=CAP2.headroom_pct<0?0:CAP2.headroom_pct;
     s->pg_ok      = PG.ok || AG.ok;
@@ -4607,11 +4612,12 @@ static int cap_turnover_from_dump(void){
     if(nc<=0) return 0;
     CAP2.turnover_pct = 100.0*(double)admitted/(double)nc;
     CAP2.miss_pps     = (double)admitted/dt;
+    CAP2.adm_frac     = PG.nbuf>0 ? (double)admitted/(double)PG.nbuf : -1;
     CAP2.readmit_pct  = -1;    /* A file baseline has no eviction history, so refill cannot be computed */
     return 1;
 }
 static void cap_turnover(double now_s){
-    CAP2.turnover_pct=-1; CAP2.readmit_pct=-1; CAP2.miss_pps=-1;
+    CAP2.turnover_pct=-1; CAP2.readmit_pct=-1; CAP2.miss_pps=-1; CAP2.adm_frac=-1;
     { static unsigned seen=0;
       if(seen!=g_inst_gen){ seen=g_inst_gen; cap_prev_n=0; vp_hist_n=0; vp_evseq=0; } }
     if(!PG.ok||PG.nrec<=0) return;
@@ -4652,6 +4658,7 @@ static void cap_turnover(double now_s){
             CAP2.turnover_pct = 100.0*(double)admitted/(double)n;
             CAP2.readmit_pct  = admitted>0 ? 100.0*(double)readmit/(double)admitted : 0;
             CAP2.miss_pps     = (double)admitted/dt;
+            CAP2.adm_frac     = PG.nbuf>0 ? (double)admitted/(double)PG.nbuf : -1;
         }
     }
     { uint64_t *t=vp_prev; vp_prev=vp_cur; vp_cur=t;
@@ -4906,10 +4913,10 @@ static void cap_collect(proc_t*P,iod_t*IO,const dstat_t*d0,int nd0,const dstat_t
     /* Live (two or more frames) uses the in-memory baseline; one-shot uses the --bcb-dump file */
     { static int frames=0;
       double nowd=(double)PG.when.tv_sec+(double)PG.when.tv_nsec/1e9;
-      double keep_t=CAP2.turnover_pct, keep_m=CAP2.miss_pps, keep_r=CAP2.readmit_pct;
+      double keep_t=CAP2.turnover_pct, keep_m=CAP2.miss_pps, keep_r=CAP2.readmit_pct, keep_f=CAP2.adm_frac;
       cap_turnover(nowd>0?nowd:(double)time(NULL));
       /* Keep the value pgbuf_scan already produced from the dump baseline (one-shot) */
-      if(CAP2.turnover_pct<0 && keep_t>=0){ CAP2.turnover_pct=keep_t; CAP2.miss_pps=keep_m; CAP2.readmit_pct=keep_r; }
+      if(CAP2.turnover_pct<0 && keep_t>=0){ CAP2.turnover_pct=keep_t; CAP2.miss_pps=keep_m; CAP2.readmit_pct=keep_r; CAP2.adm_frac=keep_f; }
       frames++; }
     if(CAP2.hit_pct<0 && CAP2.turnover_pct>=0 && PG.ok){
         /* Zero turnover means no new pages entered in the window: the working set has settled into the buffer */
@@ -5235,16 +5242,22 @@ static void vd_buf(char*o,size_t n,const char**col){
     if(ab>=8.0*1024*1024 && b->cap_readmit<0){ *col=VD_INFO;
         snprintf(o,n,g_ascii?"admitting %s/s (%s) - re-admit not measured, so shortage and scan are not told apart"
                            :"· 적재 %s/s(%s) — 재적재율 미측정이라 버퍼 부족과 스캔을 가르지 않음",H(ab),disk); return; }
-    /* Re-admit = admitted pages evicted within the last nbuf evictions: under LRU those are
-       the misses a buffer twice the size would have served, so it estimates (a lower bound)
-       the share of misses doubling removes.  It does not tell a scan from a working set
-       many times the buffer - both are low - so no "enlarging is useless" is concluded. */
+    /* Re-admit = admitted pages evicted within the last nbuf evictions: under an exact LRU those
+       are the misses a buffer twice the size would have served, so it estimates the share of
+       misses doubling removes.  Only an estimate under that assumption: CUBRID inserts new pages
+       at a midpoint, and pages admitted and evicted inside one frame are never seen, so it is no
+       bound in either direction.  It does not tell a scan from a working set many times the
+       buffer - both are low - so no "enlarging is useless" is concluded. */
+    if(ab>=8.0*1024*1024 && b->cap_admfrac>=0.5){ *col=VD_NOTE;
+        snprintf(o,n,g_ascii?"! admitting %s/s (%s), %.0f%% of the buffer per frame - too fast to see between snapshots: re-admit %.0f%% and the admission rate are under-counted, low confidence (shorten --interval)"
+                           :"⚠ 적재 %s/s(%s), 프레임당 버퍼의 %.0f%% — 스냅샷 사이를 다 보지 못하는 속도: 재적재 %.0f%%·적재량은 과소집계, 신뢰도 낮음(--interval 을 줄일 것)",
+                 H(ab),disk,b->cap_admfrac*100,b->cap_readmit<0?0:b->cap_readmit); return; }
     if(ab>=8.0*1024*1024 && b->cap_readmit>=30.0){ *col=VD_WARN;
-        snprintf(o,n,g_ascii?"! buffer shortage - admitting %s/s (%s), re-admit %.0f%%: doubling the buffer cuts misses by about %.0f%% (lower bound)"
-                           :"⚠ 버퍼 부족 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정 하한)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+        snprintf(o,n,g_ascii?"! buffer shortage - admitting %s/s (%s), re-admit %.0f%%: doubling the buffer cuts misses by about %.0f%% (estimate, assuming LRU)"
+                           :"⚠ 버퍼 부족 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정치, LRU 가정)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
     if(ab>=8.0*1024*1024 && b->cap_readmit>=10.0){ *col=VD_NOTE;
-        snprintf(o,n,g_ascii?"! working set larger than the buffer - admitting %s/s (%s), re-admit %.0f%%: doubling cuts misses by about %.0f%% (lower bound)"
-                           :"⚠ 작업집합이 버퍼보다 큼 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정 하한)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+        snprintf(o,n,g_ascii?"! working set larger than the buffer - admitting %s/s (%s), re-admit %.0f%%: doubling cuts misses by about %.0f%% (estimate, assuming LRU)"
+                           :"⚠ 작업집합이 버퍼보다 큼 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정치, LRU 가정)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
     if(ab>=8.0*1024*1024){ *col=VD_INFO;
         snprintf(o,n,g_ascii?"admitting %s/s (%s), re-admit %.0f%% - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
                            :"· 적재 %s/s(%s) · 재적재 %.0f%% — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): 버퍼 2배로 줄어드는 미스 약 %.0f%%",
@@ -5372,13 +5385,17 @@ static void vd_capacity(char*o,size_t n,const char**col){
             snprintf(o,n,g_ascii?"! %.0f pages/s admitted (turnover %.0f%%) - re-read share unknown from a file baseline: run live (-b) to tell buffer shortage from scan"
                                 :"⚠ 초당 %.0f페이지 적재(회전율 %.0f%%) — 파일 기준선이라 재적재 비율 미상: 라이브(-b)로 버퍼 부족과 스캔을 구분",
                      c->miss_pps,c->turnover_pct); return; }
-        /* Re-admit estimates the share of misses a doubled buffer removes (see vd_buf) */
+        /* Re-admit estimates the share of misses a doubled buffer removes, assuming LRU (see vd_buf) */
         char hit[48]="";
+        if(c->adm_frac>=0.5 && c->miss_pps>=200){ *col=VD_NOTE;
+            snprintf(o,n,g_ascii?"! %.0f pages/s admitted, %.0f%% of the buffer per frame - under-counted between snapshots, re-admit %.0f%% low confidence: shorten --interval before sizing"
+                                :"⚠ 초당 %.0f페이지 적재, 프레임당 버퍼의 %.0f%% — 스냅샷 사이 과소집계, 재적재 %.0f%% 신뢰도 낮음: 증설 판단 전에 --interval 을 줄일 것",
+                     c->miss_pps,c->adm_frac*100,c->readmit_pct<0?0:c->readmit_pct); return; }
         if(c->hit_pct>=0 && !strncmp(c->hit_src,"perfmon",7))
             snprintf(hit,sizeof hit,g_ascii?", engine hit %.1f%%":", 엔진 히트율 %.1f%%",c->hit_pct);
         if(c->miss_pps>=200 && c->readmit_pct>=30){ *col=VD_WARN;
-            snprintf(o,n,g_ascii?"! buffer too small: %.0f pages/s admitted, %.0f%% re-reads%s - doubling cuts admissions by about %.0f%% (lower bound): raise data_buffer_size"
-                                :"⚠ 버퍼 부족: 초당 %.0f페이지 적재 중 %.0f%%가 재적재%s — 버퍼 2배면 적재 약 %.0f%% 감소(추정 하한): data_buffer_size 증설",
+            snprintf(o,n,g_ascii?"! buffer too small: %.0f pages/s admitted, %.0f%% re-reads%s - doubling cuts admissions by about %.0f%% (estimate, assuming LRU): raise data_buffer_size"
+                                :"⚠ 버퍼 부족: 초당 %.0f페이지 적재 중 %.0f%%가 재적재%s — 버퍼 2배면 적재 약 %.0f%% 감소(추정치, LRU 가정): data_buffer_size 증설",
                      c->miss_pps,c->readmit_pct,hit,c->readmit_pct); return; }
         if(c->miss_pps>=200 && c->readmit_pct>=0){ *col=VD_NOTE;
             snprintf(o,n,g_ascii?"! %.0f pages/s admitted, re-read %.0f%%%s - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
@@ -7023,6 +7040,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
         if(CAP2.hit_pct>=0)       printf("cap.buffer_hit_pct=%.2f\n",CAP2.hit_pct);
         if(CAP2.turnover_pct>=0){ printf("cap.turnover_pct=%.2f cap.miss_pages_per_s=%.0f\n",CAP2.turnover_pct,CAP2.miss_pps);
                                   if(CAP2.readmit_pct>=0) printf("cap.readmit_pct=%.2f\n",CAP2.readmit_pct);
+                                  if(CAP2.adm_frac>=0) printf("cap.admit_frac_of_buffer=%.3f\n",CAP2.adm_frac);
                                   else printf("cap.readmit_available=0\n"); }
         if(CAP2.await_ms>=0)      printf("cap.await_ms=%.2f cap.read_await_ms=%.2f cap.write_await_ms=%.2f\n",
                                          CAP2.await_ms,CAP2.r_await_ms<0?0:CAP2.r_await_ms,CAP2.w_await_ms<0?0:CAP2.w_await_ms);
@@ -7546,6 +7564,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     CAP2.hit_pct  =rp_num(t,"cap.buffer_hit_pct",-1);
     CAP2.turnover_pct=rp_num(t,"cap.turnover_pct",-1);
     CAP2.readmit_pct =rp_num(t,"cap.readmit_pct",-1);
+    CAP2.adm_frac    =rp_num(t,"cap.admit_frac_of_buffer",-1);
     CAP2.ceil_iops=rp_num(t,"cap.ceiling_iops",0);
     CAP2.ceil_bps =rp_num(t,"cap.ceiling_bps",0);
     CAP2.ceil_util=rp_num(t,"cap.ceiling_util_pct",0);
@@ -8410,7 +8429,8 @@ static void help_keys_dash(void){
 "         상한은 과거 다른 순간의 관측치라 워크로드가 가벼워지기만 해도 80%%를 넘길 수 있기 때문이다.\n"
 "         · ⚠ 지연 병목(await 20ms↑ & IOPS 낮음)\n"
 "         ⚠ 버퍼 부족(적재 많고 재적재 30%%↑) · ⚠ 재사용 거리가 버퍼 밖(재적재 30%%↓ — 스캔이거나 작업집합이 버퍼의 수 배)\n"
-"         재적재 r%% 는 '버퍼를 2배로 늘리면 줄어드는 읽기' 의 추정 하한이다(LRU 기준).\n"
+"         재적재 r%% 는 '버퍼를 2배로 늘리면 줄어드는 읽기' 의 추정치다(LRU 가정 — 하한이 아니다).\n"
+"         프레임당 적재가 버퍼의 절반을 넘으면 스냅샷 사이를 다 못 봐 과소집계 — '신뢰도 낮음'으로 적는다.\n"
 "         · 과다 할당(버퍼 60%% 미사용 & 적재 거의 없음 — 축소 가능) · · 여유\n"
 "  비용   취합 예산 0.5초. 넘으면 그 프레임 값을 버리고 '취합 생략'을 화면에 남긴다.\n"
 "         실측 0.2~0.9ms(예산의 0.2%% 미만). 대상 프로세스 쓰기 0, 접속·락 0.\n"
@@ -8616,7 +8636,9 @@ static void help_keys_plot(void){
 "    OS 캐시 흡수%% (연노랑) %%           버퍼가 미스해도 OS 페이지 캐시가 받아준 비율.\n"
 "\n"
 "  읽는 법 — 버퍼 증설이 효과가 있을 상황인지 가른다.\n"
-"    재적재 r%%            버퍼를 2배로 늘리면 디스크 읽기가 약 r%% 준다(추정 하한, LRU 기준)\n"
+"    재적재 r%%            버퍼를 2배로 늘리면 디스크 읽기가 약 r%% 준다(추정치, LRU 가정)\n"
+"                          CUBRID 는 중간점 삽입이라 실제와 어긋날 수 있고, 프레임당 적재가 버퍼의\n"
+"                          절반을 넘으면 과소집계라 '신뢰도 낮음'으로 표시한다(--interval 을 줄일 것)\n"
 "                          근거는 줌(3) 보조막대의 '재적재' 막대에서 눈으로 확인한다\n"
 "    적재↑ + 재적재 30%%↑   작업집합 > 버퍼 → 증설이 듣는다 (판정문: ⚠ 버퍼 부족)\n"
 "    적재↑ + 재적재 낮음   재사용 거리가 버퍼 밖 — 스캔이거나 작업집합이 버퍼의 수 배.\n"
