@@ -14,7 +14,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-# Remembered ceilings are per device, in memory and in the --capacity-state file, keyed by the
+# Remembered ceilings are per device, in memory for the run, keyed by the
 # device's identity (wwid/serial/dm uuid + size), not its kernel name.  Two devices alternate as
 # the busiest; each must be judged against its own ceiling.  A ceiling is learned only where a
 # queue built (depth >= 4): one outstanding I/O shows util ~100% at depth ~1 and measures the
@@ -68,15 +68,6 @@ static int expect(const char*what,double ceil,double used){
 }
 int main(int argc,char**argv){
     int ok=1;
-    snprintf(g_cap_state,sizeof g_cap_state,"%s",argv[1]);
-    if(argc>2){     /* second process: ceilings come back from the state file */
-        /* a line keyed by a kernel name (a reboot can give that name to another disk) is not attached */
-        { FILE*f=fopen(argv[1],"a"); fprintf(f,"cell sdb 1 2 iops=777 bps=1 util=95 qd=8 await=1 when=1\n"); fclose(f); }
-        frame("sda",500,20);     ok&=expect("restart: sda 500 IOPS",1000,50.0);
-        frame("nvme0n1",2000,20);ok&=expect("restart: nvme0n1 2000 IOPS",10000,20.0);
-        frame("sdb",500,20);     ok&=expect("restart: a kernel-name line is not sdb's",-1,-1.0);
-        return ok?0:1;
-    }
     frame("nvme0n1",10000,95); ok&=expect("nvme0n1 saturated at 10000 IOPS",10000,100.0);
     frame("sda",1000,95);      ok&=expect("sda saturated at 1000 IOPS",1000,100.0);
     frame("nvme0n1",5000,40);  ok&=expect("nvme0n1 at 5000 IOPS",10000,50.0);
@@ -107,7 +98,6 @@ int main(int argc,char**argv){
 C
 gcc -O2 -std=gnu99 -w -I "$(dirname "$SRC")" -o "$TMP/t" "$TMP/t.c" -lm 2>"$TMP/cc.err" || { cat "$TMP/cc.err"; echo "→ FAIL (compile failed)"; exit 1; }
 bad=0
-"$TMP/t" "$TMP/state" || bad=1
-"$TMP/t" "$TMP/state" restart || bad=1
+"$TMP/t" || bad=1
 [ $bad -eq 0 ] && { echo "→ PASS"; exit 0; }
 echo "→ FAIL"; exit 1

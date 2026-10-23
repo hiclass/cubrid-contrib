@@ -15,11 +15,8 @@
 #  limitations under the License.
 #
 # The live screen and its terminal.
-#  - an OSC colour reply arriving after the query gave up (slow SSH) is swallowed, not read
-#    as keys (r, g, a, 1 in "rgb:..." would act); Esc then ']' typed by hand still are keys.
-#    Also when it arrives split (TCP): ESC alone and the rest 60 ms later, the reply cut
-#    after "rgb:1c1c" and the rest 200 ms later, a cut right after ESC ] - and no read
-#    holds the frame longer than the 50 ms gap it already allowed
+#  - escape sequences for the arrow and page keys are read as one key each; an unknown
+#    ESC prefix (Esc ] x) is returned as the keys typed
 #  - Ctrl-Z gives the terminal back (cooked mode, cursor, colours) and fg takes it again
 #    with a clean screen; SIGHUP/SIGQUIT leave the normal way, abort() restores then aborts,
 #    and so do USR1, USR2, ALRM, XCPU and PIPE (their default action ends the run)
@@ -37,55 +34,11 @@ static int keys(const char *in,int *out,int max){
         if(k>=0) out[n++]=k; else if(k==-1){ struct pollfd pf={0,POLLIN,0}; if(poll(&pf,1,0)<=0 && g_kqn==0) break; } }
     return n;
 }
-/* Split arrival: part a, then part b gap_ms later, read the way the live loop does
-   (every 10 ms, never blocking on the pipe); the longest single tui_key call is kept */
-static double g_longest;
-static int keys2(const char *a,int gap_ms,const char *b,int *out,int max){
-    int p[2]; if(pipe(p)) return -1; dup2(p[0],0); close(p[0]); fcntl(0,F_SETFL,O_NONBLOCK);
-    g_kqn=0; g_esc_lone_at=-1; g_osc_drop_until=-1; g_longest=0; int n=0;
-    if(write(p[1],a,strlen(a))<0){}
-    for(int ph=0;ph<2;ph++){
-        double end=now_ms()+(ph?500:gap_ms);
-        while(now_ms()<end){
-            for(;;){ double t=now_ms(); int k=tui_key(); t=now_ms()-t; if(t>g_longest) g_longest=t;
-                     if(k<0) break; if(n<max) out[n++]=k; }
-            usleep(10000);
-        }
-        if(!ph){ if(write(p[1],b,strlen(b))<0){} close(p[1]); }
-    }
-    return n;
-}
-static int same(const int *k,int n,const int *w,int wn){ if(n!=wn) return 0; for(int i=0;i<n;i++) if(k[i]!=w[i]) return 0; return 1; }
-static void show(char *o,size_t on,const int *k,int n){ size_t m=0; o[0]=0;
-    for(int i=0;i<n && m+8<on;i++) m+=snprintf(o+m,on-m,k[i]==0x1b?"Esc ":k[i]==7?"BEL ":"%c ",k[i]); }
 int main(void){
     int bad=0, k[64], n;
-    { struct { const char *what,*a; int gap; const char *b; int w[4], wn; } T[]={
-        {"reply cut after ESC ] 1 (100 ms)",        "\033]1",100,"1;rgb:1c1c/1c1c/1c1c\007q",{0x1b,'q'},2},
-        {"Esc ] typed by hand, x after 400 ms",     "\033]",400,"x",{0x1b,']','x'},3},
-        {"reply split after ESC (60 ms)",           "\033",60,"]11;rgb:1c1c/1c1c/1c1c\007q",{0x1b,'q'},2},
-        {"reply cut after rgb:1c1c (200 ms)",       "\033]11;rgb:1c1c",200,"/1c1c/1c1c\007q",{'q'},1},
-        {"reply cut before ST's backslash (150 ms)","\033]10;rgb:d8d8/d8d8/d8d8\033",150,"\\g",{'g'},1},
-        {"reply cut right after ESC ] (100 ms)",    "\033]",100,"11;rgb:1c1c/1c1c/1c1c\007q",{0x1b,'q'},2},
-        {"cut reply whose rest never comes, q after 400 ms","\033]11;rgb:1c",400,"q",{'q'},1},
-        {"Esc then ] x typed by hand (60 ms)",      "\033",60,"]x",{0x1b,']','x'},3},
-        {"Esc then ] 1 typed by hand (400 ms)",     "\033",400,"]1",{0x1b,']','1'},3},
-      };
-      for(size_t i=0;i<sizeof T/sizeof T[0];i++){
-        n=keys2(T[i].a,T[i].gap,T[i].b,k,64); char got[128]; show(got,sizeof got,k,n);
-        int ok = same(k,n,T[i].w,T[i].wn) && g_longest<=60;
-        printf("  %s   %s: keys [%s], longest read %.0f ms\n",ok?"ok  ":"FAIL",T[i].what,got,g_longest); bad|=!ok;
-      }
-    }
-    n=keys("\033]11;rgb:1c1c/1c1c/1c1c\007q",k,64);
-    int ok = n==1 && k[0]=='q';
-    printf("  %s   a late colour reply then q: keys seen %d (want only q)\n",ok?"ok  ":"FAIL",n); bad|=!ok;
-    n=keys("\033]10;rgb:d8d8/d8d8/d8d8\033\\g",k,64);
-    ok = n==1 && k[0]=='g';
-    printf("  %s   a reply ended by ESC \\\\ (ST) then g: keys seen %d (want only g)\n",ok?"ok  ":"FAIL",n); bad|=!ok;
-    n=keys("\033]x",k,64);
-    ok = n==3 && k[0]==0x1b && k[1]==']' && k[2]=='x';
-    printf("  %s   Esc ] x typed by hand: still three keys (%d)\n",ok?"ok  ":"FAIL",n); bad|=!ok;
+    n=keys("\033[A\033[6~q\033]x",k,64);
+    int ok = n==6 && k[0]==TUI_KEY_UP && k[1]==TUI_KEY_PGDN && k[2]=='q' && k[3]==0x1b && k[4]==']' && k[5]=='x';
+    printf("  %s   keys: Up, PgDn, q, then Esc ] x as three keys (%d read)\n",ok?"ok  ":"FAIL",n); bad|=!ok;
     return bad;
 }
 C

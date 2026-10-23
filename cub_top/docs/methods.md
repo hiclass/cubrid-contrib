@@ -149,7 +149,7 @@ LSA 는 `struct log_lsa { int64 pageid:48; int64 offset:16; }` 8바이트다(리
 `FILE.tmp` 에 쓰고 `rename` 으로 원자 교체한다. 라이브는 매 프레임, 1회 실행은 1회.
 파일 권한은 umask 를 적용한 0644 다(보통 `-rw-r--r--`). `cub_volmap --bufmap` 을 다른 계정으로 돌려도 읽을 수 있게 하기 위해서이며,
 내용은 페이지 번호·상태 플래그·LSA·DB 이름뿐이고 행 데이터는 없다. umask 가 더 엄격하면(예: 077) 그대로 따르고, umask 가 0 이어도
-그룹·다른 계정에 쓰기 권한은 주지 않는다. `--record` 기록(0600)과 `--capacity-state` 상태 파일(0600)은 이 계정 전용이다.
+그룹·다른 계정에 쓰기 권한은 주지 않는다. `--record` 기록(0600)은 이 계정 전용이다.
 
 ```
 헤더 112B (LE):  magic "CBCBMAP1" | u32 version=1 | u32 reclen=32 | i64 ts_sec | i64 ts_nsec

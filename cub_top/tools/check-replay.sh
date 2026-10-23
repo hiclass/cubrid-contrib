@@ -200,7 +200,7 @@ if [ "$a" = "$b" ] && [ -n "$want_ts" ] && [ "$c" = "$want_ts" ]; then
 else echo "  FAIL replay depends on TZ ($c)"; bad=1; fi
 
 # 2d) options a replay cannot apply are refused with status 2, not silently ignored
-nrej=0; for o in "-d nosuchdb" "-d cbench" "--bcb-dump $TMP/x.bin" "-d --interval 2" "-b --capacity-state $TMP/c" \
+nrej=0; for o in "-d nosuchdb" "-d cbench" "--bcb-dump $TMP/x.bin" "-d --interval 2" \
                  "-d --offsets $TMP" "-d --pgbuf-detail" "-d --dump-hist" "-d --record-overwrite"; do
     "$BIN" --replay "$REC" $o </dev/null >/dev/null 2>"$TMP/oerr"; rc=$?
     if [ $rc = 2 ] && grep -q -- '--replay' "$TMP/oerr"; then nrej=$((nrej+1)); else echo "  FAIL --replay with $o: exit $rc"; bad=1; fi
@@ -209,7 +209,7 @@ done
 nacc=0; for o in "-d --heap --ascii" "--dump-json --replay-speed 0"; do
     "$BIN" --replay "$REC" $o </dev/null >/dev/null 2>&1 && nacc=$((nacc+1)) || { echo "  FAIL --replay with $o refused"; bad=1; }
 done
-[ $nrej = 9 ] && [ $nacc = 2 ] && echo "  ok   9 inapplicable option sets refused with status 2, 2 applicable ones accepted"
+[ $nrej = 8 ] && [ $nacc = 2 ] && echo "  ok   8 inapplicable option sets refused with status 2, 2 applicable ones accepted"
 # An option qualifying an absent one: --replay-speed without --replay, --record-overwrite without --record
 nq=0; for o in "-d --replay-speed 2" "-b --replay-speed 0" "-d --record-overwrite" "-b --record-overwrite" "--replay-speed 2" "--record-overwrite"; do
     "$BIN" $o </dev/null >/dev/null 2>"$TMP/qerr"; rc=$?

@@ -114,7 +114,7 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 |---|---|
 | 0 | 정상 |
 | 1 | 실행 중 실패 (예: `--replay` 파일을 읽을 수 없음) |
-| 2 | **사용법 오류** — 출력 모드(`-t`·`-d`/`--dump-json`·`-b`/`-p`) 없이 DB 이름이나 옵션만 줌, 모드를 둘 이상 지정, `--replay` 에 `-t` 또는 재생에 적용되지 않는 옵션(DB 이름·`--interval`·`--bcb-dump`·`--capacity-state`·`--offsets`·`--pgbuf-detail`·`--dump-hist`·`--record-overwrite`), 알 수 없는 옵션, 옵션 값 누락·숫자가 아닌 값, 없는 DB, DB 를 둘 이상 지정, `--record` 경로 쓰기 불가·이미 있음(`--record-overwrite` 없이)·심볼릭 링크·하드링크·FIFO, 라이브가 아닌 모드의 `--record`, `--record` 와 `--replay` 동시 지정, `--record` 없는 `--record-overwrite`, `--replay` 없는 `--replay-speed` |
+| 2 | **사용법 오류** — 출력 모드(`-t`·`-d`/`--dump-json`·`-b`/`-p`) 없이 DB 이름이나 옵션만 줌, 모드를 둘 이상 지정, `--replay` 에 `-t` 또는 재생에 적용되지 않는 옵션(DB 이름·`--interval`·`--bcb-dump`·`--offsets`·`--pgbuf-detail`·`--dump-hist`·`--record-overwrite`), 알 수 없는 옵션, 옵션 값 누락·숫자가 아닌 값, 없는 DB, DB 를 둘 이상 지정, `--record` 경로 쓰기 불가·이미 있음(`--record-overwrite` 없이)·심볼릭 링크·하드링크·FIFO, 라이브가 아닌 모드의 `--record`, `--record` 와 `--replay` 동시 지정, `--record` 없는 `--record-overwrite`, `--replay` 없는 `--replay-speed` |
 
 사용법 오류는 반드시 2로 끝난다. 오타 난 `--dump-jsn` 을 조용히 무시하고 0으로 끝내면
 종료 코드만 보는 호출자에게 **JSON 을 받은 것처럼** 보이기 때문이다.
@@ -129,7 +129,6 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 | `--pgbuf-detail` | 버퍼 슬롯 26만 개(16K 페이지 4GB) 초과 버퍼풀도 페이지 단위로 스캔 (기본은 엔진 집계만, 라이브 `d` 키와 같음) |
 | `--offsets F` | 오프셋 표 파일/디렉터리. 생략 시 실행파일 옆 `offsets/` 자동 탐색 |
 | `--bcb-dump F` | 버퍼풀 스냅샷을 파일로 → `cub_volmap --bufmap F` (이때만 페이지 헤더를 전수 읽음). 권한은 umask 를 적용한 0644 — 다른 계정의 cub_volmap 도 읽음 |
-| `--capacity-state F` | 큐가 쌓였을 때(깊이 ≥ 4) 관측한 상한을 장치 고유 ID 별로 기억해 재실행·재부팅 후에도 헤드룸% 판정 |
 | `--interval S` | 샘플 창 (0.05~3600초, 기본 0.5초). 범위 밖이면 종료 코드 2 |
 | `--ascii` / `--ko` | 라벨 영문/한글 강제 (자동 판정이 틀렸을 때) |
 | `--record F` | 라이브 프레임을 새 파일 F(0600)로 기록 (JSONL). 라이브(`-b`/`-p`) 전용이며 `--replay` 와 함께 쓸 수 없다(녹화 파일 보호). F 가 이미 있거나 심볼릭 링크면 거부한다 |
@@ -245,7 +244,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-samedb.sh` | 같은 DB 이름이 두 계정에서 돌 때: 계정별로 구분, PL 은 자기 계정 서버에, 시작 시 실행 계정 우선, 보던 서버가 내려가도 다른 계정의 같은 이름 DB 로 넘어가지 않음 |
 | `check-ustop.sh` | 사용자 정지(Ctrl-Z·일시정지·도움말) 동안에만 CPU 를 쓰는 대리 서버·브로커로: 정지 구간이 섞인 프레임 0·정지 중 녹화 0·정지마다 `collect.segment` +1·재생 히스토리가 구간마다 새로 시작 · pid 재사용(ns_last_pid): 다른 DB 서버를 옛 이름으로 보이지 않고, 같은 DB 가 같은 pid 로 재기동하면 새 구간 |
 | `check-rectty.sh` | `--record` 가 프레임을 렌더링하는 도중의 Ctrl-Z·fg·충돌(SIGSEGV): 복원·재진입 시퀀스가 녹화 프레임에 들어가지 않고(0건) 터미널에 도달 |
-| `check-tui.sh` | 늦게 온 OSC 색 응답은 키가 아님(손으로 친 Esc ] 는 키) · 나뉘어 온 응답(ESC 단독 뒤 60ms, rgb 중간에서 200ms, ESC ] 직후)도 키가 아니고 읽기 1회는 50ms 이내 · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort, 기본 동작이 종료인 SIGUSR1·USR2·ALRM·XCPU·PIPE 에서 터미널 복원 |
+| `check-tui.sh` | 화살표·페이지 키는 한 키로, 모르는 ESC 접두는 친 그대로 · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort, 기본 동작이 종료인 SIGUSR1·USR2·ALRM·XCPU·PIPE 에서 터미널 복원 |
 | `check-dumpbase.sh` | 1회 실행의 회전율 기준선(직전 `--bcb-dump`) 간격을 나노초로: 0.5초·0.2초 간격이 정확한 초당 적재로 · 라이브는 파일을 다시 읽지 않음 |
 | `check-buildoffsets.sh` | `offsets/build-offsets.sh` 가 작업 디렉터리를 재사용해도 원격의 최신 브랜치를 빌드(낡은 로컬 브랜치 아님) · 태그는 태그 · fetch 실패면 빌드하지 않고 중단 |
 | `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 비특권 계정(root 면 nobody)으로 열린 파일·`databases.txt`(로그 경로 없는 3필드 항목 포함)에서 찾고, 호스트의 더 바쁜 장치를 고르지 않음 · 가짜 sysfs 로 호스트와 무관하게 st_dev → 파티션·NVMe 파티션·md·dm(LVM)·dm-on-md·멀티패스·한 디스크의 두 파티션까지 물리 디스크 대조, 실제 마운트에는 쓰지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |

@@ -4328,44 +4328,6 @@ static struct termios g_tio; static int g_raw=0;
 static volatile sig_atomic_t g_stop=0;
 static void on_sig(int s){ (void)s; g_stop=1; }
 
-/* Darken the background (live only).  The palette assumes a dark background, so
-   live mode sets the terminal default foreground/background on entry and
-   restores them on exit, via OSC 10/11:
-     query  ESC]1N;?BEL  ->  reply  ESC]1N;rgb:RRRR/GGGG/BBBB
-   Only terminals that answer both queries are changed - no reply means no
-   support, so nothing is done (self-gating).  Both must change together, or a
-   light theme's black foreground is lost in the dark. */
-static char g_fg_orig[64]="", g_bg_orig[64]=""; static int g_bg_set=0;
-static int osc_color_query(int code,char*out,size_t on){
-    char q[16]; int ql=snprintf(q,sizeof q,"\033]%d;?\007",code);
-    if(write(STDOUT_FILENO,q,(size_t)ql)<0) return 0;
-    char b[96]; int bn=0; struct pollfd pf={STDIN_FILENO,POLLIN,0};
-    while(bn<(int)sizeof b-1 && poll(&pf,1,200)>0){
-        ssize_t k=read(STDIN_FILENO,b+bn,1); if(k<=0) break;
-        bn+=(int)k;
-        if(b[bn-1]=='\a') break;
-        if(bn>=2 && b[bn-2]=='\033' && b[bn-1]=='\\'){ bn-=2; break; }
-    }
-    if(bn>0 && b[bn-1]=='\a') bn--;
-    b[bn]=0;
-    char pre[8]; snprintf(pre,sizeof pre,"]%d;",code);
-    char *p=strstr(b,pre); if(!p) return 0;
-    p+=strlen(pre);
-    if(!*p || strlen(p)>=on) return 0;
-    snprintf(out,on,"%s",p); return 1;
-}
-static void bg_dark_enter(void){
-    if(!isatty(STDIN_FILENO)||!isatty(STDOUT_FILENO)) return;
-    if(!osc_color_query(10,g_fg_orig,sizeof g_fg_orig)) return;
-    if(!osc_color_query(11,g_bg_orig,sizeof g_bg_orig)) return;
-    printf("\033]10;#d8d8d8\007\033]11;#1c1c1c\007"); fflush(stdout);
-    g_bg_set=1;
-}
-static void bg_dark_leave(void){
-    if(!g_bg_set) return;
-    g_bg_set=0;
-    printf("\033]10;%s\007\033]11;%s\007",g_fg_orig,g_bg_orig);
-}
 /* The terminal state is restored from signal handlers too, so the sequences are built once
    in tui_enter and written with write(2) and tcsetattr, both async-signal-safe */
 static char g_seq_leave[256], g_seq_enter[256]; static int g_seq_leave_n, g_seq_enter_n;
@@ -4375,9 +4337,6 @@ static struct termios g_tio_raw;
 static int g_tty_fd=STDOUT_FILENO;
 static void tui_seq_build(void){
     g_seq_leave_n=0; g_seq_enter_n=0;
-    if(g_bg_set){
-        g_seq_leave_n=snprintf(g_seq_leave,sizeof g_seq_leave,"\033]10;%s\007\033]11;%s\007",g_fg_orig,g_bg_orig);
-        g_seq_enter_n=snprintf(g_seq_enter,sizeof g_seq_enter,"\033]10;#d8d8d8\007\033]11;#1c1c1c\007"); }
     g_seq_leave_n+=snprintf(g_seq_leave+g_seq_leave_n,sizeof g_seq_leave-(size_t)g_seq_leave_n,"%s","\033[?25h\033[0m\033(B\017\033[?2004h\033[?2026l");
     g_seq_enter_n+=snprintf(g_seq_enter+g_seq_enter_n,sizeof g_seq_enter-(size_t)g_seq_enter_n,"%s","\033(B\017\033[2J\033[H\033[?25l\033[?2004l\033[?2026l");
 }
@@ -4424,7 +4383,6 @@ static void tui_leave(void){
     if(g_raw){ tcsetattr(STDIN_FILENO,TCSADRAIN,&g_tio); g_raw=0; }
     if(done) return;                 /* Called explicitly and via atexit, but runs once */
     done=1;
-    bg_dark_leave();                 /* Restore the terminal default colours, before restoring the cursor */
     /* Restore only the cursor and leave the screen, so the last frame stays on the tty.
        G0 is reset to ASCII again so the shell prompt does not inherit a CJK charset. */
     printf("\033[?25h\033[0m\033(B\017\033[?2004h\033[?2026l"); fflush(stdout);   /* Restore the input state */
@@ -4445,7 +4403,6 @@ static void tui_enter(void){
          ESC[?2004l  disable bracketed paste, so composition is not read as a paste
          ESC[8;1"q   DECSCA default; some terminals reset input state on it
        tui_leave() restores both. */
-    bg_dark_enter();                 /* Query under raw mode; no reply means no action */
     printf("\033(B\017\033[2J\033[H\033[?25l\033[?2004l\033[?2026l"); fflush(stdout);
     if(g_raw) tcgetattr(STDIN_FILENO,&g_tio_raw);
     { int d=fcntl(STDOUT_FILENO,F_DUPFD_CLOEXEC,3); if(d>=0) g_tty_fd=d; }
@@ -4504,82 +4461,15 @@ static int key_byte(unsigned char *c){
     if(g_kqn>0){ *c=g_kq[g_kqh]; g_kqh=(g_kqh+1)%(int)sizeof g_kq; g_kqn--; return 1; }
     return read(STDIN_FILENO,c,1)==1;
 }
-/* After ESC ]: a terminal's reply ("10;rgb:..." up to BEL or ESC \\) arriving after the
-   query gave up - over a slow link r, g, d or 1 in it would act as keys.  Only "<digits>;"
-   makes it a reply; anything else is put back and read as keys.  A reply may also arrive
-   split (TCP), and none of these cases waits in place:
-     - ']' within OSC_SPLIT_MS of a lone ESC still opens one;
-     - a cut before "<digits>;" keeps the bytes and decides when the rest comes (']' is
-       given as a key if nothing does within OSC_SPLIT_MS);
-     - after a reply cut short, the rest is dropped up to BEL/ST or OSC_SPLIT_MS. */
-#define OSC_SPLIT_MS 300
-static double g_esc_lone_at=-1;               /* when a lone ESC was returned */
-static double g_osc_open_at=-1;               /* ESC ] seen, "<digits>;" not complete yet */
-static double g_osc_drop_until=-1;            /* dropping the rest of a reply cut short */
-static int g_osc_drop_esc=0;                  /* the last dropped byte was ESC (ST is ESC \\) */
-/* Drop what has arrived of a reply cut short; 1 while still dropping */
-static int osc_drop_rest(void){
-    unsigned char c;
-    while(g_osc_drop_until>=0){
-        if(now_ms()>g_osc_drop_until){ g_osc_drop_until=-1; break; }
-        if(!key_byte(&c)) return 1;
-        if(c==0x07 || c==0x9c || (g_osc_drop_esc && c=='\\')) g_osc_drop_until=-1;
-        g_osc_drop_esc = c==0x1b;
-    }
-    return 0;
-}
-/* 1: a reply, consumed (or being dropped); 0: not one, bytes put back; 2: too early to tell,
-   bytes put back */
-static int osc_reply_skip(void){
-    unsigned char b[300]; int n=0, digits=0, open=0; struct pollfd pf={STDIN_FILENO,POLLIN,0};
-    for(;;){
-        if(n>=(int)sizeof b) break;
-        unsigned char c;
-        if(!key_byte(&c)){
-            if(!open){ kq_unget(b,n); return 2; }
-            if(poll(&pf,1,50)<=0 || !key_byte(&c)) break;   /* the body comes as one burst */
-        }
-        b[n++]=c;
-        if(!open && c>='0' && c<='9'){ digits++; continue; }
-        if(!open){ if(c!=';' || !digits) break; open=1; continue; }   /* "<digits>;" or not a reply */
-        if(c==0x07 || c==0x9c) return 1;
-        if(c=='\\' && n>=2 && b[n-2]==0x1b) return 1;
-    }
-    if(open){                                    /* cut short: still a reply, drop the rest */
-        g_osc_drop_until=now_ms()+OSC_SPLIT_MS; g_osc_drop_esc = b[n-1]==0x1b;
-        return 1;
-    }
-    kq_unget(b,n);
-    return 0;
-}
 static int tui_key(void){
     unsigned char c;
-    if(osc_drop_rest()) return -1;
-    if(g_osc_open_at>=0){                         /* ESC ] waiting for the rest */
-        int r = now_ms()-g_osc_open_at>OSC_SPLIT_MS ? 0 : osc_reply_skip();
-        if(r==2) return -1;
-        g_osc_open_at=-1;
-        return r==1 ? -1 : ']';
-    }
     if(!key_byte(&c)) return -1;
-    if(c==']' && g_esc_lone_at>=0 && now_ms()-g_esc_lone_at<=OSC_SPLIT_MS){   /* ESC | ]... */
-        g_esc_lone_at=-1;
-        int r=osc_reply_skip();
-        if(r==2){ g_osc_open_at=now_ms(); return -1; }
-        return r==1 ? -1 : c;
-    }
-    g_esc_lone_at=-1;
     if(c==0x1b){
         /* Interpret "ESC [ X", "ESC O X" and "ESC [ N ~" one byte at a time; bytes
            that do not continue a known sequence are returned as the next keys. */
         unsigned char b[3]; int n=0;
-        if(!key_byte(&b[n])){ g_esc_lone_at=now_ms(); return 0x1b; }
+        if(!key_byte(&b[n])) return 0x1b;
         n++;
-        if(b[0]==']'){                            /* a colour reply arriving late is not keys */
-            int r=osc_reply_skip();
-            if(r==1) return -1;
-            if(r==2){ g_osc_open_at=now_ms(); return 0x1b; }
-        }
         if(b[0]=='[' || b[0]=='O'){
             if(key_byte(&b[n])){
                 n++;
@@ -4647,7 +4537,7 @@ static int term_cols_raw(void){
  *   Cost: 8B x 6 reads, a hash comparison, and /proc/diskstats fields already
  *   being read - well under 1ms per frame.
  */
-static char g_cap_state[256]="";          static int g_replaying=0;             /* Set during --replay so the screen says so */
+static int g_replaying=0;             /* Set during --replay so the screen says so */
 static char g_rp_capvd[320]="";           /* Recorded cap.verdict: recomputing it from rounded keys can change a digit */
 static int g_rep_i=0,g_rep_n=0;       /* Replay progress, shown in the status line */
 static time_t g_rep_ts=0;             /* The frame's recorded time, shown instead of now */
@@ -4662,7 +4552,6 @@ static const char *g_rec_path=NULL;   /* --record FILE  */
 static char g_rec_err[160]="";        /* Why --record stopped: shown on screen, exit status 1 */
 static const char *g_rep_path=NULL;   /* --replay FILE  */
 static double g_rep_speed=1.0;        /* --replay-speed (0 = as fast as possible) */
-/* --capacity-state FILE, for remembering ceilings */
 /* Three block-size bands x three read/write bands.  The boundaries come from CUBRID's
    real I/O units: log and DWB around 4KB, data pages 16KB by default, scan read-ahead
    128KB and above. */
@@ -4881,30 +4770,9 @@ static void cap_turnover(double now_s){
     cap_prev_n=n; cap_prev_t=now_s;
 }
 
-/* ---- Remembered ceilings: the peak IOPS and bandwidth of frames with a queue (depth >= 4) are kept in a state file ---- */
+/* ---- Remembered ceilings: the peak IOPS and bandwidth of frames with a queue (depth >= 4), kept for the run ---- */
 static void cap_ceiling(void){
     CAP2.headroom_pct=-1;
-    if(!g_cap_state[0]) g_cap_state[0]=0;
-    static int loaded=0;
-    if(!loaded && g_cap_state[0]){
-        FILE*f=fopen(g_cap_state,"r");
-        if(f){ char ln[256];
-               while(fgets(ln,sizeof ln,f)){
-                   int b=0,r=0; double io=0,bp=0,ut=0,qd=0,aw=0; long long w=0; char dn[160];
-                   cap_dev_t *d;
-                   if(ln[0]=='#') continue;
-                   /* A line without a device name cannot be attributed and is not read */
-                   if(sscanf(ln,"cell %159s %d %d iops=%lf bps=%lf util=%lf qd=%lf await=%lf when=%lld",
-                             dn,&b,&r,&io,&bp,&ut,&qd,&aw,&w)>=7
-                      && b>=0 && b<CAP_BS_N && r>=0 && r<CAP_RW_N && (d=cap_dev_get(dn))){
-                       cap_cell_t*c=&d->m[b][r];
-                       c->iops=io; c->bps=bp; c->util=ut; c->qd=qd; c->await_ms=aw;
-                       c->when=(time_t)w; c->valid=1;
-                   }
-               }
-               fclose(f); }
-        loaded=1;
-    }
     { const char *k=dev_key(CAP2.dev); snprintf(g_cap_devid,sizeof g_cap_devid,"%s",k?k:"");
       cap_dev_t *d=cap_dev_get(k); g_cap_mtx = d ? d->m : g_cap_none; }
     /* This frame's I/O profile: mean request size and read share */
@@ -4932,19 +4800,6 @@ static void cap_ceiling(void){
           CAP2.ceil_iops=c->iops; CAP2.ceil_bps=c->bps; CAP2.ceil_util=c->util;
           CAP2.ceil_qd=c->qd; CAP2.ceil_when=c->when; CAP2.ceil_valid=1;
       } else CAP2.ceil_valid=0;
-    }
-    if(sat && cur_iops>0){
-        if(g_cap_state[0]){    /* Writes only to our own file; the target process and DB are untouched */
-            char tmp[320]; FILE*f=tmp_create(g_cap_state,tmp,sizeof tmp,0600);
-            if(f){ fprintf(f,"# cub_top capacity ceilings by device and profile (block size x read ratio)\n");
-                   for(int i=0;i<g_capdev_n;i++) for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
-                       cap_cell_t*c=&g_capdev[i].m[b][r];
-                       if(!c->valid) continue;
-                       fprintf(f,"cell %s %d %d iops=%.0f bps=%.0f util=%.1f qd=%.2f await=%.2f when=%lld\n",
-                               g_capdev[i].name,b,r,c->iops,c->bps,c->util,c->qd,c->await_ms,(long long)c->when);
-                   }
-                   if(fclose(f)==0) rename(tmp,g_cap_state); else unlink(tmp); }
-        }
     }
     if(CAP2.ceil_valid && CAP2.ceil_iops>0) CAP2.headroom_pct = 100.0*cur_iops/CAP2.ceil_iops;
 }
@@ -6861,8 +6716,8 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
                               :"│  ├─ ◌ 상한  %.0f IOPS (같은 칸, 사용률 %.0f%% 시점 관측, %s) → 현재 %.0f%% 사용\n",
                        CAP2.ceil_iops,CAP2.ceil_util,cw,CAP2.headroom_pct<0?0:CAP2.headroom_pct);
             } else
-                printf(g_ascii?"│  ├─ ? ceiling  not observed for this cell (needs a saturated moment at this profile; --capacity-state persists it)\n"
-                              :"│  ├─ ? 상한  이 칸은 미관측 (같은 프로파일에서 포화 순간 필요; --capacity-state 로 보존)\n");
+                printf(g_ascii?"│  ├─ ? ceiling  not observed for this cell (needs a saturated moment at this profile in this run)\n"
+                              :"│  ├─ ? 상한  이 칸은 미관측 (이 실행 중 같은 프로파일에서 포화 순간 필요)\n");
             /* Ceilings remembered in other cells are shown too, making clear that the ceiling varies by profile */
             { int shown=0;
               for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
@@ -8394,7 +8249,6 @@ static const opt_t OPTS[]={
  {"--offsets",   "F","오프셋 표 파일/디렉터리 (tools/collect-offsets.sh 산출물 — 디렉터리면 버전 자동 선택; 생략 시 실행파일 옆 offsets/ 자동 탐색)"},
  {"--pgbuf-detail","","버퍼 슬롯 26만 개(16K 페이지 4GB) 초과 버퍼풀도 페이지 단위로 스캔 (기본은 엔진 집계만 — 전수 스캔은 대상에 접촉이 크다)"},
  {"--bcb-dump",  "F","버퍼풀 BCB 스냅샷을 파일 F 로 (cub_volmap --bufmap F 가 지도에 얹음; 라이브는 매 프레임 갱신, 이때는 헤더를 전수 읽음)"},
- {"--capacity-state","F","용량 상한(큐가 쌓인 순간의 관측 IOPS) 기억 파일 — 재실행해도 헤드룸%를 이어서 판정"},
  {"-p, --plot",  "", "시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)"},
  {"--interval",  "S","샘플 창(초, 0.05~3600, 기본 0.5)"},
  {"--record", "F", "라이브(-b/-p) 프레임을 새 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가). 이미 있거나 심볼릭 링크면 거부"},
@@ -8710,7 +8564,7 @@ static void help_keys_dash(void){
 "         (write-heavy <30%% / mixed / read-heavy >70%%) 9칸으로 나눠 칸마다 따로 기억하고,\n"
 "         지금 프로파일과 **같은 칸**의 상한하고만 비교한다. 다른 칸 값을 빌려 쓰면\n"
 "         (128KB 로 잰 상한을 4KB 워크로드에 적용) '여유 있다' 는 거짓 판정이 나온다.\n"
-"         --capacity-state FILE 로 보존하면 재실행해도 칸별 상한을 이어서 판정한다.\n"
+"         상한은 이 실행 동안만 기억한다(파일로 남기지 않는다).\n"
 "         그 칸에서 큐가 쌓인 적이 없으면 '이 칸은 미관측'으로 표기한다(추정을 사실로 위장하지 않는다).\n"
 "  버퍼   히트율의 출처가 두 가지다.\n"
 "         perfmon   엔진 카운터가 **이미 돌고 있을 때**(statdump·csql ;histo 등 watcher 존재)\n"
@@ -9055,7 +8909,7 @@ int main(int argc,char **argv){
        let an option without its value match nothing (--replay with no path would sample
        live), so a missing value is rejected here first. */
     static const char *const NEEDVAL[]={"--record","--replay","--replay-speed","--offsets",
-        "--interval","--bcb-dump","--capacity-state",NULL};
+        "--interval","--bcb-dump",NULL};
     for(int i=1;i<argc;i++){
         for(int n=0;NEEDVAL[n];n++)
             if(!strcmp(argv[i],NEEDVAL[n])&&i+1>=argc){
@@ -9082,7 +8936,6 @@ int main(int argc,char **argv){
             snprintf(g_offs_file,sizeof g_offs_file,"%s",argv[++i]);
         else if(!strcmp(argv[i],"--interval") && i+1<argc){ if(!opt_num(argv[i],argv[i+1],0.05,3600,&interval)) return 2; i++; interval_set=1; }
         else if(!strcmp(argv[i],"--bcb-dump") && i+1<argc) snprintf(g_bcb_dump,sizeof g_bcb_dump,"%s",argv[++i]);
-        else if(!strcmp(argv[i],"--capacity-state") && i+1<argc) snprintf(g_cap_state,sizeof g_cap_state,"%s",argv[++i]);
         else if(!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")||!strcmp(argv[i],"/h")
                 ||!strcmp(argv[i],"-?")||!strcmp(argv[i],"/?")){
             /* Like any CLI: the usage and options, printed in place.  The screen
@@ -9126,7 +8979,7 @@ int main(int argc,char **argv){
         char no[200]=""; size_t nl=0;
         #define NOREP(c_,s_) do{ if(c_) nl+=(size_t)snprintf(no+nl,nl<sizeof no?sizeof no-nl:0,"%s%s",nl?", ":"",s_); }while(0)
         NOREP(want_db,"<db>"); NOREP(interval_set,"--interval"); NOREP(g_bcb_dump[0],"--bcb-dump");
-        NOREP(g_cap_state[0],"--capacity-state"); NOREP(g_offs_file[0],"--offsets");
+        NOREP(g_offs_file[0],"--offsets");
         NOREP(g_pg_detail,"--pgbuf-detail"); NOREP(dump_hist,"--dump-hist"); NOREP(g_rec_overwrite,"--record-overwrite");
         #undef NOREP
         if(no[0]){
