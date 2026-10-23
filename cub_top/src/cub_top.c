@@ -4464,35 +4464,81 @@ static int key_byte(unsigned char *c){
     return read(STDIN_FILENO,c,1)==1;
 }
 /* After ESC ]: a terminal's reply ("10;rgb:..." up to BEL or ESC \\) arriving after the
-   query gave up - over a slow link r, g, a or 1 in it would act as keys.  It comes as one
-   burst, so the next bytes are waited for briefly; only "<digits>;" makes it a reply,
-   anything else is put back and read as keys. */
+   query gave up - over a slow link r, g, d or 1 in it would act as keys.  Only "<digits>;"
+   makes it a reply; anything else is put back and read as keys.  A reply may also arrive
+   split (TCP), and none of these cases waits in place:
+     - ']' within OSC_SPLIT_MS of a lone ESC still opens one;
+     - a cut before "<digits>;" keeps the bytes and decides when the rest comes (']' is
+       given as a key if nothing does within OSC_SPLIT_MS);
+     - after a reply cut short, the rest is dropped up to BEL/ST or OSC_SPLIT_MS. */
+#define OSC_SPLIT_MS 300
+static double g_esc_lone_at=-1;               /* when a lone ESC was returned */
+static double g_osc_open_at=-1;               /* ESC ] seen, "<digits>;" not complete yet */
+static double g_osc_drop_until=-1;            /* dropping the rest of a reply cut short */
+static int g_osc_drop_esc=0;                  /* the last dropped byte was ESC (ST is ESC \\) */
+/* Drop what has arrived of a reply cut short; 1 while still dropping */
+static int osc_drop_rest(void){
+    unsigned char c;
+    while(g_osc_drop_until>=0){
+        if(now_ms()>g_osc_drop_until){ g_osc_drop_until=-1; break; }
+        if(!key_byte(&c)) return 1;
+        if(c==0x07 || c==0x9c || (g_osc_drop_esc && c=='\\')) g_osc_drop_until=-1;
+        g_osc_drop_esc = c==0x1b;
+    }
+    return 0;
+}
+/* 1: a reply, consumed (or being dropped); 0: not one, bytes put back; 2: too early to tell,
+   bytes put back */
 static int osc_reply_skip(void){
-    unsigned char b[300]; int n=0, digits=0; struct pollfd pf={STDIN_FILENO,POLLIN,0};
+    unsigned char b[300]; int n=0, digits=0, open=0; struct pollfd pf={STDIN_FILENO,POLLIN,0};
     for(;;){
         if(n>=(int)sizeof b) break;
         unsigned char c;
-        if(!key_byte(&c)){ if(poll(&pf,1,50)<=0) break; if(!key_byte(&c)) break; }
+        if(!key_byte(&c)){
+            if(!open){ kq_unget(b,n); return 2; }
+            if(poll(&pf,1,50)<=0 || !key_byte(&c)) break;   /* the body comes as one burst */
+        }
         b[n++]=c;
-        if(n==1+digits && c>='0' && c<='9'){ digits++; continue; }
-        if(n==1+digits){ if(c!=';' || !digits) break; continue; }   /* "<digits>;" or not a reply */
+        if(!open && c>='0' && c<='9'){ digits++; continue; }
+        if(!open){ if(c!=';' || !digits) break; open=1; continue; }   /* "<digits>;" or not a reply */
         if(c==0x07 || c==0x9c) return 1;
         if(c=='\\' && n>=2 && b[n-2]==0x1b) return 1;
     }
-    if(n>1+digits && digits && b[digits]==';') return 1;   /* cut short: still a reply, the rest is dropped */
+    if(open){                                    /* cut short: still a reply, drop the rest */
+        g_osc_drop_until=now_ms()+OSC_SPLIT_MS; g_osc_drop_esc = b[n-1]==0x1b;
+        return 1;
+    }
     kq_unget(b,n);
     return 0;
 }
 static int tui_key(void){
     unsigned char c;
+    if(osc_drop_rest()) return -1;
+    if(g_osc_open_at>=0){                         /* ESC ] waiting for the rest */
+        int r = now_ms()-g_osc_open_at>OSC_SPLIT_MS ? 0 : osc_reply_skip();
+        if(r==2) return -1;
+        g_osc_open_at=-1;
+        return r==1 ? -1 : ']';
+    }
     if(!key_byte(&c)) return -1;
+    if(c==']' && g_esc_lone_at>=0 && now_ms()-g_esc_lone_at<=OSC_SPLIT_MS){   /* ESC | ]... */
+        g_esc_lone_at=-1;
+        int r=osc_reply_skip();
+        if(r==2){ g_osc_open_at=now_ms(); return -1; }
+        return r==1 ? -1 : c;
+    }
+    g_esc_lone_at=-1;
     if(c==0x1b){
         /* Interpret "ESC [ X", "ESC O X" and "ESC [ N ~" one byte at a time; bytes
            that do not continue a known sequence are returned as the next keys. */
         unsigned char b[3]; int n=0;
-        if(!key_byte(&b[n])) return 0x1b;
+        if(!key_byte(&b[n])){ g_esc_lone_at=now_ms(); return 0x1b; }
         n++;
-        if(b[0]==']' && osc_reply_skip()) return -1;   /* a colour reply arriving late is not keys */
+        if(b[0]==']'){                            /* a colour reply arriving late is not keys */
+            int r=osc_reply_skip();
+            if(r==1) return -1;
+            if(r==2){ g_osc_open_at=now_ms(); return 0x1b; }
+        }
         if(b[0]=='[' || b[0]=='O'){
             if(key_byte(&b[n])){
                 n++;

@@ -244,7 +244,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-libpath.sh` | maps 의 라이브러리 경로는 줄의 나머지 전체(공백 든 설치 경로) · 교체돼 "(deleted)" 인데 map_files 를 못 열면 방법 B 거부 · map_files 가 열리면 실행 중인 바이트를 읽음 |
 | `check-samedb.sh` | 같은 DB 이름이 두 계정에서 돌 때: 계정별로 구분, PL 은 자기 계정 서버에, 시작 시 실행 계정 우선, 보던 서버가 내려가도 다른 계정의 같은 이름 DB 로 넘어가지 않음 |
 | `check-rectty.sh` | `--record` 가 프레임을 렌더링하는 도중의 Ctrl-Z·fg·충돌(SIGSEGV): 복원·재진입 시퀀스가 녹화 프레임에 들어가지 않고(0건) 터미널에 도달 |
-| `check-tui.sh` | 늦게 온 OSC 색 응답은 키가 아님(손으로 친 Esc ] 는 키) · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort 에서 터미널 복원 |
+| `check-tui.sh` | 늦게 온 OSC 색 응답은 키가 아님(손으로 친 Esc ] 는 키) · 나뉘어 온 응답(ESC 단독 뒤 60ms, rgb 중간에서 200ms, ESC ] 직후)도 키가 아니고 읽기 1회는 50ms 이내 · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort 에서 터미널 복원 |
 | `check-dumpbase.sh` | 1회 실행의 회전율 기준선(직전 `--bcb-dump`) 간격을 나노초로: 0.5초·0.2초 간격이 정확한 초당 적재로 · 라이브는 파일을 다시 읽지 않음 |
 | `check-buildoffsets.sh` | `offsets/build-offsets.sh` 가 작업 디렉터리를 재사용해도 원격의 최신 브랜치를 빌드(낡은 로컬 브랜치 아님) · 태그는 태그 · fetch 실패면 빌드하지 않고 중단 |
 | `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 일반 계정으로 열린 파일·`databases.txt`(로그 경로 없는 3필드 항목 포함)에서 찾고, 일반 블록 마운트는 st_dev 로·overlay 는 fsid 로, 호스트의 더 바쁜 장치를 고르지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |
