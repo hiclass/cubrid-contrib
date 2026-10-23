@@ -150,6 +150,9 @@ static void rep_localtime(time_t t,struct tm *o){
 
 static int g_mem_fd = -1;   /* For the /proc/pid/mem fallback */
 static int g_mem_pid = -1;  /* The pid g_mem_fd belongs to: a switch or restart must not read the old process */
+/* Bumped when the watched process changes, a reused pid included: descriptors opened on
+   /proc/<pid> belong to the old process and are reopened */
+static unsigned g_pid_gen=0, g_mem_gen=0;
 
 static ssize_t vmread(int pid,unsigned long addr,void *buf,size_t len){
     size_t got=0;
@@ -167,12 +170,12 @@ static ssize_t vmread(int pid,unsigned long addr,void *buf,size_t len){
 #endif
     }
     if(CAP.mem_pread){                        /* Fallback: /proc/pid/mem */
-        if(g_mem_fd>=0 && g_mem_pid!=pid){ close(g_mem_fd); g_mem_fd=-1; }
+        if(g_mem_fd>=0 && (g_mem_pid!=pid || g_mem_gen!=g_pid_gen)){ close(g_mem_fd); g_mem_fd=-1; }
         if(g_mem_fd<0){
             char p[64]; snprintf(p,sizeof p,"/proc/%d/mem",pid);
             g_mem_fd=open(p,O_RDONLY|O_CLOEXEC);
             if(g_mem_fd<0){ CAP.mem_pread=0; return 0; }
-            g_mem_pid=pid;
+            g_mem_pid=pid; g_mem_gen=g_pid_gen;
         }
         got=0;
         while(got<len){
@@ -329,6 +332,7 @@ typedef struct {
 typedef struct {
     int pid; char db[64];
     int uid;              /* The account the server runs as: the same db name may run under several */
+    unsigned long long start;   /* Start time (ticks since boot): with the pid, the process's identity */
     /* top/ps-level figures, for every instance (the analysed one in detail elsewhere) */
     double rss;           /* Resident (VmRSS) */
     double filemap;       /* File-backed resident (RssFile): the share resident in the page cache */
@@ -405,6 +409,16 @@ static int proc_uid(int pid){
     char p[32]; struct stat st; snprintf(p,sizeof p,"/proc/%d",pid);
     return stat(p,&st)==0 ? (int)st.st_uid : -1;
 }
+/* A process's start time, field 22 of /proc/<pid>/stat (ticks since boot); 0 if unreadable.
+   A pid alone may be reused by another process while the watched one is gone. */
+static unsigned long long proc_start(int pid){
+    char p[64],b[1024]; snprintf(p,sizeof p,"/proc/%d/stat",pid);
+    if(read_file(p,b,sizeof b)<=0) return 0;
+    char *q=strrchr(b,')'); if(!q) return 0;
+    q+=2;                                         /* field 3 */
+    for(int f=3;f<22 && q;f++){ q=strchr(q,' '); if(q) q++; }
+    return q ? strtoull(q,NULL,10) : 0;
+}
 static int enum_instances(void){
     g_ninst=0; g_inst_lost=0;
     DIR *d=opendir("/proc"); if(!d) return 0;
@@ -420,7 +434,7 @@ static int enum_instances(void){
             int uid=proc_uid(pid);
             for(int i=0;i<g_ninst;i++) if(g_inst[i].pid<0 && !strcmp(g_inst[i].db,db) && g_inst[i].uid==uid){ x=&g_inst[i]; break; }
             if(!x){ x=inst_add(); if(!x) continue; snprintf(x->db,sizeof x->db,"%s",db); }
-            x->pid=pid; x->uid=uid;
+            x->pid=pid; x->uid=uid; x->start=proc_start(pid);
             status_mem(pid,&x->rss,&x->filemap,&x->swap);
             continue;
         }
@@ -466,8 +480,9 @@ static int restart_pick(const char *db,int uid){
    the one-shot walk, a followed restart), so a restart is looked for under the account
    chosen even when that server stops before a frame has seen it; -1 = any. */
 static int g_track_uid=-1;
+static unsigned long long g_track_start=0;   /* The watched server's start time; 0 = not known yet */
 static void target_select(proc_t *P,int i){
-    g_cur=i; P->pid=g_inst[i].pid; g_track_uid=g_inst[i].uid;
+    g_cur=i; P->pid=g_inst[i].pid; g_track_uid=g_inst[i].uid; g_track_start=g_inst[i].start;
     snprintf(P->db,sizeof P->db,"%s",g_inst[i].db);
     snprintf(g_cur_db,sizeof g_cur_db,"%s",g_inst[i].db);
 }
@@ -3172,9 +3187,9 @@ static void pg_recount(void){
 static unsigned g_pm_gen=0;
 static void pm_frame(void){ g_pm_gen++; }
 static int pm_present(int pid,unsigned long addr){
-    static int fd=-1, fpid=-1; static uint64_t blk[512]; static long bno=-1; static unsigned gen=0;
-    if(fpid!=pid){ if(fd>=0) close(fd); char p[64]; snprintf(p,sizeof p,"/proc/%d/pagemap",pid);
-                   fd=open(p,O_RDONLY|O_CLOEXEC); fpid=pid; bno=-1; }
+    static int fd=-1, fpid=-1; static uint64_t blk[512]; static long bno=-1; static unsigned gen=0, fgen=0;
+    if(fpid!=pid || fgen!=g_pid_gen){ if(fd>=0) close(fd); char p[64]; snprintf(p,sizeof p,"/proc/%d/pagemap",pid);
+                   fd=open(p,O_RDONLY|O_CLOEXEC); fpid=pid; fgen=g_pid_gen; bno=-1; }
     if(gen!=g_pm_gen){ gen=g_pm_gen; bno=-1; }
     if(fd<0) return -1;
     unsigned long pg=addr/4096; long b=(long)(pg/512);
@@ -3621,12 +3636,19 @@ static double sr_mapped(const char *nm){ const srg_t*x=sr_find(nm); return x?x->
    across frames - engine counters, the turnover page set, per-item deltas - belong
    to one process; compared against another they yield nonsense rates. */
 static unsigned g_inst_gen=0;
+/* Collection segment: bumped when measurement stops being continuous - the target changes,
+   or the user stops collection (Ctrl-Z, pause, help).  History, frame-to-frame baselines and
+   trackers belong to one segment, and no frame spans two: data from both sides of a stop is
+   not one data set. */
+static unsigned g_seg_gen=0;
+static volatile sig_atomic_t g_ustop_n=0;    /* User stops so far: SIGCONT, unpause, help closed */
+static sig_atomic_t g_ustop_seen=0;
 /* Must be called when switching instances.  g_reg_db/g_reg_lg point into P->reg[],
    so keeping the previous instance's pointers makes method_a exclude the wrong
    region and double-count.  SR[]/NSR, B and A are cleared too, so the next frame
    recomputes against the new target. */
 static void reset_instance_state(void){
-    g_inst_gen++;
+    g_inst_gen++; g_seg_gen++; g_pid_gen++;
     g_hprevn=0;                        /* heap item deltas */
     g_perm_limited=0; g_perm_why[0]=0; /* the next target's access is judged afresh */
     g_reg_db=NULL; g_reg_lg=NULL;
@@ -4176,12 +4198,14 @@ typedef struct {
 static hsam_t HS[HIST_MAX]; static int HN=0, HCAP=HIST_MAX;
 
 /* One place for the value sources.  Region values go through the sr_*() name lookups without exception; never by index. */
-static int g_hist_pid=-2; static unsigned g_hist_gen=0;   /* The process the history belongs to */
+static int g_hist_pid=-2; static unsigned g_hist_gen=0, g_hist_seg=0;   /* The process and segment the history belongs to */
+static unsigned long long g_hist_start=0;
 static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const iod_t*IO){
     /* History is one process's: after a switch, a restart or the server going down, the old
        samples would be compared with the new process (a "server -X GB" drop that is only a
        restart, a flush minimum and plots mixing two processes).  Live and in a replay alike. */
-    if(P->pid!=g_hist_pid || g_inst_gen!=g_hist_gen){ HN=0; g_hist_pid=P->pid; g_hist_gen=g_inst_gen; }
+    if(P->pid!=g_hist_pid || g_inst_gen!=g_hist_gen || g_seg_gen!=g_hist_seg || g_track_start!=g_hist_start){
+        HN=0; g_hist_pid=P->pid; g_hist_gen=g_inst_gen; g_hist_seg=g_seg_gen; g_hist_start=g_track_start; }
     if(HN>=HCAP){ memmove(HS,HS+1,sizeof(hsam_t)*(HCAP-1)); HN=HCAP-1; }
     hsam_t*s=&HS[HN++];
     memset(s,0,sizeof *s);
@@ -4364,7 +4388,7 @@ static void on_tstp(int s){
     raise_default(SIGTSTP);                      /* stops here until fg */
     signal(SIGTSTP,on_tstp); (void)s; errno=e;
 }
-static void on_cont(int s){ int e=errno; (void)s; tui_raw_reenter(); errno=e; }
+static void on_cont(int s){ int e=errno; (void)s; g_ustop_n++; tui_raw_reenter(); errno=e; }
 /* Children this process started (paramdump's group, the DWARF extraction): stopped on the
    way out by a signal, since no exit path runs then.  Async-signal-safe: kill(2) only. */
 static void kids_kill_now(void){
@@ -4793,7 +4817,7 @@ static int cap_turnover_from_dump(void){
 static void cap_turnover(double now_s){
     CAP2.turnover_pct=-1; CAP2.readmit_pct=-1; CAP2.miss_pps=-1; CAP2.adm_frac=-1;
     { static unsigned seen=0;
-      if(seen!=g_inst_gen){ seen=g_inst_gen; cap_prev_n=0; vp_hist_n=0; vp_evseq=0; } }
+      if(seen!=g_seg_gen){ seen=g_seg_gen; cap_prev_n=0; vp_hist_n=0; vp_evseq=0; } }
     if(!PG.ok||PG.nrec<=0) return;
     /* A degraded frame holds only verified records; comparing it would count the dropped
        ones as evicted.  It is skipped and the baseline kept for the next full frame. */
@@ -5046,7 +5070,7 @@ static void cap_collect(proc_t*P,iod_t*IO,const dstat_t*d0,int nd0,const dstat_t
     CAP2.ps_ok=0; CAP2.ps_why[0]=0;
     { static uint64_t prev[CPS_N]; static int have=0; static unsigned seen=0;
       uint64_t v[CPS_N]={0};
-      if(seen!=g_inst_gen){ seen=g_inst_gen; have=0; }
+      if(seen!=g_seg_gen){ seen=g_seg_gen; have=0; }
       if(cap_pstat_read(P,v)){
           /* One-shot has no delta baseline, but the fact that the counters are running and the
              cumulative hit ratio are still absolute values.  Per-second figures (_ps)
@@ -7108,7 +7132,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                          double cpu_pct,int ncpu,int IO_dthr,int IO_nthr){
     double mt=M->total*1024.0, av=M->avail*1024.0;
     /* ts_epoch_ms: the sample interval is sub-second, so a recording needs more than ts_epoch */
-    printf("ts=\"%s\" ts_epoch=%ld ts_epoch_ms=%.0f\n",tq(ts),tsec,(g_ts_frac>=0?g_ts_frac:(double)tsec)*1000.0);
+    printf("ts=\"%s\" ts_epoch=%ld ts_epoch_ms=%.0f collect.segment=%u\n",tq(ts),tsec,(g_ts_frac>=0?g_ts_frac:(double)tsec)*1000.0,g_seg_gen);
     printf("caps.vm_readv=%d caps.mem_pread=%d caps.rollup=%d caps.proc_io=%d\n",
            CAP.vm_readv,CAP.mem_pread,CAP.rollup,CAP.proc_io);
     printf("perm.limited=%d",g_perm_limited);
@@ -7182,9 +7206,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
     printf("server.db=\"%s\" server.pid=%d server.mapped_kb=%lu server.rss_kb=%lu "
            "server.pss_kb=%lu server.swap_kb=%lu server.workers=%d"
            " server.minflt_per_s=%.0f server.majflt_per_s=%.0f"
-           " server.cpu_pct=%.1f server.host_cores=%d\n",
+           " server.cpu_pct=%.1f server.host_cores=%d server.start_ticks=%llu\n",
            tq(ds),P->pid,P->vsize_kb,P->rss_kb,P->pss_kb,P->swap_kb,P->nthreads,
-           minflt_ps,majflt_ps,cpu_pct,ncpu); }
+           minflt_ps,majflt_ps,cpu_pct,ncpu,g_track_start); }
     for(int i=0;i<NSR;i++){
         srg_t *r=&SR[i];
         /* Strip spaces and parentheses from keys so a key=value parser does not break */
@@ -7556,6 +7580,8 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     }
 
     P->pid     =(int)rp_num(t,"server.pid",-1);
+    g_seg_gen  =(unsigned)rp_num(t,"collect.segment",0);              /* the history follows the recorded segments */
+    g_track_start=(unsigned long long)rp_num(t,"server.start_ticks",0);
     P->rss_kb  =(unsigned long)rp_num(t,"server.rss_kb",0);
     P->pss_kb  =(unsigned long)rp_num(t,"server.pss_kb",0);
     P->vsize_kb=(unsigned long)rp_num(t,"server.mapped_kb",0);
@@ -8056,9 +8082,21 @@ static void json_line_from_terse(FILE*tf,FILE*o){
  * Returns collection work time in ms, excluding waits.  Window:
  *   baseline -> interval -> smaps/rollup/io -> classify/method B
  */
+/* A user stop (Ctrl-Z, pause, help) ends the collection segment: frame-to-frame state is
+   dropped and the next walk of the tiers is only their CPU baseline */
+static void seg_break(void){
+    g_ustop_seen=g_ustop_n; g_seg_gen++;
+    g_hprevn=0;                                   /* heap item deltas */
+    g_tcpun=0;
+    tier_t tb; memset(&tb,0,sizeof tb);
+    g_enum_T=&tb; g_enum_dt=0; enum_instances(); g_enum_T=NULL;
+}
 static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                           double interval,int with_a,FILE**pd){
     double w0=now_ms();
+    /* Stopped by the user since the last frame (unpause, help, a Ctrl-Z between frames) */
+    if(g_ustop_n!=g_ustop_seen) seg_break();
+again:
     P0->pid=P->pid;
     if(P->pid>=0){
         parse_status_stat(P0); parse_procio(P0);
@@ -8073,17 +8111,26 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
        is this frame's baseline.  Only a changed pid or the first frame measures
        afresh, so one-shot (-t/-1) also produces a value. */
     unsigned long blk0=0;
-    { static unsigned long last_blk=0; static int last_pid=-1;
-      if(P->pid==last_pid && last_blk>0) blk0=last_blk;
+    { static unsigned long last_blk=0; static int last_pid=-1; static unsigned last_seg=0;
+      if(P->pid==last_pid && last_seg==g_seg_gen && last_blk>0) blk0=last_blk;
       else { int dd,nn; count_d_threads(P->pid,&dd,&nn,&blk0); }
-      last_pid=P->pid; g_blk_baseline_slot=&last_blk; }
+      last_pid=P->pid; last_seg=g_seg_gen; g_blk_baseline_slot=&last_blk; }
     double t0=now_ms();
     usleep((useconds_t)(interval*1000000));
     pd_reap_zombies();                  /* every frame, whether or not a request is open */
     if(*pd) paramdump_poll(pd,g_pd_async?0:PD_WAIT_MS);
     if(P->pid>=0){ parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P); }
     dstat_t d1[MAXDISK]; int nd1=parse_diskstats(d1,MAXDISK);
+    /* The window's closing thread scan, at the same instant as the reads above */
+    int dthr=0,nthr=0; unsigned long blk1=0; count_d_threads(P->pid,&dthr,&nthr,&blk1);
     double dt=(now_ms()-t0)/1000.0; if(dt<0.001) dt=0.001;
+    /* Stopped inside the window (Ctrl-Z): its two ends are not one data set, so the window is
+       measured again from here */
+    if(g_ustop_n!=g_ustop_seen){
+        seg_break();
+        if(g_tty_fd!=STDOUT_FILENO){ printf("\033[H\033[2K%s",g_ascii?"resumed: measuring a new window...":"재개: 새 측정 구간 수집 중..."); fflush(stdout); }
+        goto again;
+    }
     parse_meminfo(M);
     parse_hostcpu(M);                  /* Host CPU and load; a delta, so called every frame */
     /* Refresh the instance summary every frame (one rollup per process, under 1ms).
@@ -8104,7 +8151,10 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
            set where the target was chosen), never to another user's that happens to share it */
         int alive=0;
         if(P->pid>=0)
-            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P->pid){ alive=1; g_track_uid=g_inst[i].uid; break; }
+            for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P->pid){
+                /* Same pid, another start time: the server went away and the pid was reused */
+                if(g_track_start && g_inst[i].start && g_inst[i].start!=g_track_start) break;
+                alive=1; g_track_uid=g_inst[i].uid; if(!g_track_start) g_track_start=g_inst[i].start; break; }
         if(!alive){
             /* Keep the db name: clearing it with memset loses the name while waiting for a restart,
                so the server can never be picked up again when it returns. */
@@ -8123,10 +8173,10 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                 memset(P,0,sizeof *P);
                 memset(P0,0,sizeof *P0);
                 snprintf(P->db,sizeof P->db,"%s",keep);
-                P->pid=newpid;
+                P->pid=newpid; if(newpid<0) g_track_start=0;
                 if(newpid>=0){
                     for(int i=0;i<g_ninst;i++)
-                        if(g_inst[i].pid==newpid){ g_cur=i; g_track_uid=g_inst[i].uid; break; }
+                        if(g_inst[i].pid==newpid){ g_cur=i; g_track_uid=g_inst[i].uid; g_track_start=g_inst[i].start; break; }
                     snprintf(g_cur_db,sizeof g_cur_db,"%s",keep);
                     cap_probe(newpid);             /* The new process: re-probe rather than inherit the old flags */
                     parse_smaps(P); parse_rollup(P); parse_status_stat(P); parse_procio(P);
@@ -8138,7 +8188,8 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
                 /* The delta baseline moves to the new process too, set to what was just read:
                    a zeroed baseline would count everything since the server started as this
                    frame's CPU, faults and I/O.  Rates start on the next frame. */
-                if(newpid>=0){ *P0=*P; int dd,nn; count_d_threads(newpid,&dd,&nn,&blk0); }
+                if(newpid>=0){ *P0=*P; count_d_threads(newpid,&dthr,&nthr,&blk0); }
+                blk1=blk0;
                 P0->pid=P->pid;
                 /* Configuration is per instance too: cubrid.conf now so this frame has it, then
                    the new server's applied values (harvested next frame) */
@@ -8185,7 +8236,7 @@ static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
        (100%), the same convention as CPU usage, so it reads as "total time this
        server waited on disk".  The first frame has no baseline and is 0. */
     /* Thread scan at the end of the window; blkpct uses this, so it must come before that calculation. */
-    count_d_threads(P->pid,&IO->d_thr,&IO->n_thr,&IO->blk_ticks);
+    IO->d_thr=dthr; IO->n_thr=nthr; IO->blk_ticks=blk1;
     if(g_blk_baseline_slot) *g_blk_baseline_slot=IO->blk_ticks;   /* Baseline for the next frame */
     IO->blkpct = (IO->blk_ticks>=blk0)
                ? ((double)(IO->blk_ticks-blk0)/hz)/dt*100.0 : 0.0;
@@ -9112,7 +9163,7 @@ int main(int argc,char **argv){
                    with the current mode's key section first (2 time series, 1 dashboard). */
                 g_hn=0; g_hcap=1; usage_modal(view?2:1); g_hcap=0;
                 help_pager(g_hln,g_hn);
-                help=0;
+                help=0; g_ustop_n++;            /* nothing was measured meanwhile: a new segment */
                 continue;
             }
             /* History accumulates every frame regardless of view, so pressing p draws the
@@ -9139,7 +9190,7 @@ int main(int argc,char **argv){
                        same key again restores). */
                     if(view) g_plot_zoom = (k=='1' || g_plot_zoom==k-'0') ? 0 : k-'0';
                 }
-                else if(k==' ') paused=!paused;
+                else if(k==' '){ paused=!paused; if(!paused) g_ustop_n++; }   /* resuming starts a new segment */
                 else if(k=='r'){ with_a=1; a_pending=1; }            /* Reanalyse once */
                 else if(k=='d') g_pg_detail=!g_pg_detail;   /* Page-level scan of a large buffer, every frame, on request */
                 else if(k=='a'){ g_a_auto=!g_a_auto;                  /* Toggle automatic mode */
