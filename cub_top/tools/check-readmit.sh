@@ -108,9 +108,10 @@ int main(void){
     printf("1. verdict on panel 3\n");
     bad|=verdict(-1,85,"재적재율 미측정","재사용 없는");
     bad|=verdict(-1,85,NULL,"⚠ 버퍼 부족");
-    bad|=verdict(50,85,"버퍼 부족",NULL);
+    bad|=verdict(50,85,"증설 효과 큼",NULL);
+    bad|=verdict(50,85,"잠정, 창",NULL);          /* a window under a minute: provisional */
     bad|=verdict(5,85,"재사용 거리가 버퍼 밖","무효");
-    bad|=verdict(20,85,"버퍼 2배면","무효");
+    bad|=verdict(20,85,"증설 효과 있음","무효");
     { /* the OS page cache absorbs a short buffer: no disk reads, the buffer still misses */
       static proc_t P; static mem_t M; static tier_t T; static iod_t IO;
       IO.rb=0; CAP2.miss_pps=3840; CAP2.readmit_pct=85; g_pagesize=16384;
@@ -233,7 +234,7 @@ int main(void){
           if(f>=10 && CAP2.readmit_pct>=0){ rs+=CAP2.readmit_pct; fs+=CAP2.adm_frac; k++; } }
       double m1=1.0-(double)hit1/acc, m2=1.0-(double)hit2/acc, cut=m1>0?100.0*(m1-m2)/m1:0, r=rs/k, af=fs/k;
       const char*c; const char*o=vd_for(r,af,&c);
-      int ok = af>=0.5 && strstr(o,"신뢰도 낮음") && !strstr(o,"버퍼 2배면");
+      int ok = af>=0.5 && strstr(o,"신뢰도 낮음") && !strstr(o,"증설 효과");
       printf("  %s   two reads 1.2B apart, 1B per frame: re-admit %.0f%%, real cut %.0f%%, admitted %.0f%% of the buffer per frame -> \"%s\"\n",
              ok?"ok  ":"FAIL",r,cut,af*100,o); bad|=!ok;
       free(pv1); free(nx1); free(in1); free(pv2); free(nx2); free(in2); free(pend); }

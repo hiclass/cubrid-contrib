@@ -58,13 +58,13 @@ int main(void){
     ok&=run("cyclic 1.9x the buffer: 2x still keeps all",nb,4,19L*nb/10,60,25.0,100.0);
     ok&=run("cyclic 2.5x the buffer: 2x keeps none",nb,4,5L*nb/2,60,25.0,0.0);
     ok&=run("cyclic 3x the buffer: 2x keeps none",nb,4,3L*nb,60,25.0,0.0);
-    /* The verdict on that last state: what doubling removes, and that a scan and a working set
+    /* The verdict on that last state: the grade enlarging gets, and that a scan and a working set
        several times the buffer look the same here - never "a larger buffer does not help" */
     { const char *col; char o[512]; g_ascii=1;
       CAP2.headroom_pct=-1; CAP2.await_ms=-1; CAP2.qdepth=-1; CAP2.dev[0]=0; CAP2.over_budget=0;
       CAP2.miss_pps=8192; CAP2.hit_pct=-1;
       vd_capacity(o,sizeof o,&col);
-      int v = strstr(o,"doubling cuts about 0%")!=NULL && strstr(o,"a scan, or a working set many times the buffer")!=NULL
+      int v = strstr(o,"enlarging helps little")!=NULL && strstr(o,"re-read 0%")!=NULL && strstr(o,"a scan, or a working set many times the buffer")!=NULL
               && !strstr(o,"useless") && !strstr(o,"no use") && !strstr(o,"not help");
       printf("  %-4s %-40s \"%s\"\n",v?"ok":"FAIL","verdict at 0% re-admit",o);
       ok&=v; g_ascii=0; }

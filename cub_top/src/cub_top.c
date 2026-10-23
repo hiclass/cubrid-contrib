@@ -5367,6 +5367,20 @@ static const char *VD_WARN="1;38;5;203", *VD_NOTE="38;5;215", *VD_OK="38;5;79", 
 static double vd_win(void){ return HN>1 ? HS[HN-1].t-HS[0].t : 0; }
 static void vd_wtxt(char*o,size_t n){ double w=vd_win();
     if(w>=60) snprintf(o,n,"%dm%02ds",(int)(w/60),(int)w%60); else snprintf(o,n,"%.0fs",w); }
+/* Evidence a sizing verdict rests on: the window and the sample count.  Under a minute the
+   grade is provisional - a frame or two of one query is not a workload. */
+static void vd_evid(char*o,size_t n){
+    char w[24]; vd_wtxt(w,sizeof w);
+    snprintf(o,n,g_ascii?"window %s/%d samples":"창 %s/%d표본",w,HN);
+}
+static const char *vd_prov(void){ return vd_win()<60 ? (g_ascii?"provisional, ":"잠정, ") : ""; }
+/* The grade a re-admit share gives to enlarging the buffer (an estimate under LRU; the share
+   itself is the measurement, the grade is the conclusion) */
+static const char *vd_grade(double readmit){
+    if(readmit>=30) return g_ascii?"enlarging helps a lot":"증설 효과 큼";
+    if(readmit>=10) return g_ascii?"enlarging helps":"증설 효과 있음";
+    return g_ascii?"enlarging helps little":"증설 효과 작음";
+}
 /* A: memory */
 static void vd_mem(char*o,size_t n,const char**col){
     if(HN<4){ snprintf(o,n,"%s",g_ascii?"collecting samples...":"표본 수집 중…"); *col=VD_INFO; return; }
@@ -5430,16 +5444,17 @@ static void vd_buf(char*o,size_t n,const char**col){
         snprintf(o,n,g_ascii?"! admitting %s/s (%s), %.0f%% of the buffer per frame - too fast to see between snapshots: re-admit %.0f%% and the admission rate are under-counted, low confidence (shorten --interval)"
                            :"⚠ 적재 %s/s(%s), 프레임당 버퍼의 %.0f%% — 스냅샷 사이를 다 보지 못하는 속도: 재적재 %.0f%%·적재량은 과소집계, 신뢰도 낮음(--interval 을 줄일 것)",
                  H(ab),disk,b->cap_admfrac*100,b->cap_readmit<0?0:b->cap_readmit); return; }
+    char ev[48]; vd_evid(ev,sizeof ev);
     if(ab>=8.0*1024*1024 && b->cap_readmit>=30.0){ *col=VD_WARN;
-        snprintf(o,n,g_ascii?"! buffer shortage - admitting %s/s (%s), re-admit %.0f%%: doubling the buffer cuts misses by about %.0f%% (estimate, assuming LRU)"
-                           :"⚠ 버퍼 부족 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정치, LRU 가정)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+        snprintf(o,n,g_ascii?"! buffer shortage - admitting %s/s (%s), re-admit %.0f%%: %s (%s%s, LRU assumed)"
+                           :"⚠ 버퍼 부족 — 적재 %s/s(%s), 재적재 %.0f%%: %s(%s%s, LRU 가정)",H(ab),disk,b->cap_readmit,vd_grade(b->cap_readmit),vd_prov(),ev); return; }
     if(ab>=8.0*1024*1024 && b->cap_readmit>=10.0){ *col=VD_NOTE;
-        snprintf(o,n,g_ascii?"! working set larger than the buffer - admitting %s/s (%s), re-admit %.0f%%: doubling cuts misses by about %.0f%% (estimate, assuming LRU)"
-                           :"⚠ 작업집합이 버퍼보다 큼 — 적재 %s/s(%s), 재적재 %.0f%%: 버퍼 2배면 버퍼 미스 약 %.0f%% 감소(추정치, LRU 가정)",H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+        snprintf(o,n,g_ascii?"! working set larger than the buffer - admitting %s/s (%s), re-admit %.0f%%: %s (%s%s, LRU assumed)"
+                           :"⚠ 작업집합이 버퍼보다 큼 — 적재 %s/s(%s), 재적재 %.0f%%: %s(%s%s, LRU 가정)",H(ab),disk,b->cap_readmit,vd_grade(b->cap_readmit),vd_prov(),ev); return; }
     if(ab>=8.0*1024*1024){ *col=VD_INFO;
-        snprintf(o,n,g_ascii?"admitting %s/s (%s), re-admit %.0f%% - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
-                           :"· 적재 %s/s(%s) · 재적재 %.0f%% — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): 버퍼 2배로 줄어드는 미스 약 %.0f%%",
-                 H(ab),disk,b->cap_readmit,b->cap_readmit); return; }
+        snprintf(o,n,g_ascii?"admitting %s/s (%s), re-admit %.0f%% - reuse distance beyond the buffer (a scan, or a working set many times the buffer): %s (%s%s)"
+                           :"· 적재 %s/s(%s) · 재적재 %.0f%% — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): %s(%s%s)",
+                 H(ab),disk,b->cap_readmit,vd_grade(b->cap_readmit),vd_prov(),ev); return; }
     if(ab<1.0*1024*1024){ *col=VD_OK;
         snprintf(o,n,g_ascii?"served from buffer - admitting %.0f pages/s, %s, resident %.0f%%"
                            :"· 버퍼에서 처리 중 — 적재 초당 %.0f페이지, %s, 상주 %.0f%%",b->cap_miss,disk,b->pg_res_pct); return; }
@@ -5578,14 +5593,15 @@ static void vd_capacity(char*o,size_t n,const char**col){
                      c->miss_pps,c->adm_frac*100,c->readmit_pct<0?0:c->readmit_pct); return; }
         if(c->hit_pct>=0 && !strncmp(c->hit_src,"perfmon",7))
             snprintf(hit,sizeof hit,g_ascii?", engine hit %.1f%%":", 엔진 히트율 %.1f%%",c->hit_pct);
+        char ev[48]; vd_evid(ev,sizeof ev);
         if(c->miss_pps>=200 && c->readmit_pct>=30){ *col=VD_WARN;
-            snprintf(o,n,g_ascii?"! buffer too small: %.0f pages/s admitted, %.0f%% re-reads%s - doubling cuts admissions by about %.0f%% (estimate, assuming LRU): raise data_buffer_size"
-                                :"⚠ 버퍼 부족: 초당 %.0f페이지 적재 중 %.0f%%가 재적재%s — 버퍼 2배면 적재 약 %.0f%% 감소(추정치, LRU 가정): data_buffer_size 증설",
-                     c->miss_pps,c->readmit_pct,hit,c->readmit_pct); return; }
+            snprintf(o,n,g_ascii?"! buffer too small: %.0f pages/s admitted, %.0f%% re-reads%s - %s (%s%s, LRU assumed): raise data_buffer_size"
+                                :"⚠ 버퍼 부족: 초당 %.0f페이지 적재 중 %.0f%%가 재적재%s — %s(%s%s, LRU 가정): data_buffer_size 증설",
+                     c->miss_pps,c->readmit_pct,hit,vd_grade(c->readmit_pct),vd_prov(),ev); return; }
         if(c->miss_pps>=200 && c->readmit_pct>=0){ *col=VD_NOTE;
-            snprintf(o,n,g_ascii?"! %.0f pages/s admitted, re-read %.0f%%%s - reuse distance beyond the buffer (a scan, or a working set many times the buffer): doubling cuts about %.0f%%"
-                                :"⚠ 초당 %.0f페이지 적재, 재적재 %.0f%%%s — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): 버퍼 2배로 줄어드는 적재 약 %.0f%%",
-                     c->miss_pps,c->readmit_pct,hit,c->readmit_pct); return; }
+            snprintf(o,n,g_ascii?"! %.0f pages/s admitted, re-read %.0f%%%s - reuse distance beyond the buffer (a scan, or a working set many times the buffer): %s (%s%s)"
+                                :"⚠ 초당 %.0f페이지 적재, 재적재 %.0f%%%s — 재사용 거리가 버퍼 밖(스캔이거나 작업집합이 버퍼의 수 배): %s(%s%s)",
+                     c->miss_pps,c->readmit_pct,hit,vd_grade(c->readmit_pct),vd_prov(),ev); return; }
         if(res<60.0 && c->miss_pps<20){ *col=VD_OK;
             snprintf(o,n,g_ascii?"over-provisioned: only %.0f%% of data_buffer ever used, %.0f pages/s - can shrink"
                                 :"· 과다 할당: data_buffer 중 %.0f%%만 사용, 초당 %.0f페이지 — 축소 가능",
