@@ -31,15 +31,12 @@ rc=0
 VER=$("$ROOT/cub_top" -d 2>/dev/null | sed -n 's/.*cubrid\.version="\([0-9.]*\)".*/\1/p' | head -1)
 [ -n "$VER" ] && [ "$VER" != unknown ] || { echo "→ SKIP (no running cub_server)"; exit 0; }
 [ -f "$ROOT/offsets/cubrid-$VER.tbl" ] || { echo "→ SKIP (no table for $VER in offsets/)"; exit 0; }
-# Test build: DWARF extraction answers "not available", no embedded tables, a private DWARF cache
+# Test build: DWARF extraction answers "not available", no embedded tables
 sed -e 's|static int dw_load_or_extract(const char\*so,long out\[\],char\*why,size_t wn){|&\n    if(getenv("LADDER_NO_DWARF")){ snprintf(why,wn,"DWARF off (test)"); return 2; }|' \
     -e 's|#include "offsets_embedded.h"|#include "offsets_embedded.h"\n#undef EMB_TBL_N\n#define EMB_TBL_N (getenv("LADDER_EMB")?(int)(sizeof EMB_TBL/sizeof EMB_TBL[0]):0)|' \
-    -e "s|/var/tmp/cub_top.dw-|$TMP/dw-|" "$SRC" > "$TMP/t.c"
+    "$SRC" > "$TMP/t.c"
 grep -q 'LADDER_NO_DWARF' "$TMP/t.c" && grep -q 'LADDER_EMB' "$TMP/t.c" || { echo "→ FAIL (test hooks not inserted)"; exit 1; }
 gcc -O2 -std=gnu99 -w -I "$ROOT/src" -o "$TMP/ct" "$TMP/t.c" -lm 2>"$TMP/cc.err" || { cat "$TMP/cc.err"; echo "→ FAIL (build)"; exit 1; }
-# The real DWARF cache is copied in (read only) so scenario 4 does not extract for seconds
-for c in /var/tmp/cub_top.dw-"$(id -u)"-*.tbl; do [ -f "$c" ] && cp -p "$c" "$TMP/" 2>/dev/null; done
-for c in "$TMP"/cub_top.dw-*.tbl; do [ -f "$c" ] && mv "$c" "$TMP/dw-${c#$TMP/cub_top.dw-}"; done
 run(){ # run <dir> [env...] -> "table version reason"
     d=$1; shift
     out=$(env "$@" "$TMP/ct" -d --offsets "$d" 2>/dev/null)
@@ -77,7 +74,7 @@ s=$(run "$TMP/d3" LADDER_NO_DWARF=1 LADDER_EMB=1)
 case "$s" in "offsets-embedded|$VER|"*) echo "  ok     embedded tables on as well: the embedded copy of this build wins as exact ($s)" ;;
              *) echo "  FAIL   with embedded tables: $s"; rc=1 ;; esac
 # 4. DWARF available: it comes before another build's table
-#    (without a cached copy the one-shot run extracts it first: several seconds)
+#    (the one-shot run extracts it first: several seconds)
 s=$(run "$TMP/d3")
 case "$s" in "dwarf-runtime|"*) echo "  ok     DWARF available: preferred over another build's table (${s%%|*})" ;;
              *"|DWARF"*|*"DWARF:"*) echo "  SKIP   this build's library has no usable DWARF: $s" ;;

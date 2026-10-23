@@ -20,7 +20,8 @@
 #  - strip -s takes .symtab, and the LOCAL roots with it: said, not reported as a lookup miss
 #  - debug info it cannot read (compressed -gz / .zdebug, .gnu_debuglink, split DWARF, dwz)
 #    is named as such instead of "no key resolved" or "stripped"
-#  - the cache is keyed by the GNU build-id (size+mtime collide across cp -p and tar)
+#  - the offsets come back on the child's pipe and are kept in memory, keyed by the GNU
+#    build-id (size+mtime collide across cp -p and tar); no file is written anywhere
 #  - live, extraction runs in a background child; the frame does not wait for it
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
@@ -61,7 +62,7 @@ printf 'struct pool { int num_buffers; long x; };\nstatic pool pgbuf_Pool;\nint 
 printf 'static int other_static;\nint get_b(){ return other_static++; }\n' > b.cpp
 command -v g++ >/dev/null && g++ -O2 -flto -flto-partition=max -fPIC -shared -o lto.so a.cpp b.cpp 2>/dev/null
 cp syms.so syms_s.so; strip -s syms_s.so
-sed -e "s|/var/tmp/cub_top.dw-|$TMP/cache/cub_top.dw-|" "$SRC" > src.c; mkdir -p cache
+cp "$SRC" src.c
 printf '#define main cub_top_main\n#include "%s"\n#undef main\n' "$TMP/src.c" > t.c
 cat >> t.c <<'C'
 static int bad=0;
@@ -106,24 +107,29 @@ int main(void){
     else printf("  SKIP   dwz (not available or nothing shared)\n");
     if(access("split.so",F_OK)==0) why_is("split.so","split DWARF");
     why_is("stripped.so","stripped");
-    /* cache key */
-    char bid[132], cp1[256], cp2[256]; elf_build_id("lib.so",bid,sizeof bid);
-    dw_cache_path("lib.so",cp1,sizeof cp1); dw_cache_path("nobid.so",cp2,sizeof cp2);
+    /* memo key: the build-id, else path/size/mtime */
+    char bid[132], k1[160], k2[160]; elf_build_id("lib.so",bid,sizeof bid);
+    dw_lib_key("lib.so",k1,sizeof k1); dw_lib_key("nobid.so",k2,sizeof k2);
     FILE *r=popen("readelf -n lib.so | sed -n 's/.*Build ID: //p'","r"); char rb[132]=""; if(r){ if(!fgets(rb,sizeof rb,r)) rb[0]=0; pclose(r); }
     rb[strcspn(rb,"\n")]=0;
-    ok = bid[0] && !strcmp(bid,rb) && strstr(cp1,bid) && !strstr(cp2,"--") && strchr(cp2,'-');
-    printf("  %s   cache key: build-id %s (readelf %s); without one: %s\n",ok?"ok  ":"FAIL",bid,rb,strrchr(cp2,'/'));
+    ok = bid[0] && !strcmp(bid,rb) && strstr(k1,bid) && !strncmp(k2,"f:",2);
+    printf("  %s   memo key: build-id %s (readelf %s); without one: %.24s...\n",ok?"ok  ":"FAIL",bid,rb,k2);
     bad|=!ok;
+    /* no file: count the cub_top.dw-* entries in /var/tmp before and after a live extraction */
+    int before=0; { DIR*dd=opendir("/var/tmp"); struct dirent*e; while(dd&&(e=readdir(dd))) before+=!strncmp(e->d_name,"cub_top.dw-",11); if(dd) closedir(dd); }
     /* live: background extraction */
     g_pd_async=1; long o[DW_N]; char w[160]=""; double t0=now_ms();
     int st=dw_load_or_extract("lib.so",o,w,sizeof w); double first=now_ms()-t0;
     int polls=0; while(st==0 && polls<200){ usleep(50000); polls++; st=dw_load_or_extract("lib.so",o,w,sizeof w); }
-    ok = first<200 && st==1 && access(cp1,F_OK)==0;
-    printf("  %s   live: first call returns at once (%.0fms, \"%s\"), result after %d poll(s), cache written\n",ok?"ok  ":"FAIL",first,
-           st==1?"extracting...":w,polls); bad|=!ok;
+    { long d[DW_N]; char dw2[160]; int dg=dwoff_extract("lib.so",d,dw2,sizeof dw2), same=dg>0;
+      for(int i=0;i<NTG && same;i++) same = d[i]==o[i];
+      int after=0; DIR*dd=opendir("/var/tmp"); struct dirent*e; while(dd&&(e=readdir(dd))) after+=!strncmp(e->d_name,"cub_top.dw-",11); if(dd) closedir(dd);
+      ok = first<200 && st==1 && same && after==before;
+      printf("  %s   live: first call returns at once (%.0fms), result after %d poll(s) through the pipe, equal to a direct extraction (%s), no file written (%d -> %d)\n",
+             ok?"ok  ":"FAIL",first,polls,same?"yes":"no",before,after); bad|=!ok; }
     /* a stripped copy has the same build-id: the DWARF of its unstripped build serves it */
     st=dw_load_or_extract("stripped.so",o,w,sizeof w);
-    ok = st==1; printf("  %s   stripped copy of the same build: served from that build's cache\n",ok?"ok  ":"FAIL"); bad|=!ok;
+    ok = st==1; printf("  %s   stripped copy of the same build: served from memory by build-id\n",ok?"ok  ":"FAIL"); bad|=!ok;
     st=dw_load_or_extract("other.so",o,w,sizeof w); polls=0;
     while(st==0 && polls<200){ usleep(50000); polls++; st=dw_load_or_extract("other.so",o,w,sizeof w); }
     ok = st==2 && strstr(w,"stripped");
@@ -131,7 +137,7 @@ int main(void){
     /* A frame that adopted another build's table while the child ran asks dw_kid_done()
        each frame: 0 while it runs, 1 once it has exited - without collecting it, so the
        next dw_load_or_extract still reads its result and reaps it */
-    unlink(cp1);
+    memset(g_dw_memo,0,sizeof g_dw_memo);   /* forget it: extract again */
     st=dw_load_or_extract("lib.so",o,w,sizeof w); int d0=dw_kid_done(); pid_t kid=g_dw_kid;
     polls=0; while(!dw_kid_done() && polls<200){ usleep(50000); polls++; }
     int d1=dw_kid_done(), still=g_dw_kid==kid && kill(kid,0)==0;
@@ -142,7 +148,7 @@ int main(void){
     /* A child of another library that finished after an instance switch: asking for the
        current library must not report it (which would re-run the ladder every frame) and
        must reap it, so it is neither asked about again nor left a zombie */
-    { unlink(cp1);
+    { memset(g_dw_memo,0,sizeof g_dw_memo);   /* forget it: extract again */
       st=dw_load_or_extract("lib.so",o,w,sizeof w); pid_t kid=g_dw_kid;
       int polls=0; while(!dw_kid_done() && polls<200){ usleep(50000); polls++; }
       int r1=dw_kid_finished_for("nobid.so"), r2=dw_kid_finished_for("nobid.so");
@@ -150,8 +156,12 @@ int main(void){
       ok = st==0 && kid>0 && r1==0 && r2==0 && g_dw_kid==0 && g_dw_kfd<0 && wp<0;
       printf("  %s   another library's finished child: not reported (%d, %d), reaped (kid %d, waitpid %d)\n",
              ok?"ok  ":"FAIL",r1,r2,(int)g_dw_kid,wp); bad|=!ok;
+      /* its answer was kept: switching back to that library adopts at once, no new child */
+      st=dw_load_or_extract("lib.so",o,w,sizeof w);
+      ok = st==1 && g_dw_kid==0;
+      printf("  %s   switching back to that library: served from memory at once (st %d, no child)\n",ok?"ok  ":"FAIL",st); bad|=!ok;
       /* the same library's: reported, so the ladder runs once more */
-      unlink(cp1);
+      memset(g_dw_memo,0,sizeof g_dw_memo);   /* forget it: extract again */
       st=dw_load_or_extract("lib.so",o,w,sizeof w);
       polls=0; while(!dw_kid_done() && polls<200){ usleep(50000); polls++; }
       int r3=dw_kid_finished_for("lib.so");
@@ -162,7 +172,7 @@ int main(void){
        stopped and its pipe closed, every time - no descriptor left per switch.  The child
        is held with SIGSTOP so it is still running when the switch comes. */
     { int nfd0=0, nfd1=0; DIR *dd; struct dirent *de;
-      unlink(cp1); unlink(cp2);
+      memset(g_dw_memo,0,sizeof g_dw_memo);   /* forget both: extract again */
       if((dd=opendir("/proc/self/fd"))){ while((de=readdir(dd))) nfd0++; closedir(dd); }
       for(int sw=0;sw<6;sw++){
           const char *so = (sw&1) ? "nobid.so" : "lib.so";

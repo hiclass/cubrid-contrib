@@ -36,16 +36,15 @@ grep -qF "$BUILTIN_TAG" "$SRC" && grep -qF "$BUILTIN_SSZ" "$SRC" || { echo "  bu
 #      heapB.table=offsets-embedded  gate fired, an embedded table rescued it (PASS)
 #      heapB.enabled=0               gate fired, no fallback available (PASS)
 #      heapB.table=table-11.5        the corrupted table was adopted (FAIL)
-# The test binary keeps its DWARF cache in $TMP, so corrupting it below never touches the
-# real /var/tmp cache, whether the run finishes or is interrupted.  The real caches are
-# only copied in (read), to spare the 8-second extraction.
+# DWARF offsets are kept in memory only, so the test build gets a hook instead of a cache
+# to corrupt: GUARD_DW_BAD=1 makes the DWARF candidate answer with every offset wrong.
 # The builtin table claims this build and records no sizes, so the alignment gate is the one tried.
 sed -e 's/#define OFF_LF_ALLOCCNT     12/#define OFF_LF_ALLOCCNT     11/' \
     -e "s|{\"table-11.5\",\"11.5.0.2374\",|{\"table-11.5\",\"${VER:-11.5.0.2374}\",|" \
     -e "s|$BUILTIN_SSZ|{0}|" \
-    -e "s|/var/tmp/cub_top.dw-|$TMP/cub_top.dw-|" "$SRC" > "$TMP/bad1.c"
-grep -q "$TMP/cub_top.dw-" "$TMP/bad1.c" || { say "C misalignment build" "FAIL(cache path not redirected)"; fail=1; }
-for c in /var/tmp/cub_top.dw-"$(id -u)"-*.tbl; do [ -f "$c" ] && cp -p "$c" "$TMP/" 2>/dev/null; done
+    -e 's|static int dw_load_or_extract(const char\*so,long out\[\],char\*why,size_t wn){|&\n    if(getenv("GUARD_DW_BAD")){ for(int i_=0;i_<DW_N;i_++) out[i_]=-1; for(int i_=0;i_<NTG;i_++) out[i_]=4; (void)so; (void)why; (void)wn; return 1; }|' \
+    "$SRC" > "$TMP/bad1.c"
+grep -q 'GUARD_DW_BAD' "$TMP/bad1.c" || { say "C misalignment build" "FAIL(DWARF hook not inserted)"; fail=1; }
 if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev/null; then
   raw=$("$TMP/bad1" -d 2>/dev/null)
   tbl=$(printf '%s' "$raw" | grep -o 'heapB.table="[^"]*"')
@@ -62,35 +61,12 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
     say "C misalignment -> table rejected" "FAIL(undecidable: $tbl $en)"; fail=1
   fi
 
-  # ---- Negative 1b: with the DWARF cache corrupted too, the fallback also fails -> B disabled ----
-  # Use the lib cub_top actually read (heapB.lib): after a rebuild the server's mapped old inode
-  # is read via /proc/<pid>/map_files/, so the disk path's size/mtime would not match the cache key.
-  SO=$(printf '%s' "$raw" | grep -m1 -oE 'heapB\.lib="[^"]+"' | sed 's/heapB.lib="//;s/"$//')
-  [ -n "$SO" ] && [ "$SO" != "-" ] || SO=$(grep -m1 -oE '/[^ ]*libcubrid\.so\.[0-9.]+' /proc/$(pgrep -f 'cub_server ' | head -1)/maps 2>/dev/null)
-  if [ -n "$SO" ] && stat -L "$SO" >/dev/null 2>&1; then
-    # The cache is named by the .so's GNU build-id (size and mtime only without one)
-    BID=$(python3 - "$SO" <<'PY' 2>/dev/null
-import struct,sys
-d=open(sys.argv[1],'rb').read()
-shoff,=struct.unpack_from('<Q',d,0x28); shes,shn=struct.unpack_from('<HH',d,0x3a)
-for i in range(shn):
-    t,=struct.unpack_from('<I',d,shoff+i*shes+4)
-    if t!=7: continue
-    off,sz=struct.unpack_from('<QQ',d,shoff+i*shes+0x18); o=off
-    while o+12<=off+sz:
-        nz,dz,ty=struct.unpack_from('<III',d,o); no=o+12; do=no+((nz+3)&~3)
-        if ty==3 and d[no:no+4]==b'GNU\0': print(d[do:do+dz].hex()); sys.exit()
-        o=do+((dz+3)&~3)
-PY
-)
-    if [ -n "$BID" ]; then CACHE="$TMP/cub_top.dw-$(id -u)-$BID.tbl"
-    else SZ=$(stat -L -c%s "$SO"); MT=$(stat -L -c%Y "$SO"); CACHE="$TMP/cub_top.dw-$(id -u)-$SZ-$MT.tbl"; fi
-    # Every key present (a cache missing one is re-extracted), all of them wrong
-    grep -oE '^  \{"(OFF|SZ)_[A-Z0-9_]+",' "$SRC" | sed 's/^  {"//;s/",$/ 4/' > "$CACHE"
-    raw=$("$TMP/bad1" -d 2>/dev/null)
+  # ---- Negative 1b: with the DWARF candidate corrupted too, the fallback also fails -> B disabled ----
+  if true; then
+    raw=$(GUARD_DW_BAD=1 "$TMP/bad1" -d 2>/dev/null)
     en=$(printf '%s' "$raw" | grep -o 'heapB.enabled=[01]')
     tbl2=$(printf '%s' "$raw" | grep -o 'heapB.table="[^"]*"')
-    # With the cache corrupted (so the DWARF candidate fails too), the result must be
+    # With the DWARF candidate corrupted too, the result must be
     #   an embedded table (a correct table, not the corrupted one),
     #   a downgrade to probe-runtime (count-only), or B off.
     # What is tested is that the CORRUPTED table invents no byte values - a rescue by a
@@ -101,21 +77,19 @@ PY
     sized() { printf '%s' "$1" | grep -oE 'heapB\.(lock_table_tran|conn_entries_css)_bytes=[0-9]+' | tr '\n' ' '; }
     tot=$(printf '%s' "$raw" | grep -o 'heapB.total_bytes=[0-9]*')
     if [ "$tbl2" = 'heapB.table="probe-runtime"' ] && [ "$tot" = "heapB.total_bytes=0" ]; then
-        say "corrupted cache -> probe downgrade" "PASS(count-only)"
+        say "corrupted DWARF -> probe downgrade" "PASS(count-only)"
     elif [ "$en" = "heapB.enabled=0" ]; then
-        say "corrupted cache -> probe downgrade" "PASS(B OFF)"
+        say "corrupted DWARF -> probe downgrade" "PASS(B OFF)"
     elif [ "$tbl2" = 'heapB.table="offsets-embedded"' ]; then
         good=$(sized "$("$ROOT/cub_top" --heap -d 2>/dev/null)"); mine=$(sized "$raw")
         if [ -n "$good" ] && [ "$mine" = "$good" ]; then
-            say "corrupted cache -> embedded rescue" "PASS(sized items match the healthy build)"
+            say "corrupted DWARF -> embedded rescue" "PASS(sized items match the healthy build)"
         else
-            say "corrupted cache -> embedded rescue" "FAIL($mine vs healthy $good)"; fail=1
+            say "corrupted DWARF -> embedded rescue" "FAIL($mine vs healthy $good)"; fail=1
         fi
     else
-        say "corrupted cache -> probe downgrade" "FAIL($tbl2 $tot)"; fail=1
+        say "corrupted DWARF -> probe downgrade" "FAIL($tbl2 $tot)"; fail=1
     fi
-  else
-    say "corrupted cache -> fallback also fails" "SKIP(libcubrid path unavailable)"
   fi
 else
     say "C misalignment build" "FAIL(compile failed - the gate was not exercised)"; fail=1
@@ -160,12 +134,10 @@ fi
 
 # ---- Negatives 4-6: choosing a table for a build (num_buffers at offset 0 cannot tell builds apart) ----
 # Test binaries live in $TMP, so no offsets/ beside them; the embedded tables are what they carry.
-# Their DWARF cache is a fresh copy of the real one: negative 1b corrupted the shared test copy.
-mkdir -p "$TMP/dw46"
-for c in /var/tmp/cub_top.dw-"$(id -u)"-*.tbl; do [ -f "$c" ] && cp -p "$c" "$TMP/dw46/" 2>/dev/null; done
+# DWARF, when one of them reaches it, is extracted for the run (a few seconds each, no file).
 gate_build(){ # name sed-expr... : build $TMP/$1 from the source with the given edits
     n=$1; shift
-    sed -e "s|/var/tmp/cub_top.dw-|$TMP/dw46/cub_top.dw-|" "$@" "$SRC" > "$TMP/$n.c"
+    sed -e "s|^@@never@@||" "$@" "$SRC" > "$TMP/$n.c"
     gcc -O2 -std=gnu99 -w -I "$TMP/inc_$n" -I "$(dirname "$SRC")" -o "$TMP/$n" "$TMP/$n.c" 2>/dev/null
 }
 tblof(){ printf '%s' "$1" | grep -o 'heapB.table="[^"]*"' | sed 's/heapB.table=//;s/"//g'; }

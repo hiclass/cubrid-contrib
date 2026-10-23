@@ -50,9 +50,8 @@ int main(int c,char**v){
 C
 gcc -O1 -o "$TMP/srv" "$TMP/srv.c" || { echo "→ FAIL (stand-in)"; exit 1; }
 # Short deadline for the test
-sed -e 's/^#define PD_WAIT_MS 10000 /#define PD_WAIT_MS 1500 /' -e 's|/var/tmp/cub_top.dw-|'"$TMP"'/dw-|' "$SRC" > "$TMP/src.c"
+sed -e 's/^#define PD_WAIT_MS 10000 /#define PD_WAIT_MS 1500 /' "$SRC" > "$TMP/src.c"
 grep -q '^#define PD_WAIT_MS 1500 ' "$TMP/src.c" || { echo "→ FAIL (constant not found)"; exit 1; }
-grep -q "$TMP/dw-" "$TMP/src.c" || { echo "→ FAIL (cache path not found)"; exit 1; }
 # A library with DWARF, for an extraction child to crash in
 printf 'struct session_state { int a; long b; char c[296]; }; struct session_state the_session;\n' > "$TMP/lib.c"
 gcc -g -O0 -shared -fPIC -o "$TMP/lib.so" "$TMP/lib.c" || { echo "→ FAIL (lib.so)"; exit 1; }
@@ -142,13 +141,13 @@ int main(int c,char**v){
     { struct rlimit rl={0,0}; setrlimit(RLIMIT_CORE,&rl);
       pid_t s=fork(); if(s==0){ setpgid(0,0); execlp("sleep","sleep","30",(char*)NULL); _exit(127); }
       setpgid(s,s); g_pd_pid=s; signal(SIGSEGV,on_fatal);
-      const char *so=getenv("DW_SO"); char cp[256]; dw_cache_path(so,cp,sizeof cp); unlink(cp);
+      const char *so=getenv("DW_SO");
       g_pd_async=1; long o[DW_N]; char w[160]=""; int st2=dw_load_or_extract(so,o,w,sizeof w);
       int stopped = st2==0 && g_dw_kid>0 && kill(g_dw_kid,SIGSTOP)==0, sig=0;
       if(stopped){ kill(g_dw_kid,SIGSEGV); kill(g_dw_kid,SIGCONT); int ws=0; waitpid(g_dw_kid,&ws,0); sig=WIFSIGNALED(ws)?WTERMSIG(ws):0; }
       usleep(200000); int sst=0, alive = waitpid(s,&sst,WNOHANG)==0;   /* a zombie still answers kill(s,0) */
       signal(SIGSEGV,SIG_DFL); g_dw_kid=0; if(g_dw_kfd>=0){ close(g_dw_kfd); g_dw_kfd=-1; }
-      kill(-s,SIGKILL); if(alive) waitpid(s,NULL,0); g_pd_pid=-1; unlink(cp);
+      kill(-s,SIGKILL); if(alive) waitpid(s,NULL,0); g_pd_pid=-1;
       ok = stopped && sig==SIGSEGV && alive;
       printf("  %s   DWARF child crashing (SIGSEGV) leaves the paramdump group alone: child %s, group %s\n",ok?"ok  ":"FAIL",
              !stopped?"not caught running":sig==SIGSEGV?"died by SIGSEGV":"ended otherwise",alive?"alive":"killed"); bad|=!ok; }

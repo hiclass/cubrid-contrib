@@ -1757,33 +1757,11 @@ enum { DW_PGBUF=0, DW_XC_ENT, DW_XC_USE, DW_XC_CLN, DW_QLIST, DW_QPOOL,
        DW_HX_SESS, DW_HX_CAT, DW_HX_LK, DW_LK_RES, DW_LK_ENTFL, DW_LFFL, DW_SZ_LKE, DW_SZ_LKR, DW_N };
 
 /* Extraction takes 1-3 seconds over 100-200MB of .debug_info (one pass for every key, then
-   the CUs that matter), and its result is cached as text in
-   /var/tmp/cub_top.dw-<uid>-<build-id>.tbl (size and mtime when the .so has no build-id).  /var/tmp is writable by every user.  A table read from there
-   decides which addresses of the server are read, so only a regular file this user
-   owns, and nobody else can write, is trusted; and it is written to a fresh 0600 file
-   that is renamed into place, so a planted name - a symlink to some other file, or a
-   file of another user - is never opened for writing.  The uid in the name keeps one
-   user's cache from blocking another's. */
-static FILE *dw_cache_open_trusted(const char *path){
-    int fd=open(path,O_RDONLY|O_NOFOLLOW);
-    if(fd<0) return NULL;
-    struct stat cs;
-    if(fstat(fd,&cs)!=0 || !S_ISREG(cs.st_mode) || cs.st_uid!=geteuid() || (cs.st_mode&022)){
-        close(fd); return NULL; }
-    FILE *f=fdopen(fd,"r");
-    if(!f) close(fd);
-    return f;
-}
-static void dw_cache_write(const char *path,const long out[]){
-    char tmp[300]; snprintf(tmp,sizeof tmp,"%s.%d.tmp",path,(int)getpid());
-    int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
-    if(fd<0) return;
-    FILE *f=fdopen(fd,"w");
-    if(!f){ close(fd); unlink(tmp); return; }
-    for(int i=0;i<NTG;i++) fprintf(f,"%s %ld\n",TG[i].key,out[i]);   /* -1 too: absent means an older key set */
-    if(fclose(f)==0) { if(rename(tmp,path)!=0) unlink(tmp); }
-    else unlink(tmp);
-}
+   the CUs that matter).  Its result is kept in memory for the run only - no file is
+   written anywhere (no /var/tmp cache: a full, read-only or quota-bound temp directory
+   cannot break it, and nothing is left behind).  A library seen again in the same run
+   (an instance switch back) is served from this memo by build-id.  To carry offsets to a
+   host without DWARF, a table file (dwoff --emit-tbl) is placed in offsets/. */
 /* The .so's GNU build-id as hex ("" without one).  size+mtime collides across cp -p, tar and
    SOURCE_DATE_EPOCH builds; the build-id names the build itself. */
 static void elf_build_id(const char *so,char *hex,size_t hn){
@@ -1813,27 +1791,36 @@ static void elf_build_id(const char *so,char *hex,size_t hn){
     }
     free(sh); close(fd);
 }
-static void dw_cache_path(const char*so,char*cpath,size_t cn){
+static int offs_text_load(const char*txt,long out[],int ssz[]);   /* the table parser, below */
+/* The identity of a library's build: its build-id, else path, size and mtime */
+static void dw_lib_key(const char*so,char*key,size_t kn){
     char bid[132]; elf_build_id(so,bid,sizeof bid);
-    if(bid[0]) snprintf(cpath,cn,"/var/tmp/cub_top.dw-%d-%s.tbl",(int)geteuid(),bid);
-    else { struct stat st; if(stat(so,&st)!=0){ cpath[0]=0; return; }
-           snprintf(cpath,cn,"/var/tmp/cub_top.dw-%d-%lld-%lld.tbl",(int)geteuid(),(long long)st.st_size,(long long)st.st_mtime); }
+    if(bid[0]){ snprintf(key,kn,"bid:%s",bid); return; }
+    struct stat st; if(stat(so,&st)!=0){ key[0]=0; return; }
+    snprintf(key,kn,"f:%s:%lld:%lld",so,(long long)st.st_size,(long long)st.st_mtime);
 }
-static int dw_cache_load(const char*cpath,long out[]){
-    FILE*cf=dw_cache_open_trusted(cpath);
-    if(!cf) return 0;
-    int got=0, seen=0; char k[64]; long v;
-    for(int i=0;i<DW_N;i++) out[i]=-1;
-    while(fscanf(cf,"%63s %ld",k,&v)==2)
-        for(int i=0;i<NTG;i++)
-            if(!strcmp(k,TG[i].key)){ out[i]=v; seen++; if(v>=0) got++; break; }
-    fclose(cf);
-    return got>0 && seen>=NTG;     /* Written before keys were added: extract again once */
+#define DW_MEMO_N 4
+static struct { char key[160]; long v[DW_N]; } g_dw_memo[DW_MEMO_N]; static int g_dw_memo_next=0;
+static int dw_memo_get(const char*key,long out[]){
+    if(!key[0]) return 0;
+    for(int i=0;i<DW_MEMO_N;i++) if(!strcmp(g_dw_memo[i].key,key)){ memcpy(out,g_dw_memo[i].v,sizeof(long)*DW_N); return 1; }
+    return 0;
+}
+static void dw_memo_put(const char*key,const long v[]){
+    if(!key[0]) return;
+    int i=g_dw_memo_next; g_dw_memo_next=(g_dw_memo_next+1)%DW_MEMO_N;
+    snprintf(g_dw_memo[i].key,sizeof g_dw_memo[i].key,"%s",key); memcpy(g_dw_memo[i].v,v,sizeof(long)*DW_N);
+}
+/* The child's answer on its pipe: "OK" and one "key value" line per key, or a reason */
+static void dw_pipe_write(int fd,const long o[]){
+    char buf[8192]; int n=snprintf(buf,sizeof buf,"OK\n");
+    for(int i=0;i<NTG && n<(int)sizeof buf-80;i++) n+=snprintf(buf+n,sizeof buf-(size_t)n,"%s %ld\n",TG[i].key,o[i]);
+    for(int w=0; w<n; ){ ssize_t r=write(fd,buf+w,(size_t)(n-w)); if(r<=0) break; w+=(int)r; }
 }
 /* Live, the extraction (a few seconds of CPU on a 100-200MB .so) runs in a niced child that
-   writes the cache; frames go on meanwhile and pick the cache up when the child is done.
+   hands the offsets back on a pipe; frames go on meanwhile and take them when it is done.
    One-shot modes wait, as they report this very frame. */
-static pid_t g_dw_kid=0; static int g_dw_kfd=-1; static char g_dw_kso[PATH_MAX];
+static pid_t g_dw_kid=0; static int g_dw_kfd=-1; static char g_dw_kso[PATH_MAX]; static char g_dw_kkey[160];
 static void dw_kid_stop(void){
     if(g_dw_kid>0){ kill(g_dw_kid,SIGKILL); waitpid(g_dw_kid,NULL,0); g_dw_kid=0; }
     if(g_dw_kfd>=0){ close(g_dw_kfd); g_dw_kfd=-1; }   /* its pipe too, or each switch leaves one open */
@@ -1850,34 +1837,45 @@ static int dw_kid_done(void){
    has finished: drop the cache so the ladder runs once more and its own offsets win.  A
    finished child of another library (started before an instance switch) is no reason to
    re-run the ladder - and would be every frame, since only dw_load_or_extract for that
-   library reaps it: it is reaped here instead (its cache file is already written). */
+   library reaps it: it is reaped here instead, its answer kept for a switch back. */
+/* Collect a finished child: its answer goes to the memo under the library it was started
+   for (whichever instance is on screen now).  Returns 1 with the offsets in out, else 0
+   with the reason in why. */
+static int dw_kid_harvest(long out[],char *why,size_t wn){
+    char buf[8192]; size_t n=0; ssize_t r;
+    while(n<sizeof buf-1 && (r=read(g_dw_kfd,buf+n,sizeof buf-1-n))>0) n+=(size_t)r;
+    buf[n]=0;
+    int st=0; waitpid(g_dw_kid,&st,0);
+    close(g_dw_kfd); g_dw_kfd=-1; g_dw_kid=0;
+    if(!strncmp(buf,"OK\n",3)){
+        long v[DW_N];
+        if(offs_text_load(buf+3,v,NULL)>0){ dw_memo_put(g_dw_kkey,v); if(out) memcpy(out,v,sizeof v); return 1; }
+        snprintf(why,wn,"%s",g_ascii?"extraction gave no offsets":"추출 결과에 오프셋 없음"); return 0; }
+    snprintf(why,wn,"%.150s",buf[0]?buf:(g_ascii?"extraction failed":"추출 실패"));   /* the child writes at most 160 */
+    return 0;
+}
 static int dw_kid_finished_for(const char *so){
     if(!dw_kid_done()) return 0;
     if(!strcmp(g_dw_kso,so)) return 1;
-    dw_kid_stop();
+    char w[160]; (void)dw_kid_harvest(NULL,w,sizeof w);   /* another library's: kept for a switch back */
     return 0;
 }
 /* 1 = offsets in out, 2 = failed (why), 0 = extracting in the background */
 static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
-    char cpath[256]; dw_cache_path(so,cpath,sizeof cpath);
-    if(!cpath[0]){ snprintf(why,wn,"%s",g_ascii?"stat failed":"stat 실패"); return 2; }
-    /* A finished child is collected before the cache is looked at: its cache file would
-       otherwise answer first and leave it a zombie until exit */
-    char kw[160]=""; int kid_ended=0;
-    if(g_dw_kid>0){
-        int stt=0; pid_t r=waitpid(g_dw_kid,&stt,WNOHANG);
-        if(r!=0){
-            ssize_t n=read(g_dw_kfd,kw,sizeof kw-1); kw[n>0?n:0]=0;
-            close(g_dw_kfd); g_dw_kfd=-1; g_dw_kid=0; kid_ended=!strcmp(g_dw_kso,so);
-        }
+    char key[160]; dw_lib_key(so,key,sizeof key);
+    if(!key[0]){ snprintf(why,wn,"%s",g_ascii?"stat failed":"stat 실패"); return 2; }
+    /* A finished child is collected first: whichever library it ran for, its answer is kept */
+    if(g_dw_kid>0 && dw_kid_done()){
+        int mine=!strcmp(g_dw_kso,so); char kw[160]="";
+        int ok=dw_kid_harvest(mine?out:NULL,kw,sizeof kw);
+        if(mine){ if(ok) return 1; snprintf(why,wn,"%s",kw); return 2; }
     }
-    if(dw_cache_load(cpath,out)) return 1;
+    if(dw_memo_get(key,out)) return 1;
     if(g_pd_async){
         if(g_dw_kid>0){                                   /* still running */
             if(strcmp(g_dw_kso,so)){ dw_kid_stop(); }   /* another instance's library now: start over */
             else { snprintf(why,wn,"%s",g_ascii?"extracting offsets from DWARF in the background":"DWARF 에서 오프셋 추출 중(백그라운드)"); return 0; }
-        } else if(kid_ended){                             /* ended without a cache: it failed */
-            snprintf(why,wn,"%s",kw[0]?kw:(g_ascii?"extraction failed":"추출 실패")); return 2; }
+        }
         int pf[2]; if(pipe2(pf,O_CLOEXEC)!=0){ snprintf(why,wn,"pipe: %s",strerror(errno)); return 2; }
         sigset_t held; kids_hold(&held);
         pid_t k=fork();
@@ -1887,20 +1885,22 @@ static int dw_load_or_extract(const char*so,long out[],char*why,size_t wn){
             child_forget_parent(); sigprocmask(SIG_SETMASK,&held,NULL);
             close(pf[0]); if(setpriority(PRIO_PROCESS,0,10)){}
             long o[DW_N]; char w[160]="";
-            if(dwoff_extract(so,o,w,sizeof w)>0){ dw_cache_write(cpath,o); _exit(0); }
+            /* the answer goes back on the pipe: no file, so no temp directory can fail it */
+            if(dwoff_extract(so,o,w,sizeof w)>0){ dw_pipe_write(pf[1],o); _exit(0); }
             if(write(pf[1],w,strlen(w))<0){}
             _exit(2);
         }
-        close(pf[1]); g_dw_kfd=pf[0]; g_dw_kid=k; snprintf(g_dw_kso,sizeof g_dw_kso,"%s",so);
+        close(pf[1]); g_dw_kfd=pf[0]; g_dw_kid=k;
+        snprintf(g_dw_kso,sizeof g_dw_kso,"%s",so); snprintf(g_dw_kkey,sizeof g_dw_kkey,"%s",key);
         sigprocmask(SIG_SETMASK,&held,NULL);
         { static int reg=0; if(!reg){ atexit(dw_kid_stop); reg=1; } }
         snprintf(why,wn,"%s",g_ascii?"extracting offsets from DWARF in the background":"DWARF 에서 오프셋 추출 중(백그라운드)");
         return 0;
     }
-    fprintf(stderr,g_ascii?"cub_top: no offset table fits; extracting from the DWARF of %s (once, a few seconds - cached in %s)\n"
-                          :"cub_top: 오프셋 표가 이 환경과 안 맞아 %s 의 DWARF 에서 직접 추출합니다 (1회, 수 초 — 결과는 %s 에 캐시)\n",so,cpath);
+    fprintf(stderr,g_ascii?"cub_top: no offset table fits; extracting from the DWARF of %s (a few seconds, every run - a table in offsets/ avoids it)\n"
+                          :"cub_top: 오프셋 표가 이 환경과 안 맞아 %s 의 DWARF 에서 직접 추출합니다 (실행마다 수 초 — offsets/ 에 표를 두면 생략)\n",so);
     if(dwoff_extract(so,out,why,wn)<=0) return 2;
-    dw_cache_write(cpath,out);
+    dw_memo_put(key,out);
     return 1;
 }
 /* Anchor probing - last resort on a stripped build with no table and no DWARF.
@@ -7871,7 +7871,7 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
             rep_localtime(rt,&tmv); strftime(ts,sizeof ts,"%Y-%m-%d %H:%M:%S",&tmv);
             g_replaying=1; g_ts_frac=rp_time(fr[j]);
             if(jsonout){
-                FILE *tf=tmpfile(); if(!tf) continue;
+                FILE *tf=mem_file(); if(!tf) continue;
                 fflush(stdout); int sv=dup(1);
                 if(sv<0||dup2(fileno(tf),1)<0){ if(sv>=0) close(sv); fclose(tf); continue; }
                 render_terse(&P,&M,&T,with_a||g_rp_have_a,IO.rb,IO.wb,IO.ri,IO.wi,
@@ -7982,7 +7982,7 @@ static void json_from_terse(FILE*tf,FILE*o){
    emitting the pretty form repeatedly yields concatenated objects that are neither
    a JSON document nor JSONL, so the newlines are folded the way rp_record does. */
 static void json_line_from_terse(FILE*tf,FILE*o){
-    FILE *m=tmpfile();
+    FILE *m=mem_file();
     if(!m){ json_from_terse(tf,o); return; }
     json_from_terse(tf,m);
     fflush(m); fseek(m,0,SEEK_END); long n=ftell(m); fseek(m,0,SEEK_SET);
@@ -9150,7 +9150,7 @@ int main(int argc,char **argv){
     if(terse && g_json){
         /* A consumer expecting JSON must not get key=value or nothing with exit 0. */
         fflush(stdout);
-        jf=tmpfile();
+        jf=mem_file();
         if(jf) jsave=dup(1);
         if(!jf || jsave<0 || dup2(fileno(jf),1)<0){
             fprintf(stderr,"cub_top: --dump-json 임시 출력 준비 실패: %s\n",strerror(errno));
