@@ -248,7 +248,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-tui.sh` | 늦게 온 OSC 색 응답은 키가 아님(손으로 친 Esc ] 는 키) · 나뉘어 온 응답(ESC 단독 뒤 60ms, rgb 중간에서 200ms, ESC ] 직후)도 키가 아니고 읽기 1회는 50ms 이내 · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort, 기본 동작이 종료인 SIGUSR1·USR2·ALRM·XCPU·PIPE 에서 터미널 복원 |
 | `check-dumpbase.sh` | 1회 실행의 회전율 기준선(직전 `--bcb-dump`) 간격을 나노초로: 0.5초·0.2초 간격이 정확한 초당 적재로 · 라이브는 파일을 다시 읽지 않음 |
 | `check-buildoffsets.sh` | `offsets/build-offsets.sh` 가 작업 디렉터리를 재사용해도 원격의 최신 브랜치를 빌드(낡은 로컬 브랜치 아님) · 태그는 태그 · fetch 실패면 빌드하지 않고 중단 |
-| `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 일반 계정으로 열린 파일·`databases.txt`(로그 경로 없는 3필드 항목 포함)에서 찾고, 일반 블록 마운트는 st_dev 로·overlay 는 fsid 로, 호스트의 더 바쁜 장치를 고르지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |
+| `check-dbdisk.sh` | 용량 판정 장치는 DB 파일이 놓인 디스크: 비특권 계정(root 면 nobody)으로 열린 파일·`databases.txt`(로그 경로 없는 3필드 항목 포함)에서 찾고, 호스트의 더 바쁜 장치를 고르지 않음 · 가짜 sysfs 로 호스트와 무관하게 st_dev → 파티션·NVMe 파티션·md·dm(LVM)·dm-on-md·멀티패스·한 디스크의 두 파티션까지 물리 디스크 대조, 실제 마운트에는 쓰지 않음 · tmpfs 는 사유와 함께 장치 판정 생략 |
 | `check-ceiling.sh` | 관측 상한을 장치 고유 ID 별로 기억·보존: 빠른 장치의 상한으로 느린 장치를 판정하지 않음 · 큐 ≈1 직렬 스트림은 상한으로 학습하지 않고 "지연 병목(직렬)" · 커널 이름으로 저장된 줄은 다른 디스크에 붙지 않음 · 장치 식별 키는 가짜 sysfs 로 호스트와 무관하게 정확한 값 대조(wwid·device/serial·dm/uuid 우선·파티션 `:p<n>`·식별자 없으면 커널 이름) |
 | `check-recheck.sh` | 헤더 재검에서 교체가 확인된 레코드가 새 페이지 상태로 통째로 바뀌고 dirty·존 집계가 따라옴. 헤더 판정은 표본 크기와 무관(헤더 50개 전부 불일치면 비활성), hot/warm 이 없으면 cold 상주 페이지로 검증, 검증할 헤더가 없으면(빈 풀·전부 비상주) 성공이 아닌 "검증 안 됨". degraded 모드에서는 검증된 레코드만 집계하고 덤프를 덮어쓰지 않음. 인스턴스 전환·BCB 크기 변화에 안전, `--bcb-dump` 종료 코드 |
 | `check-bitems.sh` | 동적 메모리 B 항목: catalog 는 자기 오프셋, `new_lfhash` 에서는 세션·카탈로그·락 자원을 0 이 아닌 `?`(합산 제외), 객체 락 자원·엔트리 집계, 플랜 캐시 측정/클론 추정 분리, vacuum data 항목 없음 · 결과 캐시의 temp 페이지는 개수만(B 합계 제외), 힙은 엔트리 풀+해시(추정) |
