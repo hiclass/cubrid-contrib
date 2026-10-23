@@ -38,6 +38,14 @@ chmod 755 "$TMP"
 # Recorded frames against their replay, every key both ways
 cat > "$TMP/cmp.py" <<'PY'
 import json,sys
+# mode "both": every key both ways.  mode "rec": the recording's keys must come back as
+# recorded; a key only this build writes (the recording predates it) may appear only at its
+# "not measured" value or by its documented derivation from recorded keys (DERIVED), and
+# cap.device/cap.device_reason may differ when cap.dev_util was never recorded (check 8:
+# replayed as "DB disk unknown").
+mode=sys.argv[3] if len(sys.argv)>3 else "both"
+DERIVED={'param.source':   lambda a,v: v in ('cubrid.conf','none'),            # never "paramdump" unless recorded
+         'cap.miss_source': lambda a,v: v=='scan' and 'cap.miss_pages_per_s' in a}   # measured before the key existed = a scan
 rec=[json.loads(l) for l in open(sys.argv[1]) if l.strip().startswith('{')]
 rep=[json.loads(l) for l in open(sys.argv[2]) if l.strip().startswith('{')]
 if len(rep)!=len(rec):
@@ -46,10 +54,14 @@ if len(rep)!=len(rec):
 # recording had no measurement) and a changed value all fail.  Only how the run was
 # invoked is a property of the run rather than of the frame.
 SKIP={'opts.used'}
-diff=[]; n=0
+diff=[]; n=0; newer=set()
 for fi,(a,b) in enumerate(zip(rec,rep)):
     for k in sorted(set(a)|set(b)):
         if k in SKIP: continue
+        if mode=="rec" and k not in a:
+            if b[k] in (-1,0,"","-") or (k in DERIVED and DERIVED[k](a,b[k])): newer.add(k); continue
+            diff.append((fi,k,'<absent>',b[k])); continue
+        if mode=="rec" and 'cap.dev_util' not in a and k in ('cap.device','cap.device_reason'): continue
         n+=1
         if k not in b: diff.append((fi,k,a[k],'<missing>')); continue
         if k not in a: diff.append((fi,k,'<absent>',b[k])); continue
@@ -61,10 +73,12 @@ if diff:
     print(f"  FAIL {len(diff)} key(s) differ after replay:")
     for fi,k,a,b in diff[:8]: print(f"        frame {fi} {k}: recorded={a} replayed={b}")
     sys.exit(1)
-print(f"  ok   replay reproduces every frame ({len(rec)} frames, {n} keys compared both ways, {len(SKIP)} run property skipped)")
+if mode=="both": print(f"  ok   replay reproduces every frame ({len(rec)} frames, {n} keys compared both ways, {len(SKIP)} run property skipped)")
+else: print(f"  ok   replay reproduces the recording's keys ({len(rec)} frames, {n} keys; {len(newer)} newer key(s) at their unmeasured or derived value: {' '.join(sorted(newer))})")
 PY
 
 bad=0
+finish(){ [ $bad -eq 0 ] && { echo "-> PASS"; exit 0; }; echo "-> FAIL"; exit 1; }
 # 0) the server down: recorded where no cub_server is visible, replayed key for key
 DREC="$TMP/down.jsonl"
 if [ "$(id -u)" = 0 ]; then NS="unshare -pf --mount-proc"; else NS="unshare -Urpf --mount-proc"; fi
@@ -81,24 +95,28 @@ if $NS true 2>/dev/null && command -v python3 >/dev/null; then
 else echo "  SKIP server-down frames (no PID namespace: unshare -p not permitted)"; fi
 
 # The rest works on a recording.  With a cub_server running it is recorded now by this build;
-# without one (CI) the checks that need only a recording file run on examples/10-recording.jsonl,
-# and only the key-for-key round trips - which need a recording this build made - are skipped.
-LIVE=1
+# without one (CI) they run on examples/10-recording.jsonl, which an older build made: the
+# round trips then compare the recording's keys one way (cmp.py mode "rec"), and the
+# sub-second gap check (0.5s frames recorded here) and the replay with cap.dev_util present
+# are skipped.  Replays run at speed 0: the recorded gaps are not waited for.
+LIVE=1; MODE=both
 if "$BIN" -d 2>/dev/null | grep -q '^server.up=1'; then
     # --record is live-only (-b/-p); a short live run records a few frames without a tty.
     "$BIN" -b --record "$REC" >/dev/null 2>&1 &
     p=$!; sleep 3; kill -TERM $p 2>/dev/null; wait $p 2>/dev/null
     [ -s "$REC" ] || { echo "  FAIL no frames recorded"; echo "-> FAIL"; exit 1; }
 else
-    LIVE=0
-    [ -s "$ROOT/examples/10-recording.jsonl" ] || { echo "  SKIP recorded frames: no cub_server and no examples/10-recording.jsonl"
-        [ $bad -eq 0 ] && { echo "-> PASS"; exit 0; } || { echo "-> FAIL"; exit 1; }; }
+    LIVE=0; MODE=rec
+    [ -s "$ROOT/examples/10-recording.jsonl" ] || { echo "  SKIP recorded frames: no cub_server and no examples/10-recording.jsonl"; finish; }
     cp "$ROOT/examples/10-recording.jsonl" "$REC"
     echo "  note cub_server not running: the recording checks use examples/10-recording.jsonl"
+    # This build must still accept the example, or every check below fails for the wrong reason
+    want=$(grep -c '^{' "$REC"); got=$("$BIN" --replay "$REC" --dump-json --replay-speed 0 2>/dev/null | grep -c '^{')
+    [ "$got" = "$want" ] || { echo "  FAIL this build replays $got of the example's $want frame(s): re-record examples/10-recording.jsonl with this build"; finish; }
 fi
 
 N=$(grep -c '^{' "$REC")
-echo "recorded $N frame(s)"
+[ $LIVE = 1 ] && echo "recorded $N frame(s)" || echo "example $N frame(s)"
 
 # 1) every line is one self-contained JSON object
 if command -v python3 >/dev/null; then
@@ -128,14 +146,12 @@ fi
 
 # 2) round trip: replay re-emits what was recorded.  --dump-json keeps quoted strings whole
 #    and numbers typed, so text keys (reasons, verdict) compare exactly.
-"$BIN" --replay "$REC" --dump-json >"$TMP/out" 2>/dev/null
-if [ $LIVE = 0 ]; then
-    echo "  SKIP key-for-key round trip (needs a recording made by this build; the example may predate newer keys)"
-elif [ ! -s "$TMP/out" ]; then
+"$BIN" --replay "$REC" --dump-json --replay-speed 0 >"$TMP/out" 2>/dev/null
+if [ ! -s "$TMP/out" ]; then
     echo "  FAIL --replay --dump-json produced nothing"; bad=1
 else
     if command -v python3 >/dev/null; then
-        python3 "$TMP/cmp.py" "$REC" "$TMP/out" || bad=1
+        python3 "$TMP/cmp.py" "$REC" "$TMP/out" $MODE || bad=1
     else
         echo "  skip round-trip comparison (no python3)"
     fi
@@ -150,7 +166,7 @@ d=json.loads(open(sys.argv[1]).readline()); n=256
 d['os.core_pct_n']=n; d['os.core_pct']=','.join(['100.0']*n)
 open(sys.argv[2],'w').write(json.dumps(d,ensure_ascii=False)+'\n')
 PY
-    "$BIN" --replay "$TMP/big.jsonl" --dump-json >"$TMP/big.out" 2>/dev/null
+    "$BIN" --replay "$TMP/big.jsonl" --dump-json --replay-speed 0 >"$TMP/big.out" 2>/dev/null
     python3 - "$TMP/big.jsonl" "$TMP/big.out" <<'PY' || bad=1
 import json,sys
 a=json.loads(open(sys.argv[1]).readline()); b=json.loads(open(sys.argv[2]).readline())
@@ -161,14 +177,14 @@ PY
 fi
 
 # 2a) a frame whose paramdump was skipped (the server is another account's) keeps the reason
-if command -v python3 >/dev/null && [ $LIVE = 1 ]; then
+if command -v python3 >/dev/null; then
     python3 - "$REC" "$TMP/skip.jsonl" <<'PY'
 import json,sys
 d=json.loads(open(sys.argv[1]).readline()); d['param.skipped_reason']='서버 설치 위치를 읽을 수 없음(다른 계정) — paramdump 생략'
 open(sys.argv[2],'w').write(json.dumps(d,ensure_ascii=False)+'\n')
 PY
-    "$BIN" --replay "$TMP/skip.jsonl" --dump-json >"$TMP/skip.out" 2>/dev/null
-    python3 "$TMP/cmp.py" "$TMP/skip.jsonl" "$TMP/skip.out" >"$TMP/skip.res" \
+    "$BIN" --replay "$TMP/skip.jsonl" --dump-json --replay-speed 0 >"$TMP/skip.out" 2>/dev/null
+    python3 "$TMP/cmp.py" "$TMP/skip.jsonl" "$TMP/skip.out" $MODE >"$TMP/skip.res" \
         && echo "  ok   param.skipped_reason replays" || { sed 's/^/  /' "$TMP/skip.res"; bad=1; }
 fi
 
@@ -184,7 +200,8 @@ else echo "  FAIL cut lines: $nf frame(s) replayed, $n70 at 1970; stderr: $(tail
 a=$(TZ=UTC "$BIN" --replay "$REC" --dump-json --replay-speed 0 2>/dev/null | md5sum)
 b=$(TZ=Asia/Seoul "$BIN" --replay "$REC" --dump-json --replay-speed 0 2>/dev/null | md5sum)
 c=$(TZ=America/New_York "$BIN" --replay "$REC" -d --replay-speed 0 2>/dev/null | grep -m1 '^ts=' | sed 's/ ts_epoch=.*//')
-if [ "$a" = "$b" ] && [ "$c" = "ts=$(printf '%s' "$L1" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["ts"]))')" ]; then
+want_ts=$(printf '%s' "$L1" | sed -n 's/.*"ts": *\("[^"]*"\).*/ts=\1/p')   # no python3 needed here
+if [ "$a" = "$b" ] && [ -n "$want_ts" ] && [ "$c" = "$want_ts" ]; then
     echo "  ok   replay output is the same under UTC, Asia/Seoul and America/New_York ($c)"
 else echo "  FAIL replay depends on TZ ($c)"; bad=1; fi
 
@@ -215,7 +232,7 @@ d=json.loads(open(sys.argv[1]).readline())
 d['cap.read_ratio']=0.30; d['cap.profile']='>64KB/write-heavy'
 open(sys.argv[2],'w').write(json.dumps(d,ensure_ascii=False)+'\n')
 PY
-    got=$("$BIN" --replay "$TMP/edge.jsonl" --dump-json 2>/dev/null | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline()).get("cap.profile"))')
+    got=$("$BIN" --replay "$TMP/edge.jsonl" --dump-json --replay-speed 0 2>/dev/null | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline()).get("cap.profile"))')
     if [ "$got" = ">64KB/write-heavy" ]; then echo "  ok   profile cell at a rounding edge replays as recorded"
     else echo "  FAIL profile cell at a rounding edge replayed as $got"; bad=1; fi
 fi
@@ -261,7 +278,7 @@ done
 
 # 3) a replay must read no /proc of any process - it is a file, not a measurement
 if command -v strace >/dev/null; then
-    strace -f -e trace=openat -o "$TMP/st" "$BIN" --replay "$REC" -d >/dev/null 2>&1
+    strace -f -e trace=openat -o "$TMP/st" "$BIN" --replay "$REC" -d --replay-speed 0 >/dev/null 2>&1
     n=$(grep -cE '"/proc/[0-9]' "$TMP/st" 2>/dev/null | head -1)
     [ -n "$n" ] || n=0
     if [ "${n:-0}" -ne 0 ]; then
@@ -291,10 +308,12 @@ if command -v python3 >/dev/null; then
 import re,sys
 s=open(sys.argv[1]).read(); open(sys.argv[2],"w").write(re.sub(r'"cap\.dev_util":\s*[0-9.\-]+,\s*','',s))
 PY
-    d1=$("$BIN" --replay "$REC" -d 2>/dev/null | grep -o 'cap.dev_util=[0-9.-]*' | head -1)
-    d0=$("$BIN" --replay "$TMP/nodev.jsonl" -d 2>/dev/null | grep -o 'cap.device="[^"]*"\|cap.device_reason="[^"]*"' | head -2 | tr '\n' ' ')
-    [ $LIVE = 1 ] && case "$d1" in cap.dev_util=-1*|"") echo "  FAIL replay with cap.dev_util: $d1"; bad=1 ;; *) ;; esac
+    if [ $LIVE = 1 ]; then      # the example predates cap.dev_util
+        d1=$("$BIN" --replay "$REC" -d --replay-speed 0 2>/dev/null | grep -o 'cap.dev_util=[0-9.-]*' | head -1)
+        case "$d1" in cap.dev_util=-1*|"") echo "  FAIL replay with cap.dev_util: $d1"; bad=1 ;; *) ;; esac
+    fi
+    d0=$("$BIN" --replay "$TMP/nodev.jsonl" -d --replay-speed 0 2>/dev/null | grep -o 'cap.device="[^"]*"\|cap.device_reason="[^"]*"' | head -2 | tr '\n' ' ')
     case "$d0" in 'cap.device="" cap.device_reason="'*cap.dev_util*) echo "  ok   recording without cap.dev_util replays as DB disk unknown ($d0)" ;;
                   *) echo "  FAIL recording without cap.dev_util: $d0"; bad=1 ;; esac
 fi
-[ $bad -eq 0 ] && { echo "-> PASS"; exit 0; } || { echo "-> FAIL"; exit 1; }
+finish
