@@ -4118,7 +4118,8 @@ typedef struct {
     /* Demand */
     double read_bps, write_bps, riops, wiops;   /* Attributed to the process, from /proc/pid/io */
     double dev_rbps, dev_wbps;                  /* Device-wide, diskstats sectors x 512 */
-    double miss_pps;                            /* Buffer misses: pages loaded per second */
+    double miss_pps;                            /* Buffer misses: pages loaded per second (-1 not measured) */
+    char miss_src[12];                          /* "scan" (page-set difference), "perfmon" (engine ioread counter), "-" */
     double hit_pct;                             /* Hit ratio percentage; -1 means it cannot be computed */
     char   hit_src[16];                         /* "perfmon" | "turnover" | "-" */
     char   dev[32];                             /* The DB's busiest disk this frame; "" when unknown */
@@ -4150,6 +4151,7 @@ static cap_t CAP2;
 /* Clear the values only, keeping the reasons and remembered ceilings, so a budget-exceeded or server-down frame shows no half values */
 static void cap_reset_values(void){
     CAP2.miss_pps=-1; CAP2.hit_pct=-1; CAP2.turnover_pct=-1; CAP2.readmit_pct=-1; CAP2.adm_frac=-1;
+    snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"-");
     CAP2.await_ms=CAP2.r_await_ms=CAP2.w_await_ms=-1; CAP2.qdepth=-1;
     CAP2.headroom_pct=-1; CAP2.ps_ok=0;
     CAP2.dev_rbps=CAP2.dev_wbps=0; CAP2.req_kb=0; CAP2.read_ratio=0.5;
@@ -4203,6 +4205,7 @@ typedef struct {
     double heapb;
     double cap_readmit;   /* Refill percentage: what separates a short buffer from a scan */
     double cap_admfrac;   /* Frame admissions over nbuf (-1 unknown); >= 0.5 makes the two above low-confidence */
+    int    cap_mperf;     /* Admissions came from the engine's ioread counter (a large buffer not scanned) */
     char hh[12];
 } hsam_t;
 static hsam_t HS[HIST_MAX]; static int HN=0, HCAP=HIST_MAX;
@@ -4262,6 +4265,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->cap_readmit=CAP2.readmit_pct;          /* -1 = not measured: it alone separates shortage from scan */
     s->cap_admfrac=CAP2.adm_frac;
     s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps;   /* -1 = not measured */
+    s->cap_mperf = !strcmp(CAP2.miss_src,"perfmon");
     s->cap_head=CAP2.headroom_pct<0?0:CAP2.headroom_pct;
     s->pg_ok      = PG.ok || AG.ok;
     if(!PG.ok && AG.ok){                /* Not scanned: the engine's own aggregates; no oldest dirty */
@@ -5041,6 +5045,16 @@ static int db_disks(int pid,const char *db,char out[][32],int max,char *why,size
     snprintf(c_why,sizeof c_why,"%s",why);
     return n;
 }
+/* Admissions when the page set was not read: a large buffer (above PG_LARGE) is scanned only
+   on request, so there is no set difference.  The engine's ioread counter is the same
+   quantity - pages read into the buffer - when a watcher keeps it running and two frames
+   give a rate (live).  Re-admit stays unmeasured: that needs the page set. */
+static void cap_miss_from_engine(void){
+    if(CAP2.miss_pps>=0){ snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"scan"); return; }
+    snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"-");
+    if(CAP2.ps_ok && !strcmp(CAP2.hit_src,"perfmon")){      /* a per-second delta, not the cumulative figure */
+        CAP2.miss_pps=CAP2.pb_ioread_ps; snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"perfmon"); }
+}
 static void cap_collect(proc_t*P,iod_t*IO,const dstat_t*d0,int nd0,const dstat_t*d1,int nd1,double dt){
     CAP2.read_bps=IO->rb; CAP2.write_bps=IO->wb; CAP2.riops=IO->ri; CAP2.wiops=IO->wi;
     CAP2.dev[0]=0; CAP2.dev_why[0]=0; CAP2.dev_util=0; g_dk_via=0;
@@ -5129,6 +5143,7 @@ static void cap_collect(proc_t*P,iod_t*IO,const dstat_t*d0,int nd0,const dstat_t
       /* Keep the value pgbuf_scan already produced from the dump baseline (one-shot) */
       if(CAP2.turnover_pct<0 && keep_t>=0){ CAP2.turnover_pct=keep_t; CAP2.miss_pps=keep_m; CAP2.readmit_pct=keep_r; CAP2.adm_frac=keep_f; }
       frames++; }
+    cap_miss_from_engine();
     if(CAP2.hit_pct<0 && CAP2.turnover_pct>=0 && PG.ok){
         /* Zero turnover means no new pages entered in the window: the working set has settled into the buffer */
         /* Turnover-based proxy for hit ratio: pages loaded per second are misses.  The
@@ -5451,8 +5466,13 @@ static void vd_buf(char*o,size_t n,const char**col){
         snprintf(o,n,g_ascii?"admissions not measured (no page-scan baseline) - buffer not judged, %s"
                            :"· 버퍼 적재 미측정(페이지 스캔 기준 없음) — 버퍼 판단 보류, %s",disk); return; }
     if(ab>=8.0*1024*1024 && b->cap_readmit<0){ *col=VD_INFO;
-        snprintf(o,n,g_ascii?"admitting %s/s (%s) - re-admit not measured, so shortage and scan are not told apart"
-                           :"· 적재 %s/s(%s) — 재적재율 미측정이라 버퍼 부족과 스캔을 가르지 않음",H(ab),disk); return; }
+        if(b->cap_mperf)   /* a large buffer not scanned: the rate is the engine's, the page set is not read */
+            snprintf(o,n,g_ascii?"admitting %s/s by the engine counter (%s) - no page scan, so re-admit is not measured: d (--pgbuf-detail) tells shortage from scan"
+                               :"· 적재 %s/s(엔진 카운터, %s) — 페이지 스캔이 없어 재적재율 미측정: d(--pgbuf-detail)로 켜면 버퍼 부족과 스캔 구분",H(ab),disk);
+        else
+            snprintf(o,n,g_ascii?"admitting %s/s (%s) - re-admit not measured, so shortage and scan are not told apart"
+                               :"· 적재 %s/s(%s) — 재적재율 미측정이라 버퍼 부족과 스캔을 가르지 않음",H(ab),disk);
+        return; }
     /* Re-admit = admitted pages evicted within the last nbuf evictions: under an exact LRU those
        are the misses a buffer twice the size would have served, so it estimates the share of
        misses doubling removes.  Only an estimate under that assumption: CUBRID inserts new pages
@@ -5590,8 +5610,15 @@ static void vd_capacity(char*o,size_t n,const char**col){
                             :"⚠ 대기 %.1fms인데 IOPS %.0f (큐 %.1f) — 지연 병목: IOPS 증설보다 빠른 스토리지",
                  c->await_ms,c->dev_iops,c->qdepth>=0?c->qdepth:0); return; }
     /* Buffer verdict: sustained misses call for more, no turnover and no use makes it a candidate to shrink */
-    if(PG.ok && c->miss_pps>=0){
-        double res=PG.nbuf>0?100.0*PG.resident/PG.nbuf:0;
+    /* Resident share from the scan, else from the engine's zone counts (a large buffer not scanned) */
+    if((PG.ok || AG.ok) && c->miss_pps>=0){
+        double res = PG.ok ? (PG.nbuf>0?100.0*PG.resident/PG.nbuf:0)
+                           : (AG.nbuf>0?100.0*(double)(AG.z1+AG.z2+AG.z3)/AG.nbuf:0);
+        int mperf = !strcmp(c->miss_src,"perfmon");
+        if(c->readmit_pct<0 && c->miss_pps>=200 && mperf){ *col=VD_NOTE;
+            snprintf(o,n,g_ascii?"! %.0f pages/s admitted (engine counter) - a large buffer not scanned, so re-read share unknown: d (--pgbuf-detail) tells buffer shortage from scan"
+                                :"⚠ 초당 %.0f페이지 적재(엔진 카운터) — 페이지 스캔을 끈 대형 버퍼라 재적재 비율 미상: d(--pgbuf-detail)로 켜면 버퍼 부족과 스캔 구분",
+                     c->miss_pps); return; }
         if(c->readmit_pct<0 && c->miss_pps>=200){ *col=VD_NOTE;
             snprintf(o,n,g_ascii?"! %.0f pages/s admitted (turnover %.0f%%) - re-read share unknown from a file baseline: run live (-b) to tell buffer shortage from scan"
                                 :"⚠ 초당 %.0f페이지 적재(회전율 %.0f%%) — 파일 기준선이라 재적재 비율 미상: 라이브(-b)로 버퍼 부족과 스캔을 구분",
@@ -7252,7 +7279,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
            CAP2.ps_ok,tq(CAP2.hit_src),tq(CAP2.ps_why));
     if(!CAP2.over_budget){
         if(CAP2.hit_pct>=0)       printf("cap.buffer_hit_pct=%.2f\n",CAP2.hit_pct);
-        if(CAP2.turnover_pct>=0){ printf("cap.turnover_pct=%.2f cap.miss_pages_per_s=%.0f\n",CAP2.turnover_pct,CAP2.miss_pps);
+        if(CAP2.miss_pps>=0)      printf("cap.miss_pages_per_s=%.0f cap.miss_source=\"%s\"\n",CAP2.miss_pps,CAP2.miss_src);
+        if(CAP2.turnover_pct>=0){ printf("cap.turnover_pct=%.2f\n",CAP2.turnover_pct);
                                   if(CAP2.readmit_pct>=0) printf("cap.readmit_pct=%.2f\n",CAP2.readmit_pct);
                                   if(CAP2.adm_frac>=0) printf("cap.admit_frac_of_buffer=%.3f\n",CAP2.adm_frac);
                                   else printf("cap.readmit_available=0\n"); }
@@ -7798,6 +7826,8 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     CAP2.w_await_ms=rp_num(t,"cap.write_await_ms",-1);
     CAP2.qdepth   =rp_num(t,"cap.queue_depth",-1);
     CAP2.miss_pps =rp_num(t,"cap.miss_pages_per_s",-1);
+    if(!rp_find(t,"cap.miss_source",CAP2.miss_src,sizeof CAP2.miss_src))   /* older recordings: scanned if measured */
+        snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"%s",CAP2.miss_pps>=0?"scan":"-");
     CAP2.hit_pct  =rp_num(t,"cap.buffer_hit_pct",-1);
     CAP2.turnover_pct=rp_num(t,"cap.turnover_pct",-1);
     CAP2.readmit_pct =rp_num(t,"cap.readmit_pct",-1);

@@ -18,6 +18,10 @@
 # reuse".  When it was not measured (-1) it must stay -1 in the history and the verdict
 # must not pick either conclusion; a 0 there read as a scan.  A large buffer scanned on
 # request is scanned every frame, so every frame after the first has a measured rate.
+# A large buffer not scanned has no page set: admissions then come from the engine's ioread
+# counter when a watcher keeps it running and two frames give a rate (live) - never from
+# the cumulative one-shot figure - with re-admit still unmeasured, and the verdicts say so.
+# Driven through cap_collect against a fake pstat_Global/pstat_Metadata in this process.
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"
 TMP=${TMPDIR:-/tmp}/cub_top-readmit.$$; mkdir -p "$TMP"; trap 'rm -rf "$TMP"' EXIT
@@ -126,7 +130,64 @@ int main(void){
       char o[400]; const char*c=VD_INFO; vd_capacity(o,sizeof o,&c);
       int ok=!strstr(o,"무효") && strstr(o,"재사용 거리가 버퍼 밖");
       printf("  %s   capacity, re-admit 7%%: \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok; }
-    printf("2. large buffer (%d BCBs) scanned on request: re-admit every frame\n",NB);
+    printf("2. large buffer not scanned: admissions from the engine's ioread counter through cap_collect\n");
+    { /* A fake pstat_Global/pstat_Metadata in this process, laid out by the offset table, read by
+         cap_collect the way the server's is; PG.ok=0 + PG.large as pgbuf_scan leaves a large buffer */
+      static proc_t P; static mem_t M; static tier_t T; static iod_t IO; char o[400]; const char*c; int ok;
+      P.pid=getpid(); snprintf(P.db,sizeof P.db,"x"); CAP.vm_readv=1;
+      B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0;
+      if(g_bt->ps.nvals<0||g_bt->ps.sz_md<=0){ printf("  SKIP   no perfmon offsets in the builtin table\n"); }
+      else {
+        static unsigned char gbuf[256]; static uint64_t vals[64]; int maxp=0;
+        for(int i=0;i<CPS_N;i++) if(CPS_PSID[i]>maxp) maxp=CPS_PSID[i];
+        unsigned char *md=calloc((size_t)(maxp+1),(size_t)g_bt->ps.sz_md);
+        int32_t nv=64; uint64_t gp=(uint64_t)(uintptr_t)vals; unsigned char one=1;
+        memcpy(gbuf+g_bt->ps.nvals,&nv,4); memcpy(gbuf+g_bt->ps.gstats,&gp,8); memcpy(gbuf+g_bt->ps.init,&one,1);
+        for(int i=0;i<CPS_N;i++){ unsigned char *e=md+(size_t)CPS_PSID[i]*(size_t)g_bt->ps.sz_md; int32_t id=CPS_PSID[i], st=i+1;
+                                  memcpy(e+g_bt->ps.md_psid,&id,4); memcpy(e+g_bt->ps.md_start,&st,4); }
+        B.sym[S_PSTATG]=(unsigned long)(uintptr_t)gbuf; B.sym[S_PSTATMD]=(unsigned long)(uintptr_t)md;
+        PG.ok=0; PG.large=1; AG.ok=1; AG.nbuf=300000; AG.z1=250000; AG.z2=40000; AG.z3=5000; AG.dirty=0; g_pagesize=16384; IO.rb=0;
+        memset(&CAP2,0,sizeof CAP2); cap_reset_values();
+        #define FRAME(fe,io) do{ vals[1+CPS_PB_FETCH]=(fe); vals[1+CPS_PB_IOREAD]=(io); cap_collect(&P,&IO,NULL,0,NULL,0,0.5); }while(0)
+        FRAME(100000,1000);
+        ok = CAP2.ps_ok && !strcmp(CAP2.hit_src,"perfmon-cum") && CAP2.miss_pps<0 && !strcmp(CAP2.miss_src,"-");
+        printf("  %s   first frame (cumulative only): admissions unmeasured (%.0f, source %s, hit source %s)\n",ok?"ok  ":"FAIL",CAP2.miss_pps,CAP2.miss_src,CAP2.hit_src); bad|=!ok;
+        FRAME(110000,1640);
+        ok = CAP2.miss_pps==1280 && !strcmp(CAP2.miss_src,"perfmon") && CAP2.pb_ioread_ps==1280 && !strcmp(CAP2.hit_src,"perfmon");
+        printf("  %s   second frame: ioread +640 in 0.5s -> admissions %.0f/s (source %s)\n",ok?"ok  ":"FAIL",CAP2.miss_pps,CAP2.miss_src); bad|=!ok;
+        hist_push(10,&P,&M,&T,&IO); c=VD_INFO; vd_buf(o,sizeof o,&c);
+        ok = HS[HN-1].cap_miss==1280 && HS[HN-1].cap_mperf && c!=VD_OK && strstr(o,"엔진 카운터") && strstr(o,"pgbuf-detail") && !strstr(o,"적재 미측정");
+        printf("  %s   panel 3 (20MB/s, re-admit unmeasured): \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok;
+        c=VD_INFO; vd_capacity(o,sizeof o,&c);
+        ok = strstr(o,"엔진 카운터") && strstr(o,"pgbuf-detail") && !strstr(o,"파일 기준선");
+        printf("  %s   capacity verdict (PG.ok=0, engine aggregates): \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok;
+        FRAME(110000,1640);
+        ok = CAP2.miss_pps<0 && !strcmp(CAP2.miss_src,"-");
+        printf("  %s   no fetch in the window (idle, or the watcher gone): unmeasured again (%.0f)\n",ok?"ok  ":"FAIL",CAP2.miss_pps); bad|=!ok;
+        FRAME(120000,1640);
+        hist_push(11,&P,&M,&T,&IO); c=VD_INFO; vd_buf(o,sizeof o,&c);
+        ok = CAP2.miss_pps==0 && !strcmp(CAP2.miss_src,"perfmon") && c==VD_OK && strstr(o,"버퍼에서 처리 중");
+        printf("  %s   fetches, no ioread: admissions 0 -> panel 3 \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok;
+        AG.z1=100000; AG.z2=0; AG.z3=0;
+        c=VD_INFO; vd_capacity(o,sizeof o,&c);
+        ok = strstr(o,"과다 할당") && strstr(o,"33%");
+        printf("  %s   capacity verdict, 33%% resident at 0 pages/s: \"%s\"\n",ok?"ok  ":"FAIL",o); bad|=!ok;
+        #undef FRAME
+        CAP2.miss_pps=500; cap_miss_from_engine();
+        ok = CAP2.miss_pps==500 && !strcmp(CAP2.miss_src,"scan");
+        printf("  %s   a page scan this frame wins over the counter (%.0f, source %s)\n",ok?"ok  ":"FAIL",CAP2.miss_pps,CAP2.miss_src); bad|=!ok;
+        static proc_t RP; static mem_t RM; static tier_t RT; static iod_t RIO;
+        rp_apply("{\"cap.miss_pages_per_s\": 1280, \"cap.miss_source\": \"perfmon\"}",&RP,&RM,&RT,&RIO);
+        ok = CAP2.miss_pps==1280 && !strcmp(CAP2.miss_src,"perfmon");
+        rp_apply("{\"cap.miss_pages_per_s\": 300}",&RP,&RM,&RT,&RIO);
+        ok &= CAP2.miss_pps==300 && !strcmp(CAP2.miss_src,"scan");
+        rp_apply("{}",&RP,&RM,&RT,&RIO);
+        ok &= CAP2.miss_pps<0 && !strcmp(CAP2.miss_src,"-");
+        printf("  %s   replay: the source comes back; an older recording without it reads as scan; none as unmeasured\n",ok?"ok  ":"FAIL"); bad|=!ok;
+        B.sym[S_PSTATG]=0; B.sym[S_PSTATMD]=0; free(md);
+      }
+    }
+    printf("3. large buffer (%d BCBs) scanned on request: re-admit every frame\n",NB);
     static proc_t P; P.pid=getpid(); CAP.vm_readv=1;
     B.ok=1; B.partial=0; g_bt=&BTABS[0]; B.base=0; B.sym[S_PGBUF]=(unsigned long)(uintptr_t)pool_;
     bcbs_=calloc(NB,(size_t)g_bt->pg.sz_bcb); iopg_=calloc(NB,64);
