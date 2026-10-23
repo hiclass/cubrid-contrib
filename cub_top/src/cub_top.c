@@ -3091,16 +3091,23 @@ static int cap_turnover_from_dump(void);   /* Must be read as the baseline befor
    root, following one would let any account that can plant a name truncate or write a file. */
 static int g_rec_overwrite=0;      /* --record-overwrite: replace an existing recording of ours */
 static FILE *out_open(const char *path,int overwrite,char *why,size_t wn){
-    int fd=open(path,O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC|(overwrite?0:O_EXCL),0600);
+    /* O_NONBLOCK: a FIFO planted at the path would block the open; it is cleared after fstat */
+    int fd=open(path,O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|(overwrite?0:O_EXCL),0600);
     if(fd<0){
         if(errno==EEXIST) snprintf(why,wn,"%s",g_ascii?"already exists (--record-overwrite replaces it)":"이미 있음 (덮어쓰려면 --record-overwrite)");
         else if(errno==ELOOP) snprintf(why,wn,"%s",g_ascii?"is a symbolic link - not followed":"심볼릭 링크 — 따라가지 않음");
+        else if(errno==ENXIO) snprintf(why,wn,"%s",g_ascii?"not a regular file of this account - not replaced":"이 계정의 일반 파일이 아님 — 덮어쓰지 않음");
         else snprintf(why,wn,"%s",strerror(errno));
         return NULL; }
-    struct stat st;
-    if(fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_uid!=geteuid()){
+    /* One link only: a hard link planted by another account to a file of ours (a volume,
+       cubrid.conf) passes the owner check and would be truncated */
+    struct stat st; int fl;
+    if(fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_uid!=geteuid() || st.st_nlink!=1){
         snprintf(why,wn,"%s",g_ascii?"not a regular file of this account - not replaced":"이 계정의 일반 파일이 아님 — 덮어쓰지 않음");
+        if(fstat(fd,&st)==0 && S_ISREG(st.st_mode) && st.st_nlink>1)
+            snprintf(why,wn,"%s",g_ascii?"has other hard links - not replaced":"다른 하드링크가 있음 — 덮어쓰지 않음");
         close(fd); return NULL; }
+    if((fl=fcntl(fd,F_GETFL))<0 || fcntl(fd,F_SETFL,fl&~O_NONBLOCK)<0){ snprintf(why,wn,"%s",strerror(errno)); close(fd); return NULL; }
     if(ftruncate(fd,0)!=0){ snprintf(why,wn,"%s",strerror(errno)); close(fd); return NULL; }
     FILE *f=fdopen(fd,"w"); if(!f){ snprintf(why,wn,"%s",strerror(errno)); close(fd); }
     return f;

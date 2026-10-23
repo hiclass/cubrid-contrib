@@ -16,7 +16,8 @@
 #
 # Files cub_top writes (--record, --bcb-dump) never follow a symlink and never empty a file
 # unasked: a recording is created new (0600), an existing one is replaced only with
-# --record-overwrite and only when it is this account's regular file.  Run as root,
+# --record-overwrite and only when it is this account's regular file with no other hard
+# link (a FIFO there neither blocks nor is accepted).  Run as root,
 # following a planted link would truncate whatever it points at.
 # A recording that cannot be written (ENOSPC, EIO, a file size limit) stops with a reason on
 # screen and on stderr and exit status 1 - never a status 0 over a short or empty file.
@@ -56,6 +57,23 @@ if [ "$(id -u)" = 0 ] && id hiclass >/dev/null 2>&1; then
     if [ "$rc" = 2 ] && [ "$(cat "$TMP/theirs.jsonl")" = theirs ]; then ok "another account's file not replaced"
     else no "another account's file: rc $rc, content '$(head -c 20 "$TMP/theirs.jsonl")'"; fi
 else echo "  SKIP another account's file (needs root and a second account)"; fi
+
+# A hard link to a file of ours (planted by another account where fs.protected_hardlinks=0)
+# passes the owner check: it must not be truncated.  A FIFO must not block the run, with or
+# without a reader on it.
+ln "$victim" "$TMP/hard.jsonl"
+rc=$(rec --record "$TMP/hard.jsonl" --record-overwrite)
+if [ "$rc" = 2 ] && [ "$(cat "$victim")" = precious ]; then ok "hard link not replaced: $(head -1 "$TMP/err" | cut -c1-60)"
+else no "hard link: rc $rc, victim '$(head -c 20 "$victim")'"; fi
+mkfifo "$TMP/fifo.jsonl"
+rc=$(rec --record "$TMP/fifo.jsonl" --record-overwrite)
+if [ "$rc" = 2 ]; then ok "FIFO without a reader refused at once: $(head -1 "$TMP/err" | cut -c1-60)"
+else no "FIFO without a reader: rc $rc (blocked or accepted)"; fi
+exec 3<>"$TMP/fifo.jsonl"                  # a reader on it
+rc=$(rec --record "$TMP/fifo.jsonl" --record-overwrite)
+exec 3<&-
+if [ "$rc" = 2 ]; then ok "FIFO with a reader refused: $(head -1 "$TMP/err" | cut -c1-60)"
+else no "FIFO with a reader: rc $rc"; fi
 
 if "$BIN" -d 2>/dev/null | grep -q '^pgbuf.enabled=1'; then
     ln -s "$victim" "$TMP/dump.bin"
