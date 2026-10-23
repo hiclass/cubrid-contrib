@@ -990,7 +990,8 @@ static void child_forget_parent(void);
 /* Every signal with a handler is held from fork() until the child's pid is recorded and
    the child has reset the handlers: in the parent, a handler running in that window would
    not see the child and leave it behind; in the child, it would run as the parent's */
-static const int g_handled_sigs[]={SIGINT,SIGTERM,SIGHUP,SIGQUIT,SIGTSTP,SIGCONT,SIGABRT,SIGSEGV,SIGBUS,SIGFPE};
+static const int g_handled_sigs[]={SIGINT,SIGTERM,SIGHUP,SIGQUIT,SIGTSTP,SIGCONT,SIGABRT,SIGSEGV,SIGBUS,SIGFPE,
+                                   SIGXCPU,SIGUSR1,SIGUSR2,SIGALRM,SIGPIPE,SIGXFSZ};
 static void kids_hold(sigset_t *old){
     sigset_t m; sigemptyset(&m);
     for(size_t i=0;i<sizeof g_handled_sigs/sizeof g_handled_sigs[0];i++) sigaddset(&m,g_handled_sigs[i]);
@@ -4450,6 +4451,9 @@ static void tui_enter(void){
     signal(SIGQUIT,on_sig); signal(SIGHUP,on_sig);       /* the normal way out, which restores */
     signal(SIGTSTP,on_tstp); signal(SIGCONT,on_cont);
     signal(SIGABRT,on_fatal); signal(SIGSEGV,on_fatal); signal(SIGBUS,on_fatal); signal(SIGFPE,on_fatal);
+    /* Signals whose default action ends the process: the terminal comes back first */
+    signal(SIGXCPU,on_fatal); signal(SIGUSR1,on_fatal); signal(SIGUSR2,on_fatal);
+    signal(SIGALRM,on_fatal); signal(SIGPIPE,on_fatal);
 }
 /* Map Hangul typed on a 2-set layout back to the ASCII keys on the same physical
    keys, so a key pressed with the IME still in Hangul mode does what was intended.
@@ -9014,7 +9018,7 @@ static int opt_num(const char *opt,const char *s,double lo,double hi,double *out
 
 int main(int argc,char **argv){
     g_argc=argc; g_argv=argv;
-    int terse=0,tree=0,with_a=0,live=0,view0=0,dump_hist=0,force_ko=0,interval_set=0; double interval=0.5;
+    int terse=0,tree=0,with_a=0,live=0,view0=0,dump_hist=0,force_ko=0,interval_set=0,speed_set=0; double interval=0.5;
     int bcb_only=0;                   /* --bcb-dump with no display mode: write the snapshot only */
     const char *want_db=NULL;         /* The positional argument is the db to view; without it, the first alphabetically */
     /* Options that take a value.  The tests below are written "&&i+1<argc", which would
@@ -9038,7 +9042,7 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"--record")&&i+1<argc) g_rec_path=argv[++i];
         else if(!strcmp(argv[i],"--record-overwrite")) g_rec_overwrite=1;
         else if(!strcmp(argv[i],"--replay")&&i+1<argc) g_rep_path=argv[++i];
-        else if(!strcmp(argv[i],"--replay-speed")&&i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_rep_speed)) return 2; i++; }
+        else if(!strcmp(argv[i],"--replay-speed")&&i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_rep_speed)) return 2; i++; speed_set=1; }
         else if(!strcmp(argv[i],"--dump-hist")) dump_hist=1;
         else if(!strcmp(argv[i],"--heap")) with_a=1;
         else if(!strcmp(argv[i],"--pgbuf-detail")) g_pg_detail=1;
@@ -9100,6 +9104,13 @@ int main(int argc,char **argv){
                                   :"cub_top: --replay 는 기록된 그대로 보여 줍니다 — 적용되지 않는 옵션: %s\n",no);
             return 2; }
     }
+    /* An option qualifying another that is absent has nothing to act on */
+    if(g_rec_overwrite && !g_rec_path){
+        fprintf(stderr,g_ascii?"cub_top: --record-overwrite applies only with --record\n":"cub_top: --record-overwrite 는 --record 와 함께만 씁니다\n");
+        return 2; }
+    if(speed_set && !g_rep_path){
+        fprintf(stderr,g_ascii?"cub_top: --replay-speed applies only with --replay\n":"cub_top: --replay-speed 는 --replay 와 함께만 씁니다\n");
+        return 2; }
     /* No mode: the help, as a CLI does.  --bcb-dump alone is an action of its own (the
        snapshot cub_volmap --bufmap reads), so it runs without one. */
     if(!tree && !terse && !live && !g_rep_path){
@@ -9150,6 +9161,11 @@ int main(int argc,char **argv){
     signal(SIGHUP,on_term_kids); signal(SIGQUIT,on_term_kids);
     signal(SIGABRT,on_term_kids); signal(SIGSEGV,on_term_kids);   /* a crash too */
     signal(SIGBUS,on_term_kids); signal(SIGFPE,on_term_kids);
+    signal(SIGXCPU,on_term_kids); signal(SIGUSR1,on_term_kids); signal(SIGUSR2,on_term_kids);
+    signal(SIGALRM,on_term_kids); signal(SIGPIPE,on_term_kids);
+    /* A file size limit (ulimit -f): write() returns EFBIG instead, so --record and
+       --bcb-dump report the failure and the exit status says so */
+    signal(SIGXFSZ,SIG_IGN);
     /* Every way out of main - each return, the error paths included - passes exit(), so
        one handler stops a request still waiting instead of an abort before each return */
     g_pd_atexit=&pd; atexit(pd_atexit);

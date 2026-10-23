@@ -21,7 +21,8 @@
 #    after "rgb:1c1c" and the rest 200 ms later, a cut right after ESC ] - and no read
 #    holds the frame longer than the 50 ms gap it already allowed
 #  - Ctrl-Z gives the terminal back (cooked mode, cursor, colours) and fg takes it again
-#    with a clean screen; SIGHUP/SIGQUIT leave the normal way, abort() restores then aborts
+#    with a clean screen; SIGHUP/SIGQUIT leave the normal way, abort() restores then aborts,
+#    and so do USR1, USR2, ALRM, XCPU and PIPE (their default action ends the run)
 #  - a terminal under 60 columns or 10 rows is told so instead of drawn with wrapping
 DIR=$(cd "$(dirname "$0")" && pwd); ROOT=$(dirname "$DIR")
 SRC="$ROOT/src/cub_top.c"; REC="$ROOT/examples/10-recording.jsonl"
@@ -122,4 +123,8 @@ ends(){ # sig: the process leaves and restores the terminal (cursor shown again)
 ends HUP && ok "SIGHUP: leaves the normal way, terminal restored" || no "SIGHUP: not left or not restored"
 ends QUIT && ok "SIGQUIT: leaves the normal way, terminal restored" || no "SIGQUIT: not left or not restored"
 ends ABRT && ok "abort: terminal restored, then the default action" || no "abort: not restored"
+# Signals no handler used to take: their default action ended the run with the terminal raw
+for s in USR1 USR2 ALRM XCPU PIPE; do
+    ends $s && ok "SIG$s: terminal restored, then the default action" || no "SIG$s: not left or not restored"
+done
 if [ $bad = 0 ]; then echo "→ PASS"; else echo "→ FAIL"; exit 1; fi

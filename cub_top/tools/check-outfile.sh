@@ -107,9 +107,10 @@ if "$BIN" -d 2>/dev/null | grep -q '^pgbuf.enabled=1'; then
     else no "link under the temporary's name: rc $rc, victim '$(head -c 20 "$victim")'"; fi
 else echo "  SKIP --bcb-dump (no buffer pool readable)"; fi
 
-# A write that fails: a file size limit with SIGXFSZ ignored makes write() return EFBIG
+# A write that fails: a file size limit (ulimit -f).  cub_top ignores SIGXFSZ itself, so
+# write() returns EFBIG and the run reports it instead of dying by the signal (status 153)
 lim="$TMP/limited.jsonl"
-sh -c "trap '' XFSZ; ulimit -f 40; exec '$BIN' -b --interval 0.3 --record '$lim'" </dev/null >/dev/null 2>"$TMP/lerr" & p=$!
+sh -c "ulimit -f 40; exec '$BIN' -b --interval 0.3 --record '$lim'" </dev/null >/dev/null 2>"$TMP/lerr" & p=$!
 sleep 3; kill $p 2>/dev/null; wait $p; rc=$?
 nl=$(grep -c . "$lim" 2>/dev/null)
 if [ "$rc" = 1 ] && grep -q -- '--record' "$TMP/lerr"; then ok "write failure: exit 1, \"$(tail -1 "$TMP/lerr" | sed 's/^cub_top: //')\""

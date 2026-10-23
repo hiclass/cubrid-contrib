@@ -190,6 +190,12 @@ nacc=0; for o in "-d --heap --ascii" "--dump-json --replay-speed 0"; do
     "$BIN" --replay "$REC" $o </dev/null >/dev/null 2>&1 && nacc=$((nacc+1)) || { echo "  FAIL --replay with $o refused"; bad=1; }
 done
 [ $nrej = 9 ] && [ $nacc = 2 ] && echo "  ok   9 inapplicable option sets refused with status 2, 2 applicable ones accepted"
+# An option qualifying an absent one: --replay-speed without --replay, --record-overwrite without --record
+nq=0; for o in "-d --replay-speed 2" "-b --replay-speed 0" "-d --record-overwrite" "-b --record-overwrite" "--replay-speed 2" "--record-overwrite"; do
+    "$BIN" $o </dev/null >/dev/null 2>"$TMP/qerr"; rc=$?
+    if [ $rc = 2 ] && grep -q -- 'with --re\|와 함께만' "$TMP/qerr"; then nq=$((nq+1)); else echo "  FAIL $o: exit $rc ($(head -1 "$TMP/qerr" | cut -c1-60))"; bad=1; fi
+done
+[ $nq = 6 ] && echo "  ok   --replay-speed without --replay and --record-overwrite without --record: refused with status 2 (6 forms)"
 
 # 2b') a profile cell at a rounding edge: read_ratio is printed to 0.01, so a recorded
 #      write-heavy frame at 0.299 reads back as 0.30 - the recorded cell must win
