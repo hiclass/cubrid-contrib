@@ -4332,6 +4332,9 @@ static void bg_dark_leave(void){
    in tui_enter and written with write(2) and tcsetattr, both async-signal-safe */
 static char g_seq_leave[256], g_seq_enter[256]; static int g_seq_leave_n, g_seq_enter_n;
 static struct termios g_tio_raw;
+/* The handlers write to a copy of the terminal fd taken in tui_enter: a recorded frame is
+   rendered with fd 1 pointing at a memory file, and the sequences must not end up in it */
+static int g_tty_fd=STDOUT_FILENO;
 static void tui_seq_build(void){
     g_seq_leave_n=0; g_seq_enter_n=0;
     if(g_bg_set){
@@ -4342,11 +4345,11 @@ static void tui_seq_build(void){
 }
 static void tui_raw_restore(void){
     if(g_raw) tcsetattr(STDIN_FILENO,TCSANOW,&g_tio);
-    if(write(STDOUT_FILENO,g_seq_leave,(size_t)g_seq_leave_n)<0){}
+    if(write(g_tty_fd,g_seq_leave,(size_t)g_seq_leave_n)<0){}
 }
 static void tui_raw_reenter(void){
     if(g_raw) tcsetattr(STDIN_FILENO,TCSANOW,&g_tio_raw);
-    if(write(STDOUT_FILENO,g_seq_enter,(size_t)g_seq_enter_n)<0){}   /* clears: the next frame redraws everything */
+    if(write(g_tty_fd,g_seq_enter,(size_t)g_seq_enter_n)<0){}   /* clears: the next frame redraws everything */
 }
 /* Ctrl-Z: hand the terminal back as it was, stop; on fg the raw mode, colours and hidden
    cursor come back and the screen is cleared for the next frame */
@@ -4370,6 +4373,7 @@ static void kids_kill_now(void){
 }
 static void child_forget_parent(void){
     g_pd_pid=-1; g_dw_kid=0; g_dw_kfd=-1; g_raw=0;
+    if(g_tty_fd!=STDOUT_FILENO){ close(g_tty_fd); g_tty_fd=STDOUT_FILENO; }
     for(size_t i=0;i<sizeof g_handled_sigs/sizeof g_handled_sigs[0];i++) signal(g_handled_sigs[i],SIG_DFL);
 }
 /* abort() and crashes: the terminal first, then the default action (core, status) */
@@ -4406,6 +4410,7 @@ static void tui_enter(void){
     bg_dark_enter();                 /* Query under raw mode; no reply means no action */
     printf("\033(B\017\033[2J\033[H\033[?25l\033[?2004l\033[?2026l"); fflush(stdout);
     if(g_raw) tcgetattr(STDIN_FILENO,&g_tio_raw);
+    { int d=fcntl(STDOUT_FILENO,F_DUPFD_CLOEXEC,3); if(d>=0) g_tty_fd=d; }
     tui_seq_build();
     atexit(tui_leave);
     signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
