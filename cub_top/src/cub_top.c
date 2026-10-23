@@ -4542,6 +4542,7 @@ static int g_rep_i=0,g_rep_n=0;       /* Replay progress, shown in the status li
 static time_t g_rep_ts=0;             /* The frame's recorded time, shown instead of now */
 static double g_ts_frac=-1;           /* The frame's time in fractional seconds for ts_epoch_ms; <0 = ts_epoch */
 static char g_rp_tbl[32]="";          /* Replay: the recording's heapB.table, which this host never adopted */
+static char g_rp_tblver[32]="";       /* ... and its heapB.table_version */
 static const char *tq(const char *s);   /* quoted dump value: escaped, valid UTF-8 */
 static int  g_rp_have_a=0;            /* Replay: the frame carries method A (measured, possibly 0 chunks) */
 /* v as printf("%.*f") prints it: a key derived from printed keys then replays exactly */
@@ -7077,7 +7078,8 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
            tq(!B.ok?"-":(g_replaying&&g_rp_tbl[0])?g_rp_tbl:(B.partial?"probe-runtime":g_bt->tag)),
            tq(g_so_path[0]?g_so_path:"-"));   /* A map_files path means the running inode was read */
     /* Whose build the adopted table was taken from: an offsets-other table is another release */
-    if(B.ok && !B.partial && !g_replaying) printf("heapB.table_version=\"%s\"\n",tq(g_bt->ver?g_bt->ver:"-"));
+    if(g_replaying){ if(g_rp_tblver[0]) printf("heapB.table_version=\"%s\"\n",tq(g_rp_tblver)); }   /* as recorded */
+    else if(B.ok && !B.partial) printf("heapB.table_version=\"%s\"\n",tq(g_bt->ver?g_bt->ver:"-"));
     printf("server.up=%d\n",P->pid<0?0:1);
     /* All instances.  The detailed keys (server, region) cover only the current one, so the
        other databases' totals are available nowhere else.  Keys are namespaced by db. */
@@ -7613,6 +7615,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     B.ok=(int)rp_num(t,"heapB.enabled",0);
     rp_str(t,"heapB.reason",B.why,sizeof B.why);
     rp_str(t,"heapB.table",g_rp_tbl,sizeof g_rp_tbl);
+    rp_str(t,"heapB.table_version",g_rp_tblver,sizeof g_rp_tblver);
     B.partial=!strcmp(g_rp_tbl,"probe-runtime");
     rp_str(t,"heapB.lib",g_so_path,sizeof g_so_path); if(!strcmp(g_so_path,"-")) g_so_path[0]=0;
     B.total=rp_num(t,"heapB.total_bytes",0);
