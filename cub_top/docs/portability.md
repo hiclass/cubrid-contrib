@@ -98,7 +98,6 @@ heapB.enabled=0 heapB.reason="오프셋 불일치(num_buffers=... != data_buffer
 |---|---|
 | `/proc` 수집·영역 분류(7종)·파라미터 귀속 | ✅ |
 | 방법 B (루트 전역 순회 + 4층 하니스) | ✅ |
-| 방법 A (힙 히스토그램) — 자동 재분석(`a`) 포함 | ✅ |
 | I/O 지표 (게이지 절대 하한·유휴 판정 포함) | ✅ |
 | 드릴다운 트리 · 덤프 | ✅ |
 | btop 대시보드 · 라이브 TUI (`-b`) | ✅ |
@@ -121,7 +120,7 @@ heapB.enabled=0 heapB.reason="오프셋 불일치(num_buffers=... != data_buffer
 | 패딩 | `padf(s,n,right)` — 표시 폭 기준 |
 | 그래프 | `cv_chart` 2×4 브라유 + 브레젠험, **관측창 전체 리샘플**(꼬리 절단 금지) |
 | TUI | `termios` raw + 커서 숨김, `atexit`/`SIGINT` 복원. **대체 화면 미사용** — 종료 후 마지막 프레임이 화면에 남는다 |
-| 키 | `1~3` 보기 · `<`/`>` 인스턴스 · `space` 정지 · `a`/`r` 방법A · `p` 시계열 · `h` 도움말 · `q` 종료 |
+| 키 | `1~3` 보기 · `<`/`>` 인스턴스 · `space` 정지 · `p` 시계열 · `h` 도움말 · `q` 종료 |
 
 구 glibc 안전성: `termios`·`ioctl(TIOCGWINSZ)`·`signal`·`atexit` 는 모두 glibc 2.12 에 존재하며
 새로 도입한 헤더는 `<termios.h>`·`<signal.h>`·`<sys/ioctl.h>` 뿐입니다. legacy 빌드로 확인했습니다.
@@ -132,6 +131,4 @@ heapB.enabled=0 heapB.reason="오프셋 불일치(num_buffers=... != data_buffer
 |---|---|---|
 | ELF 심볼 조회 | **137 ms** (자체 파싱) | `nm` 셸아웃 |
 | 전역 상태 읽기(방법 B) | **0.012 ms** | 동급 |
-| 힙 순회(방법 A) | **720 ms** | 8,300 ms |
 
-방법 A가 1초 미만이 되어, C 구현에서는 **라이브 갱신도 현실적**입니다(2~3초 주기 권장).

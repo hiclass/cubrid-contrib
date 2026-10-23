@@ -81,7 +81,7 @@ if gcc -O2 -std=gnu99 -I "$(dirname "$SRC")" -o "$TMP/bad1" "$TMP/bad1.c" 2>/dev
     elif [ "$en" = "heapB.enabled=0" ]; then
         say "corrupted DWARF -> probe downgrade" "PASS(B OFF)"
     elif [ "$tbl2" = 'heapB.table="offsets-embedded"' ]; then
-        good=$(sized "$("$ROOT/cub_top" --heap -d 2>/dev/null)"); mine=$(sized "$raw")
+        good=$(sized "$("$ROOT/cub_top" -d 2>/dev/null)"); mine=$(sized "$raw")
         if [ -n "$good" ] && [ "$mine" = "$good" ]; then
             say "corrupted DWARF -> embedded rescue" "PASS(sized items match the healthy build)"
         else

@@ -3004,102 +3004,6 @@ adopted:;
     b_items(P);
 }
 
-/* ---------------- Method A: glibc chunk histogram ---------------- */
-#define CHUNK_MASK  (~(unsigned long)7)
-#define CHUNK_ALIGN (2*sizeof(size_t)-1)   /* 15 on x86_64, 7 on i386; generalizes the alignment check */
-#define ACAT_N 6
-#define WALK_MAX_CHUNKS 5000000L   /* per region, bounds the walk's time */
-static struct {
-    long chunks; double total;
-    double cat[ACAT_N];          /* Category total */
-    long trunc; double unwalked; /* Regions walked only up to the cap, and the bytes left out */
-} A;
-static const char *ACAT[ACAT_N]={
-    /* lea (db_private_alloc) is built with USE_MALLOC_INSTEAD and a 32K granularity: its mspace
-       base is malloc(64K) and every segment it adds is malloc(32K x n) - so a 32K-multiple
-       request is most likely lea's, though any malloc of that size lands here too. */
-    "lea segment (32K x n)",
-    "96B chunk (73-88B req)",
-    "other 1M+","other 64K~1M","other 8K~64K","other under 8K"
-};
-/* mm: the chunk is mmapped, whose size is the request + 8 rounded up to a page */
-static int classify(long chunk,int mm){
-    long ud=chunk-16;
-    if(mm ? (chunk>4096 && (chunk-4096)%32768==0) : (ud>0 && ud%32768==0)) return 0;
-    if(chunk==96)       return 1;
-    if(chunk>=(1L<<20)) return 2;
-    if(chunk>=(1L<<16)) return 3;
-    if(chunk>=8192)     return 4;
-    return 5;
-}
-/* Read one chunk header (8B) outside the probe window, for the verification hop only */
-static unsigned long chunk_hdr(int pid,unsigned long s,size_t span,
-                               const unsigned char *head,size_t hn,size_t o,int *rok){
-    if(o+16<=hn){ *rok=1; return *(const unsigned long*)(head+o+8)&CHUNK_MASK; }
-    if(o+16>span){ *rok=0; return 0; }
-    unsigned long z=0;
-    *rok=(vmread(pid,s+o+8,&z,8)==8);
-    return z&CHUNK_MASK;
-}
-/* A mmapped chunk (glibc above its mmap threshold, and lea's large blocks, which go through
-   malloc) starts on a page with prev_size 0, IS_MMAPPED and a page-multiple size.  One to three
-   of them fill a VMA - often merged with a neighbouring anonymous mapping - and never give the
-   four hops the general probe needs, so such a header is a start of its own. */
-static int mm_hdr(const unsigned char *h,size_t room){
-    unsigned long p0=*(const unsigned long*)h, z=*(const unsigned long*)(h+8)&CHUNK_MASK;
-    return p0==0 && (*(const unsigned long*)(h+8)&2) && z>=4096 && !(z&4095) && z<=room;
-}
-static void walk_region(int pid,unsigned long s,unsigned long e){
-    /* Instead of copying the whole region up front (up to 768MB, 593MB peak measured):
-       probe the first 128K, then move a 64K window along the chunk boundaries.
-       Only 16B per chunk is needed, so the copy comes to a few windows. */
-    size_t span=e-s;
-    static unsigned char head[0x20000+64];
-    static unsigned char win[1<<16];
-    size_t hn=vmread(pid,s,head,span<sizeof head?span:sizeof head);
-    if(hn<64) return;
-    long start=-1; int mm=0;
-    for(size_t off=0; off+16<=hn; off+=4096)
-        if(mm_hdr(head+off,span-off)){ start=(long)off; mm=1; break; }
-    /* Bounded for time; say so, or the rest reads as "unexplained".  Mmapped chunks are
-       page multiples of at least the mmap threshold, so their walk needs no bound. */
-    if(start<0 && span>(768UL<<20)){
-        A.trunc++; A.unwalked+=(double)(span-(768UL<<20)); span=768UL<<20; }
-    for(size_t off=0; start<0 && off+64<hn && off<0x20000; off+=16){
-        size_t o=off; int ok=1;
-        for(int k=0;k<4;k++){
-            int rok; unsigned long z=chunk_hdr(pid,s,span,head,hn,o,&rok);
-            if(!rok||z<16||z>span||(z&CHUNK_ALIGN)){ ok=0; break; }
-            o+=z;
-        }
-        if(ok){ start=(long)off; break; }
-    }
-    if(start<0) return;
-    size_t o=(size_t)start, boff=0, blen=hn;
-    const unsigned char *buf=head;
-    long w=0;
-    unsigned long prev_z=0;
-    while(o+16<=span && w<WALK_MAX_CHUNKS){
-        if(o+16>boff+blen){
-            /* If the previous chunk is larger than the window, fetch just the next 16B header.
-               On a heap with many large chunks the windowed walk copies the whole heap
-               and takes seconds (measured 1,617ms -> 165ms, same chunks and bytes). */
-            size_t want = (prev_z>=4096) ? 16 : (span-o);
-            if(want>sizeof win) want=sizeof win;
-            blen=vmread(pid,s+o,win,want); boff=o; buf=win;
-            if(blen<16) break;
-        }
-        unsigned long z=*(const unsigned long*)(buf+o-boff+8)&CHUNK_MASK;
-        prev_z=z;
-        if(z<16||z>span-o||(z&CHUNK_ALIGN)) break;
-        if(mm && !mm_hdr(buf+o-boff,span-o)) break;   /* past the mmapped chunks: a merged neighbour */
-        A.total+=z; A.chunks++;
-        A.cat[classify((long)z,(int)((*(const unsigned long*)(buf+o-boff+8)>>1)&1))]+=z;
-        o+=z; w++;
-    }
-    /* Stopped by the chunk bound, not by the region's end: the rest is unwalked, not unexplained */
-    if(w>=WALK_MAX_CHUNKS && o+16<=span){ A.trunc++; A.unwalked+=(double)(span-o); }
-}
 static const region_t *g_reg_db=NULL,*g_reg_lg=NULL;   /* Filled by classify_regions */
 
 /* ---- Buffer pool BCB direct read (pgbuf) ----
@@ -3628,22 +3532,6 @@ static void pgbuf_agg(proc_t*P){
 static const char* lsa_str(lsa_t l){ static char ring[6][32]; static int k=0; char*o=ring[k++%6];
     if(lsa_isnull(l)) snprintf(o,32,"-"); else snprintf(o,32,"%lld|%d",(long long)l.pageid,l.offset); return o; }
 
-static void method_a(proc_t *P){
-    memset(&A,0,sizeof A);
-    for(int i=0;i<P->nreg;i++){
-        region_t *r=&P->reg[i];
-        int anon = (r->path[0]==0 || !strcmp(r->path,"[heap]"));
-        if(!anon) continue;
-        if(!strchr(r->perm,'r')||!strchr(r->perm,'w')) continue;
-        /* The data and log buffer mappings are already attributed as regions; counting them as heap would double-count */
-        if(r==g_reg_db||r==g_reg_lg) continue;
-        /* Thread stacks hold no malloc chunks; probing each (hundreds of 8MB) costs reads and
-           can mistake stack words for a chunk chain */
-        if(r->is_stack) continue;
-        walk_region(P->pid,r->start,r->end);
-    }
-}
-
 /* ---------------- Classify cub_server regions into six kinds ---------------- */
 typedef struct {
     char name[20]; double mapped,rss; long long cfg; char grade;
@@ -3704,7 +3592,7 @@ static void classify_regions(proc_t *P){
         if(r==db||r==lg||r->is_stack) continue;
         dyn_m+=(double)(r->end-r->start); dyn_r+=r->rss_kb*1024.0;
     }
-    g_reg_db=db; g_reg_lg=lg;   /* Exposed so method_a does not double-count */
+    g_reg_db=db; g_reg_lg=lg;   /* Exposed so the dynamic total excludes them */
     NSR=0;
     #define PUT(nm_,mp_,rs_,cfg_,gr_) do{ if(NSR<8){ srg_t*x=&SR[NSR++]; \
         snprintf(x->name,sizeof x->name,"%s",nm_); x->mapped=(mp_); x->rss=(rs_); \
@@ -3746,7 +3634,7 @@ static unsigned g_seg_gen=0;
 static volatile sig_atomic_t g_ustop_n=0;    /* User stops so far: SIGCONT, unpause, help closed */
 static sig_atomic_t g_ustop_seen=0;
 /* Must be called when switching instances.  g_reg_db/g_reg_lg point into P->reg[],
-   so keeping the previous instance's pointers makes method_a exclude the wrong
+   so keeping the previous instance's pointers makes the dynamic total exclude the wrong
    region and double-count.  SR[]/NSR, B and A are cleared too, so the next frame
    recomputes against the new target. */
 static void reset_instance_state(void){
@@ -3757,7 +3645,6 @@ static void reset_instance_state(void){
     NSR=0; memset(SR,0,sizeof SR);
     g_dyn_rss=0; g_dyn_mapped=0;
     memset(&B,0,sizeof B);
-    memset(&A,0,sizeof A);
     memset(&AG,0,sizeof AG);
     /* Buffer pool snapshot: the arrays are kept, what they describe is not.  A large
        buffer is read every few frames, so a stale ok would show the previous
@@ -3770,13 +3657,12 @@ static void reset_instance_state(void){
     g_nprm=0;
 }
 
-/* Re-grade dynamic-heap once the decomposition is in (called after method_a/b) */
+/* Re-grade dynamic-heap once the decomposition is in (called after method_b) */
 static void grade_dynamic_heap(void){
     for(int i=0;i<NSR;i++){
         if(strcmp(SR[i].name,"dynamic-heap")) continue;
         if(SR[i].rss<=0) return;
-        /* A walks every chunk of the arenas, B's items included, so the two never add up */
-        double explained = A.total>B.total ? A.total : B.total;
+        double explained = B.total;
         if(explained>=SR[i].rss*0.5) SR[i].grade='E';   /* Estimated */
     }
 }
@@ -3881,20 +3767,6 @@ static canvas_t CV;
 
 static int g_argc=0; static char **g_argv=NULL;
 static double g_interval=0.5;   /* The sample window, for display */
-/* Method A takes time proportional to heap size (10ms small, 58-508ms on a 7GB heap
-   under load).  Automatic mode targets one second but never runs more often than three
-   times the last measurement - self-protection. */
-static int g_a_auto=0; static double g_a_dur=0.0;
-/* Signals that method A must rerun immediately after a restart.  A runs periodically,
-   so otherwise a dead server's measurement survives until the next period. */
-static int g_a_redo=0;
-/* Wall-clock time of the last method A measurement.  An elapsed count ("184s ago")
-   has to be subtracted mentally and grows the longer the screen is up, so the time
-   itself is shown.  Zero means not yet measured. */
-static time_t g_a_when=0;
-#define A_TARGET 1.0
-#define A_DUTY   3.0
-static double a_period(void){ double p=g_a_dur*A_DUTY; return p>A_TARGET?p:A_TARGET; }
 /* g_ascii is defined earlier in the file; method_b's reason strings reference it */
 /* Hangul label to English; the tree and terse outside the canvas are unaffected */
 static const char* L(const char*ko){
@@ -3917,7 +3789,7 @@ static const char* L(const char*ko){
       {"유휴","idle"},{"B 합계(정확)","B total (exact)"},{"A 합계(청크)","A total (chunks)"},{"A 합계(청크·일부)","A total (chunks, partial)"},
       {"미설명 잔여","unexplained"},{"과대계상(free+비상주)","overcount(free+nonres)"},
       {"방법 B 비활성","method B disabled"},{"힙 순회 중…","walking heap…"},
-      {"[a] 로 방법 A 분석","[a] run method A"},{"장치","dev"},{"쓰기","write"},{"누적","total"},{"읽기","read"},
+{"장치","dev"},{"쓰기","write"},{"누적","total"},{"읽기","read"},
       {"전체 메모리 대비 점유","share of system RAM"},
       {"상주 구성 · server = data_buffer + log_buffer + dynamic-heap + 기타","resident composition"},
       {"할당(VmSize) vs 상주(VmRSS) · 간격 = 예약만 하고 안 쓰는 분량","reserved (VmSize) vs resident (VmRSS)"},
@@ -4637,7 +4509,6 @@ static double g_ts_frac=-1;           /* The frame's time in fractional seconds 
 static char g_rp_tbl[32]="";          /* Replay: the recording's heapB.table, which this host never adopted */
 static char g_rp_tblver[32]="";       /* ... and its heapB.table_version */
 static const char *tq(const char *s);   /* quoted dump value: escaped, valid UTF-8 */
-static int  g_rp_have_a=0;            /* Replay: the frame carries method A (measured, possibly 0 chunks) */
 /* v as printf("%.*f") prints it: a key derived from printed keys then replays exactly */
 static double rnd_as_printed(double v,int dec){ char b[64]; snprintf(b,sizeof b,"%.*f",dec,v); return strtod(b,NULL); }
 static const char *g_rec_path=NULL;   /* --record FILE  */
@@ -5890,7 +5761,7 @@ static void sat_cell(char *dst,size_t n,int sat,int cap){
 
 static int tui_too_small(const char *what,const char *keys_en,const char *keys_ko);
 static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
-                        double work_ms,double a_age,int with_a){
+                        double work_ms){
     if(tui_too_small(g_ascii?"dashboard":"대시보드","[p] plots  [q] quit","[p] 플롯  [q] 종료")) return;
     int W=term_w();
     double mt=M->total*1024.0, av=M->avail*1024.0, used=mt-av;
@@ -6325,47 +6196,9 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
         }
         y+=NSR+3;
     }
-    /* ── heap B / A ── */
-    int hh=11, Lw=W/2;
+    /* ── heap B ── */
+    int hh=11, Lw=W;
     cv_box(0,y,Lw,hh,L("동적 메모리 상세 (B) — 자동 갱신"));
-    /* The title carries both the key hint and the last measurement time.  An elapsed
-       count ("184s ago") must be subtracted mentally and grows the longer the screen
-       is up, so the time is shown.  In automatic mode the period is appended so the
-       next refresh can be anticipated. */
-    /* A title wider than the box is cut from the end, losing the time.  The values (time,
-       period) are kept and the key hints shortened in stages - the keys are in the help
-       too, but "when was this measured" is only here. */
-    { char chk[24];
-      if(g_a_when>0){ struct tm at; localtime_r(&g_a_when,&at);
-                      /* States that these are values as of that instant, not now.  An elapsed count needs
-                         mental subtraction, so the time itself is printed. */
-                      if(g_ascii){ char hm[16]; strftime(hm,sizeof hm,"%H:%M:%S",&at);
-                                   snprintf(chk,sizeof chk,"as of %s",hm); }
-                      else strftime(chk,sizeof chk,"%H:%M:%S 기준",&at); }
-      else            snprintf(chk,sizeof chk,"%s",g_ascii?"not run":"미측정");
-      int avail = (W-Lw) - 6;                  /* Border, title borders and corner slack */
-      const char *base = g_ascii ? "dynamic heap · method A" : "동적 메모리 상세 · 크기 추정(A)";
-      char per[16]; per[0]=0;
-      if(g_a_auto) snprintf(per,sizeof per,"[a]uto %.0fs",a_period());
-      /* Try the widest form first and take the first that fits */
-      const char *cand[4]; int nc=0;
-      char c0[128],c1[128],c2[128];
-      if(per[0]){
-          snprintf(c0,sizeof c0,"%s — %s [r]eflash %s",base,per,chk);
-          snprintf(c1,sizeof c1,"%s — %s %s",base,per,chk);
-          snprintf(c2,sizeof c2,"%s %s",per,chk);
-      } else {
-          snprintf(c0,sizeof c0,"%s — [a]uto [r]eflash %s",base,chk);
-          snprintf(c1,sizeof c1,"%s — %s",base,chk);
-          snprintf(c2,sizeof c2,"%s",chk);
-      }
-      cand[nc++]=c0; cand[nc++]=c1; cand[nc++]=c2; cand[nc++]=chk;
-      snprintf(t2,sizeof t2,"%s",cand[nc-1]);   /* Last resort: values only */
-      for(int i=0;i<nc;i++)
-          if(disp_w(cand[i])<=avail){ snprintf(t2,sizeof t2,"%s",cand[i]); break; }
-    }
-    (void)a_age;
-    cv_box(Lw,y,W-Lw,hh,t2);
     if(!B.ok){ cv_put(2,y+2,L("방법 B 비활성"),"38;5;203"); cv_put(4,y+3,B.why,"38;5;240"); }
     else {
         double bs=0; int nb=B.n>7?7:B.n;
@@ -6390,33 +6223,6 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
         else if(B.partial) cv_put(2,y+hh-2,g_ascii?"B partial (count-only)":"B 부분(개수만 — 크기 미상)","1;38;5;214");
         else cv_put(2,y+hh-2,L("B 합계(정확)"),"1;97");
         cv_put(Lw-9,y+hh-2,padf(H(bs),7,1),"38;5;42");
-    }
-    if(!with_a || A.chunks==0){
-        cv_put(Lw+2,y+2,with_a?L("힙 순회 중…"):L("[a] 로 방법 A 분석"),"38;5;240");
-    } else {
-        int row=0;
-        for(int c=0;c<ACAT_N&&row<6;c++){
-            if(A.cat[c]<=0) continue;
-            int yy=y+1+row++;
-            cv_put(Lw+2,yy,"◌","38;5;250"); cv_put(Lw+4,yy,padf(ACAT[c],22,0),"250");
-            { char an[48]; snprintf(an,sizeof an,"A:%s",ACAT[c]);   /* Kept distinct from B's names */
-              const char *dl=hdelta(an,A.cat[c]);
-              if(dl[0]) cv_put(W-19,yy,padf(dl,9,1),"1;38;5;214"); }
-            cv_put(W-9,yy,padf(H(A.cat[c]),7,1),"250");
-        }
-        for(int i=Lw+2;i<W-2;i++) cv_put(i,y+hh-4,"─","38;5;240");
-        { int aw=W-9-(Lw+2)-1;                       /* The label may run up to the value cell */
-          if(aw<1) aw=1;
-          cv_put(Lw+2,y+hh-3,cutf(L(A.trunc?"A 합계(청크·일부)":"A 합계(청크)"),aw),"1;97"); }
-        cv_put(W-9,y+hh-3,padf(H(A.total),7,1),"38;5;42");
-        double diff=g_dyn_rss-A.total;
-        { int aw=W-9-(Lw+2)-1; if(aw<1) aw=1;
-          if(diff>0){ char ud[24]; snprintf(ud,sizeof ud,"+%s",H(diff));
-                      cv_put(Lw+2,y+hh-2,cutf(L("미설명 잔여"),aw),"38;5;203");
-                      cv_put(W-9,y+hh-2,padf(ud,7,1),"38;5;203"); }
-          else { char od[24]; snprintf(od,sizeof od,"-%s",H(-diff));
-                 cv_put(Lw+2,y+hh-2,cutf(L("과대계상(free+비상주)"),aw),"38;5;214");
-                 cv_put(W-9,y+hh-2,padf(od,7,1),"38;5;214"); } }
     }
     y+=hh;
     /* ---- Buffer pool, BCB direct read ---- */
@@ -6612,12 +6418,10 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
     {
       const char *seg[8]; int nseg=0;
       if(g_ascii){
-          seg[nseg++]="heap [r]eflash [a]uto";
           if(g_ninst>1) seg[nseg++]="[<>]inst";
           seg[nseg++]="[p]plot";
           seg[nseg++]="[l]lang"; seg[nseg++]="[h]help"; seg[nseg++]="[q]quit";
       } else {
-          seg[nseg++]="힙 [r]재측정 [a]자동";
           if(g_ninst>1) seg[nseg++]="[<>]인스턴스";
           seg[nseg++]="[p]시계열";
           seg[nseg++]="[l]한/영"; seg[nseg++]="[h]도움말"; seg[nseg++]="[q]종료";
@@ -6658,7 +6462,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
     fflush(stdout);
 }
 
-static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
+static void render_tree(proc_t *P,mem_t *M,tier_t *T,
                         double io_rbps,double io_wbps,double io_riops,double io_wiops,
                         double absorb,double blkpct,const char *devnm,double devutil,
                         double devr,const char *ts,double rchar_bps,double work_ms,
@@ -6779,23 +6583,6 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
                                ? (g_ascii?" — unused":" — 미사용") : "");
             } else printf(g_ascii?"│  │  │  ├─ ? [B] disabled — %s\n"
                                  :"│  │  │  ├─ ? [B] 비활성 — %s\n",B.why);
-            if(with_a){
-                for(int c=0;c<ACAT_N;c++) if(A.cat[c]>0)
-                    printf("│  │  │  ├─ ◌ [A] %-22s %s\n",ACAT[c],H(A.cat[c]));
-                double diff=g_dyn_rss-A.total;
-                /* A walks the heap after the smaps window, so its instant differs from dyn.
-                   The unexplained and over-counted figures carry that gap together with
-                   A's structural limits. */
-                double ratio = (g_dyn_rss>0) ? (diff>=0?diff:-diff)/g_dyn_rss*100 : 0;
-                printf("│  │  │  └─ ◌ [A] total %s  (%s %s = %.0f%% %s)\n",
-                       H(A.total),
-                       diff>=0?(g_ascii?"unexplained +":"미설명 잔여 +")
-                              :(g_ascii?"overcount -":"과대계상 -"),H(diff>=0?diff:-diff),
-                       ratio, (ratio<=30.0)?(g_ascii?"— ok (query/thread contexts unreachable)"
-                                                    :"— 정상 (질의·스레드 컨텍스트는 도달 불가)")
-                                           :(g_ascii?"— >30%, re-run advised"
-                                                    :"— 30% 초과, 재분석 권고"));
-            }
         }
     }
     if(T->npl>0) printf(g_ascii?"│  │  └─ ◐ PL server(JVM) — separate process started by server  %s\n"
@@ -6959,7 +6746,7 @@ static void render_tree(proc_t *P,mem_t *M,tier_t *T,int with_a,
 }
 
 /* Name to a key-safe slug (lower-case alphanumeric and '_').  Repeated keys
-   (heapB.item, heapA.cat, bytes) leave only the last in a dict parser, defeating the
+   (heapB.item, bytes) leave only the last in a dict parser, defeating the
    monitoring integration this exists for. */
 static const char *slugify(const char *s){
     static char out[64];
@@ -7130,7 +6917,7 @@ static const char *inst_key(int i,char *out,size_t n){
 }
 
 /* ---------------- Render: terse ---------------- */
-static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
+static void render_terse(proc_t *P,mem_t *M,tier_t *T,
                          double rb,double wb,double ri,double wi,double absorb,
                          double blkpct,const char *devnm,double devutil,double devr,
                          const char *ts,long tsec,double rchar_bps,
@@ -7318,12 +7105,6 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,int with_a,
                " pgbuf.engine.zone1=%ld pgbuf.engine.zone2=%ld pgbuf.engine.zone3=%ld pgbuf.engine.victim_candidates=%ld"
                " pgbuf.engine.dirty=%lld pgbuf.engine.read_ms=%.2f\n",
                AG.nbuf,AG.nlist,AG.nshared,AG.z1+AG.z2+AG.z3,AG.z1,AG.z2,AG.z3,AG.vict,AG.dirty,AG.ms);
-    if(with_a){
-        printf("heapA.chunks=%ld heapA.total_bytes=%.0f\n",A.chunks,A.total);
-        if(A.trunc) printf("heapA.truncated_regions=%ld heapA.unwalked_bytes=%.0f\n",A.trunc,A.unwalked);
-        for(int c=0;c<ACAT_N;c++)
-            if(A.cat[c]>0) printf("heapA.%s_bytes=%.0f\n",slugify(ACAT[c]),A.cat[c]);
-    }
     printf("io.read_bps=%.0f io.write_bps=%.0f io.read_iops=%.0f io.write_iops=%.0f ",
            rb,wb,ri,wi);
     /* Below the rchar floor the ratio is meaningless, so the key is omitted entirely rather
@@ -7428,7 +7209,7 @@ static void json_copy_escaped(FILE*o,const char*s,size_t n){
         else if(c<0x20) fprintf(o,"\\u%04x",c);
         else fputc(c,o); }
 }
-static void render_terse(proc_t*,mem_t*,tier_t*,int,double,double,double,double,double,
+static void render_terse(proc_t*,mem_t*,tier_t*,double,double,double,double,double,
                          double,const char*,double,double,const char*,long,double,
                          double,double,double,int,int,int);
 static void json_from_terse(FILE*,FILE*);
@@ -7550,7 +7331,7 @@ static FILE *mem_file(void){
 #endif
     return tmpfile();
 }
-static void rp_record(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int with_a,const char*ts,long tsec){
+static void rp_record(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,const char*ts,long tsec){
     if(!RPR.f){
         char why[160]; RPR.f=out_open(g_rec_path,g_rec_overwrite,why,sizeof why);
         if(!RPR.f){ fprintf(stderr,"cub_top: --record %s: %s\n",g_rec_path,why);
@@ -7560,7 +7341,7 @@ static void rp_record(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int with_a,const char*t
     fflush(stdout);
     int save=dup(1); if(save<0){ int e=errno; fclose(tf); rec_fail("dup",e); return; }
     if(dup2(fileno(tf),1)<0){ int e=errno; close(save); fclose(tf); rec_fail("dup2",e); return; }
-    render_terse(P,M,T,with_a,IO->rb,IO->wb,IO->ri,IO->wi,
+    render_terse(P,M,T,IO->rb,IO->wb,IO->ri,IO->wi,
                  IO->absorb_ok?IO->absorb:-1.0,IO->blkpct,IO->devnm,IO->devutil,IO->devr,
                  ts,tsec,IO->rchar,IO->minflt,IO->majflt,IO->cpu_pct,IO->ncpu,
                  IO->d_thr,IO->n_thr);
@@ -7861,17 +7642,6 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
               x0->rss=rp_num(t,"tier.server_rss_bytes",0);
               x0->pl_rss=rp_num(t,"tier.pl_rss_bytes",0); } }
     g_cur=0;
-    /* Method A: present when the recording was taken with it (live always is).  Its
-       absence leaves A empty, which the A box shows as "not measured". */
-    memset(&A,0,sizeof A);
-    g_rp_have_a=rp_find(t,"heapA.chunks",b,sizeof b);
-    if(g_rp_have_a){
-        A.chunks=(long)strtod(b,NULL);
-        A.total=rp_num(t,"heapA.total_bytes",0);
-        for(int c=0;c<ACAT_N;c++){ char k[96]; snprintf(k,sizeof k,"heapA.%s_bytes",slugify(ACAT[c])); A.cat[c]=rp_num(t,k,0); }
-        A.trunc=(long)rp_num(t,"heapA.truncated_regions",0);
-        A.unwalked=rp_num(t,"heapA.unwalked_bytes",0);
-    }
     /* The recording host's capabilities, or the replay would warn of fallbacks it never had */
     CAP.vm_readv=(int)rp_num(t,"caps.vm_readv",0);  CAP.rollup=(int)rp_num(t,"caps.rollup",0);
     CAP.proc_io=(int)rp_num(t,"caps.proc_io",0);
@@ -7933,7 +7703,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
 /* Replay loop.  Reads the recording, rebuilds each frame with rp_apply() and calls
    the same renderers the live loop calls, so nothing about the drawing differs.
    Keys are the live ones; [space] pauses, [,] and [.] step while paused. */
-static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
+static int rp_run(const char *path,int view0,int terse,int jsonout){
     FILE *f=fopen(path,"re");
     if(!f){ fprintf(stderr,"cub_top: --replay %s: %s\n",path,strerror(errno)); return 1; }
     char *line=malloc(RP_MAXLINE);
@@ -7990,14 +7760,14 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
                 FILE *tf=mem_file(); if(!tf) continue;
                 fflush(stdout); int sv=dup(1);
                 if(sv<0||dup2(fileno(tf),1)<0){ if(sv>=0) close(sv); fclose(tf); continue; }
-                render_terse(&P,&M,&T,with_a||g_rp_have_a,IO.rb,IO.wb,IO.ri,IO.wi,
+                render_terse(&P,&M,&T,IO.rb,IO.wb,IO.ri,IO.wi,
                              IO.absorb_ok?IO.absorb:-1.0,IO.blkpct,IO.devnm,IO.devutil,IO.devr,
                              ts,(long)rt,IO.rchar,IO.minflt,IO.majflt,IO.cpu_pct,IO.ncpu,
                              IO.d_thr,IO.n_thr);
                 fflush(stdout); dup2(sv,1); close(sv);
                 json_line_from_terse(tf,stdout); fclose(tf);
             } else {
-                render_terse(&P,&M,&T,with_a||g_rp_have_a,IO.rb,IO.wb,IO.ri,IO.wi,
+                render_terse(&P,&M,&T,IO.rb,IO.wb,IO.ri,IO.wi,
                              IO.absorb_ok?IO.absorb:-1.0,IO.blkpct,IO.devnm,IO.devutil,IO.devr,
                              ts,(long)rt,IO.rchar,IO.minflt,IO.majflt,IO.cpu_pct,IO.ncpu,
                              IO.d_thr,IO.n_thr);
@@ -8031,7 +7801,7 @@ static int rp_run(const char *path,int view0,int terse,int with_a,int jsonout){
         g_replaying=1; g_rep_i=(int)i; g_rep_n=(int)n;
         g_rep_ts=(time_t)rp_num(fr[i],"ts_epoch",0);
         if(view) render_plot(&P,&M,&T,&IO,paused);
-        else     render_dash(&P,&M,&T,&IO,paused,0,-1,g_rp_have_a);
+        else     render_dash(&P,&M,&T,&IO,paused,0);
         int k, step=0;
         while((k=tui_key())>=0){
             if(k=='q'){ g_stop=1; break; }
@@ -8123,7 +7893,7 @@ static void seg_break(void){
     g_enum_T=&tb; g_enum_dt=0; enum_instances(); g_enum_T=NULL;
 }
 static double sample_once(proc_t*P,proc_t*P0,mem_t*M,tier_t*T,iod_t*IO,
-                          double interval,int with_a,FILE**pd){
+                          double interval,FILE**pd){
     double w0=now_ms();
     /* Stopped by the user since the last frame (unpause, help, a Ctrl-Z between frames) */
     if(g_ustop_n!=g_ustop_seen) seg_break();
@@ -8215,7 +7985,6 @@ again:
                     /* Heap A/B analyse a process address space and must be redone after a restart.
                        B runs every frame below, but A runs periodically, so without this a
                        dead server's measurement would linger - force an immediate remeasure. */
-                    g_a_redo=1;
                 }
                 /* The delta baseline moves to the new process too, set to what was just read:
                    a zeroed baseline would count everything since the server started as this
@@ -8248,7 +8017,6 @@ again:
         /* Only a --bcb-dump baseline read this frame may carry turnover into cap_collect */
         CAP2.turnover_pct=-1; CAP2.miss_pps=-1; CAP2.readmit_pct=-1;
         pgbuf_scan(P);
-        if(with_a) method_a(P);
         grade_dynamic_heap();          /* Re-grade in light of the decomposition */
     } else { NSR=0; memset(&B,0,sizeof B); snprintf(B.why,sizeof B.why,g_ascii?"cub_server not running":"cub_server 미기동");
              memset(&AG,0,sizeof AG); snprintf(AG.why,sizeof AG.why,"%s",B.why);
@@ -8357,7 +8125,6 @@ static const opt_t OPTS[]={
  {"-d, --dump",  "", "key=value 덤프 (모니터링 연동·백데이터)"},
  {"--dump-json", "", "-d 와 같은 내용을 JSON 오브젝트로 (키·값·순서 동일)"},
  {"-b, -i, --live","", "btop형 대시보드 (라이브)"},
- {"--heap",      "", "방법 A(힙 히스토그램) 포함"},
  {"--ascii",     "", "라벨을 영문으로 강제 (자동: 비 UTF-8 로케일·한글 폭 미지원 tty 는 영문)"},
  {"--ko",        "", "한글 라벨 강제 (자동 판정이 영문으로 잘못 내렸을 때)"},
  {"--offsets",   "F","오프셋 표 파일/디렉터리 (tools/collect-offsets.sh 산출물 — 디렉터리면 버전 자동 선택; 생략 시 실행파일 옆 offsets/ 자동 탐색)"},
@@ -8401,9 +8168,9 @@ static void print_opts_line(int argc,char**argv){
     opts_used_str(argc,argv,used,sizeof used);
     /* Listing every option does not say what to do next (-h already has them), so this
        shows only the entry points a newcomer can run straight away. */
-    printf(g_ascii?"opts %s   ·   live: cub_top -b · timeseries: -p · heap detail: --heap"
+    printf(g_ascii?"opts %s   ·   live: cub_top -b · timeseries: -p"
                   " · machine output: -d · help: -h\n"
-                  :"옵션 %s   ·   실시간 화면: cub_top -b · 시계열: -p · 동적 메모리 상세: --heap"
+                  :"옵션 %s   ·   실시간 화면: cub_top -b · 시계열: -p"
                   " · 모니터링 연동: -d · 도움말: -h\n",
            used[0]?used:(g_ascii?"(default)":"(기본)"));
 }
@@ -8627,7 +8394,7 @@ static void help_keys_dash(void){
 "  읽는 법:\n"
 "    높다(90%대)   정상. 메모리 대부분이 설정대로다\n"
 "    떨어진다      dynamic-heap 이 자라고 있다는 뜻 — 아래 heap 박스로 내려가\n"
-"                  무엇이 늘었는지 확인할 것([a] 로 방법 A 를 돌리면 더 쪼개진다)\n"
+"                  무엇이 늘었는지 확인할 것\n"
 "  즉 이 값은 'heap 박스를 들여다볼 필요가 있는가' 를 알려주는 신호다.\n"
 "\n"
 "── 관측 등급 (값 왼쪽 1글자) ──\n"
@@ -8769,8 +8536,6 @@ static void help_keys_dash(void){
 "    키            동작\n"
 "    ───────────   ─────────────────────────────────────────────────────────\n"
 "    d             ④' 대형 버퍼풀의 페이지 단위 스캔 켬/끔 (기본 끔 — 엔진 집계만)\n"
-"    r             ④ [A] 청크 추정을 지금 1회 다시 측정\n"
-"    a             ④ [A] 자동 측정 켬/끔 (주기는 측정 시간에 맞춰 자동)\n"
 "    <  >          인스턴스(DB) 이동 — 여러 cub_server 가 떠 있을 때\n"
 "    p             시계열 화면으로 (그동안 쌓인 히스토리가 바로 그려진다)\n"
 "    space         일시정지 / 재개\n"
@@ -9016,7 +8781,7 @@ static int opt_num(const char *opt,const char *s,double lo,double hi,double *out
 
 int main(int argc,char **argv){
     g_argc=argc; g_argv=argv;
-    int terse=0,tree=0,with_a=0,live=0,view0=0,dump_hist=0,force_ko=0,interval_set=0,speed_set=0; double interval=0.5;
+    int terse=0,tree=0,live=0,view0=0,dump_hist=0,force_ko=0,interval_set=0,speed_set=0; double interval=0.5;
     int bcb_only=0;                   /* --bcb-dump with no display mode: write the snapshot only */
     const char *want_db=NULL;         /* The positional argument is the db to view; without it, the first alphabetically */
     /* Options that take a value.  The tests below are written "&&i+1<argc", which would
@@ -9042,7 +8807,6 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"--replay")&&i+1<argc) g_rep_path=argv[++i];
         else if(!strcmp(argv[i],"--replay-speed")&&i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_rep_speed)) return 2; i++; speed_set=1; }
         else if(!strcmp(argv[i],"--dump-hist")) dump_hist=1;
-        else if(!strcmp(argv[i],"--heap")) with_a=1;
         else if(!strcmp(argv[i],"--pgbuf-detail")) g_pg_detail=1;
         else if(!strcmp(argv[i],"--ascii")) g_ascii=1;
         else if(!strcmp(argv[i],"--ko")) force_ko=1;
@@ -9121,7 +8885,7 @@ int main(int argc,char **argv){
     auto_lang(force_ko);   /* Detect whether Hangul can be displayed; explicit options win. */
     /* Replay draws only from the recording, so it must run before enum_instances() and
        paramdump touch /proc or the server - a replay works on a host with no CUBRID. */
-    if(g_rep_path) return rp_run(g_rep_path,view0,terse,with_a,g_json);
+    if(g_rep_path) return rp_run(g_rep_path,view0,terse,g_json);
     static proc_t P,P0;   /* About 1MB twice including region_t[4096]: static rather than stack */
     enum_instances();
     if(want_db){
@@ -9185,18 +8949,12 @@ int main(int argc,char **argv){
 
     static iod_t IO;
     static mem_t M; static tier_t T;
-    /* Live always measures method A once at startup: even with automatic mode, A must not
-       be empty on the first screen (--heap gates only the one-shot output). */
-    if(live) with_a=1;
     g_pd_async=live;
-    double m_a0=now_ms();
-    double work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,with_a,&pd);
-    if(with_a){ g_a_dur=(now_ms()-m_a0)/1000.0-interval; if(g_a_dur<0) g_a_dur=0;
-                g_a_when=time(NULL); }
+    double work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,&pd);
 
     if(live){
         /* ---- Live dashboard ---- */
-        int paused=0,a_pending=0,help=0,view=view0; double a_at=now_ms();   /* When the startup measurement finished */
+        int paused=0,help=0,view=view0;
         g_pd_idle=&pd;
         tui_enter();
         while(!g_stop){
@@ -9217,11 +8975,10 @@ int main(int argc,char **argv){
             if(g_rec_path && !paused){
                 char rts[32]; time_t rt=(time_t)fr_t; struct tm tmv;
                 localtime_r(&rt,&tmv); strftime(rts,sizeof rts,"%Y-%m-%d %H:%M:%S",&tmv);
-                g_ts_frac=fr_t; rp_record(&P,&M,&T,&IO,with_a,rts,(long)rt); g_ts_frac=-1;
+                g_ts_frac=fr_t; rp_record(&P,&M,&T,&IO,rts,(long)rt); g_ts_frac=-1;
             }
             if(view) render_plot(&P,&M,&T,&IO,paused);
-            else     render_dash(&P,&M,&T,&IO,paused,work_ms,
-                                 a_at>=0?(now_ms()-a_at)/1000.0:-1,with_a);
+            else     render_dash(&P,&M,&T,&IO,paused,work_ms);
             /* Key handling */
             int k;
             while((k=tui_key())>=0){
@@ -9233,16 +8990,13 @@ int main(int argc,char **argv){
                     if(view) g_plot_zoom = (k=='1' || g_plot_zoom==k-'0') ? 0 : k-'0';
                 }
                 else if(k==' '){ paused=!paused; if(!paused) g_ustop_n++; }   /* resuming starts a new segment */
-                else if(k=='r'){ with_a=1; a_pending=1; }            /* Reanalyse once */
                 else if(k=='d') g_pg_detail=!g_pg_detail;   /* Page-level scan of a large buffer, every frame, on request */
-                else if(k=='a'){ g_a_auto=!g_a_auto;                  /* Toggle automatic mode */
-                                 if(g_a_auto){ with_a=1; a_pending=1; } }
                 else if(k=='l') g_ascii=!g_ascii;   /* Switch labels between Korean and English, for a tty without Hangul support */
                 else if(k=='p'||k=='g'){ view=!view;   /* Dashboard and time-series plots */
                     /* Never retried on its own: a view switch is the user's way to read it again */
                     if(!pd && !g_pd_applied && P.pid>=0) pd=paramdump_start(P.pid,P.db); }
                 else if((k=='<'||k==','||k=='>'||k=='.') && g_ninst>1){
-                    /* Switch instance.  The previous target's classification would make method_a
+                    /* Switch instance.  The previous target's classification would make the dynamic total
                        exclude the wrong region and double-count, so the globals are
                        cleared and tracking starts over. */
                     target_select(&P,(k=='<'||k==',') ? (g_cur+g_ninst-1)%g_ninst : (g_cur+1)%g_ninst);
@@ -9250,7 +9004,6 @@ int main(int argc,char **argv){
                     cap_probe(P.pid);                         /* Capabilities belong to the target, not the last one */
                     memset(&P0,0,sizeof P0); P0.pid=P.pid;   /* A fresh delta baseline too */
                     HN=0;                                     /* History is per database; mixing them falsifies it */
-                    with_a=1; a_pending=1;                    /* Run method A once immediately for the new target */
                     params_preload(P.pid,P.db);               /* Configuration follows the new database too */
                     paramdump_abort(&pd);
                     pd=paramdump_start(P.pid,P.db);
@@ -9260,20 +9013,7 @@ int main(int argc,char **argv){
             if(g_stop||help) continue;
             /* No frame is sampled while paused; a paramdump still waiting is drained all the same */
             if(paused){ pd_idle_tick(); usleep(150000); continue; }
-            /* Automatic mode: reschedule once the adaptive period has passed since the last completion */
-            if(g_a_auto && !a_pending && a_at>=0 && (now_ms()-a_at)/1000.0>=a_period())
-                a_pending=1;
-            /* After a restart, remeasure A once even outside automatic mode: a heap
-               decomposition taken from the dead server must not appear to belong to
-               the new one. */
-            if(g_a_redo){ g_a_redo=0; with_a=1; a_pending=1; }
-            {   double m0=now_ms();
-                int wa = with_a && a_pending;                 /* A runs only on scheduled frames */
-                work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,wa?1:0,&pd);
-                if(a_pending){ g_a_dur=(now_ms()-m0)/1000.0-interval;
-                               g_a_when=time(NULL);
-                               if(g_a_dur<0) g_a_dur=0;
-                               a_at=now_ms(); a_pending=0; } }
+            work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,&pd);
         }
         tui_leave();
         paramdump_abort(&pd);          /* a request still waiting must not outlive the run */
@@ -9321,7 +9061,7 @@ int main(int argc,char **argv){
                printf("opts.used=\"%s\"\n",tq(ou)); }
     else    { print_opts_line(argc,argv); putchar('\n'); }   /* Blank line between the options and the body */
     if(terse){
-        render_terse(&P,&M,&T,with_a,IO.rb,IO.wb,IO.ri,IO.wi,
+        render_terse(&P,&M,&T,IO.rb,IO.wb,IO.ri,IO.wi,
                      IO.absorb_ok?IO.absorb:-1.0,IO.blkpct,IO.devnm,IO.devutil,IO.devr,ts,(long)now,
                      IO.rchar,IO.minflt,IO.majflt,IO.cpu_pct,IO.ncpu,
                      IO.d_thr,IO.n_thr);
@@ -9348,10 +9088,10 @@ int main(int argc,char **argv){
                 params_preload(P.pid,P.db);
                 paramdump_abort(&pd);
                 pd=paramdump_start(P.pid,P.db);
-                work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,with_a,&pd);
+                work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,&pd);
             }
             if(ii>0 || only<0) printf("[@%s]\n",P.db[0]?P.db:"-");
-            render_tree(&P,&M,&T,with_a,IO.rb,IO.wb,IO.ri,IO.wi,
+            render_tree(&P,&M,&T,IO.rb,IO.wb,IO.ri,IO.wi,
                         IO.absorb_ok?IO.absorb:-1.0,IO.blkpct,IO.devnm,IO.devutil,IO.devr,ts,
                         IO.rchar,work_ms,IO.cpu_pct,IO.ncpu);
             if(g_ninst>1 && ii<g_ninst-1){

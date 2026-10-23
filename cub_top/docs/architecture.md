@@ -74,7 +74,7 @@ smaps 는 매 프레임 읽지 않습니다. 자기 소요 시간의 100배(벽�
 | 헤더 전수 (`--bcb-dump`) | 1.21~1.26초 (약 12%) |
 | 대형 버퍼 기본 경로 (엔진 집계만, 시험 빌드로 경계를 낮춰 측정) | 0.29~0.31초 |
 
-동적 힙 분해의 방법 B 는 매 프레임 수행합니다. 방법 A 는 힙 크기에 비례해 수 초가 걸리므로 **시작 시 1회 + `r` 키 재분석**(`a` 키로 주기 재분석 전환)만 수행합니다.
+동적 힙 분해의 방법 B 는 매 프레임 수행합니다(방법 A 청크 히스토그램은 부하와 과대계상 때문에 제거).
 
 ## 계층 구조 모델
 
@@ -104,7 +104,7 @@ L3  dynamic-heap 내부      [B] plan/list/filter 캐시 · 락 · 세션 · 카
 |---|---|---|---|
 | **region** | 부팅 시 전용 영역으로 선할당 | smaps 익명 영역을 설정 크기로 매칭 → **직접 관측** | `data_buffer_size`, `log_buffer_size` |
 | **stack** | 스레드별 예약, 대부분 미터치 | 가드 페이지 + 정확히 8MB 패턴 탐지 | (워커 스택 — `thread_stacksize`와 무관, [limitations](limitations.md) 참조) |
-| **dynamic** | 요청·질의·세션마다 동적 할당 | 힙에 섞여 `/proc`로 개별 분리 불가 → **방법 A/B 필요** | `sort_buffer_size`, `max_plan_cache_entries`, `max_query_cache_entries`, `max_subquery_cache_size`, `temp_file_memory_size_in_pages` … |
+| **dynamic** | 요청·질의·세션마다 동적 할당 | 힙에 섞여 `/proc`로 개별 분리 불가 → **방법 B 필요** | `sort_buffer_size`, `max_plan_cache_entries`, `max_query_cache_entries`, `max_subquery_cache_size`, `temp_file_memory_size_in_pages` … |
 
 ## 자기검증 사다리 (버전 무관성의 근거)
 

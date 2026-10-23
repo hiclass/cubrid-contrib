@@ -22,7 +22,7 @@
 # modes matter most: -d and --dump-json are parsed by monitoring, and a Korean value
 # there breaks the consumer rather than merely looking wrong.
 #
-# --heap is included per mode because method A/B reason strings are produced only
+# the modes are run as shipped because method B reason strings are produced only
 # on that path.  The dashboard and plots are drawn from the example recording under a pty
 # (script(1)); a plot legend ("load(1분)") once leaked that way.
 set -u
@@ -37,7 +37,7 @@ gcc -O2 -std=gnu99 -o "$BIN" "$SRC" 2>/dev/null || { echo "-> FAIL (compile fail
 # So the UTF-8 lead bytes 0xEA-0xED of Hangul syllables are matched as bytes.
 HANGUL=$'[\xea-\xed][\x80-\xbf][\x80-\xbf]'
 
-if ! "$BIN" --ascii --heap -t 2>/dev/null | grep -q 'cub_server'; then
+if ! "$BIN" --ascii -t 2>/dev/null | grep -q 'cub_server'; then
     echo "-> SKIP (cub_server not running - no tree body)"; exit 0
 fi
 
@@ -68,17 +68,17 @@ check() {   # check <label> <args...>
 
 echo "--ascii output modes (0 Hangul required)"
 check "tree -t"            --ascii -t
-check "tree -t --heap"     --ascii --heap -t
+check "tree -t"            --ascii -t
 check "dump -d"            --ascii -d
-check "dump -d --heap"     --ascii --heap -d
+check "dump -d"            --ascii -d
 check "--dump-json"        --ascii --dump-json
-check "--dump-json --heap" --ascii --heap --dump-json
+check "--dump-json"        --ascii --dump-json
 
 REC="$ROOT/examples/10-recording.jsonl"
 if command -v script >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -s "$REC" ]; then
     for m in -b -p; do
         cap="$BIN.$m"
-        timeout -s INT 4 script -qc "stty cols 160 rows 50; '$BIN' --ascii --heap --replay '$REC' $m --replay-speed 1" /dev/null >"$cap" 2>&1
+        timeout -s INT 4 script -qc "stty cols 160 rows 50; '$BIN' --ascii --replay '$REC' $m --replay-speed 1" /dev/null >"$cap" 2>&1
         hits=$(python3 - "$cap" <<'PY'
 import re,sys
 t=open(sys.argv[1],'rb').read().decode('utf-8','replace')
@@ -105,9 +105,9 @@ else echo "  ok   b_items: every Hangul note has its g_ascii branch"; fi
 
 # Korean mode must keep its Korean - an over-eager fix that made everything English
 # would otherwise pass every check above.
-KO=$("$BIN" --heap -d 2>/dev/null | LC_ALL=C grep -c "$HANGUL")
+KO=$("$BIN" -d 2>/dev/null | LC_ALL=C grep -c "$HANGUL")
 if [ "${KO:-0}" -eq 0 ]; then
-    echo "  FAIL Korean mode lost its Korean (-d --heap has none)"; bad=1
+    echo "  FAIL Korean mode lost its Korean (-d has none)"; bad=1
 else
     echo "  ok   Korean mode still Korean ($KO lines)"
 fi

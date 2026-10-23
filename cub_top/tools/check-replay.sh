@@ -206,7 +206,7 @@ nrej=0; for o in "-d nosuchdb" "-d cbench" "--bcb-dump $TMP/x.bin" "-d --interva
     if [ $rc = 2 ] && grep -q -- '--replay' "$TMP/oerr"; then nrej=$((nrej+1)); else echo "  FAIL --replay with $o: exit $rc"; bad=1; fi
 done
 [ -e "$TMP/x.bin" ] && { echo "  FAIL --bcb-dump wrote a file during a replay"; bad=1; }
-nacc=0; for o in "-d --heap --ascii" "--dump-json --replay-speed 0"; do
+nacc=0; for o in "-d --ascii" "--dump-json --replay-speed 0"; do
     "$BIN" --replay "$REC" $o </dev/null >/dev/null 2>&1 && nacc=$((nacc+1)) || { echo "  FAIL --replay with $o refused"; bad=1; }
 done
 [ $nrej = 8 ] && [ $nacc = 2 ] && echo "  ok   8 inapplicable option sets refused with status 2, 2 applicable ones accepted"

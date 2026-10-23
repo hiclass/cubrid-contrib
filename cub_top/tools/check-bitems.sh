@@ -75,14 +75,14 @@ int main(void){
       ok = rq && rq->bytes==0 && strstr(rq->note,"query_cache_size_in_pages") && !rh;
       printf("  %s   query_cache_size_in_pages=0: disabled, no hash item (\"%s\")\n",ok?"ok  ":"FAIL",rq?rq->note:"-"); bad|=!ok;
       char pb2[]="[S ] max_query_cache_entries=100\n[S ] query_cache_size_in_pages=1000\n[S ] max_plan_cache_entries=1000\n"; paramdump_apply(pb2); }
-    /* dynamic-heap is graded from the larger of A and B, never their sum: A's walk holds B's items */
-    { static const double cs[][3]={{30,30,0},{0,60,1},{60,0,1}};   /* B, A, want E */
-      for(int k=0;k<3;k++){
+    /* dynamic-heap is graded E once B explains at least half of its RSS */
+    { static const double cs[][2]={{30,0},{60,1}};   /* B, want E */
+      for(int k=0;k<2;k++){
           NSR=1; memset(&SR[0],0,sizeof SR[0]); snprintf(SR[0].name,sizeof SR[0].name,"dynamic-heap");
-          SR[0].rss=100; SR[0].grade='U'; double sb=B.total; B.total=cs[k][0]; A.total=cs[k][1];
-          grade_dynamic_heap(); ok = (SR[0].grade=='E')==(int)cs[k][2];
-          printf("  %s   dynamic-heap RSS 100, B %.0f, A %.0f: grade %c (want %c)\n",ok?"ok  ":"FAIL",cs[k][0],cs[k][1],SR[0].grade,cs[k][2]?'E':'U');
-          bad|=!ok; B.total=sb; } NSR=0; A.total=0; }
+          SR[0].rss=100; SR[0].grade='U'; double sb=B.total; B.total=cs[k][0];
+          grade_dynamic_heap(); ok = (SR[0].grade=='E')==(int)cs[k][1];
+          printf("  %s   dynamic-heap RSS 100, B %.0f: grade %c (want %c)\n",ok?"ok  ":"FAIL",cs[k][0],SR[0].grade,cs[k][1]?'E':'U');
+          bad|=!ok; B.total=sb; } NSR=0; }
     run(1);                                         /* new_lfhash=yes */
     s=item("session table"); c=item("catalog cache"); lr=item("lock resources (obj)"); le=item("lock entries (obj)");
     ok = s && c && lr && s->grade=='U' && c->grade=='U' && lr->grade=='U' && le && le->grade=='M';

@@ -82,15 +82,15 @@ int main(int argc,char**v){
     g_ascii=1; enum_instances();
     int ir=-1, ih=-1;
     for(int i=0;i<g_ninst;i++){ if(g_inst[i].pid==ra) ir=i; if(g_inst[i].pid==hb) ih=i; }
-    target_select(&P,ir); sample_once(&P,&P0,&M,&T,&IO,0.05,0,&pd);      /* watching root's */
+    target_select(&P,ir); sample_once(&P,&P0,&M,&T,&IO,0.05,&pd);      /* watching root's */
     target_select(&P,ih); reset_instance_state();                         /* < or > to uid hu's */
     kill(hb,SIGKILL); usleep(200000);                                     /* gone before a frame */
-    sample_once(&P,&P0,&M,&T,&IO,0.05,0,&pd);
+    sample_once(&P,&P0,&M,&T,&IO,0.05,&pd);
     ok = P.pid==-1;
     printf("  %s   switched to uid %d's server, it stopped before a frame: not running (pid %d), root's %d not taken\n",ok?"ok  ":"FAIL",hu,P.pid,ra); bad|=!ok;
     char cmd[600]; snprintf(cmd,sizeof cmd,"runuser -u hiclass -- %s %s >/dev/null 2>&1 &",v[5],db);
     if(system(cmd)){} usleep(500000);
-    sample_once(&P,&P0,&M,&T,&IO,0.05,0,&pd);
+    sample_once(&P,&P0,&M,&T,&IO,0.05,&pd);
     int nu=-1; for(int i=0;i<g_ninst;i++) if(g_inst[i].pid==P.pid) nu=g_inst[i].uid;
     ok = P.pid>0 && P.pid!=ra && nu==hu;
     printf("  %s   that account's server restarted: followed (pid %d, uid %d)\n",ok?"ok  ":"FAIL",P.pid,nu); bad|=!ok;

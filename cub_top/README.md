@@ -65,7 +65,6 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 ./cub_top --dump-json          # -d 와 같은 내용·같은 순서를 JSON 으로
 ./cub_top -b                   # btop형 대시보드 (라이브, -i 와 같음)
 ./cub_top -p                   # 시계열 플롯 (4패널, p 로 대시보드와 전환)
-./cub_top -t --heap            # 트리에 동적 힙 분해까지 (방법 A 포함)
 ./cub_top -t <db명>            # 그 DB 를 본다 (생략 시 알파벳순 첫 번째)
 ./cub_top                      # 도움말 (옵션 목록) — -h, --help 와 같음
 ```
@@ -73,13 +72,13 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 ![live dashboard](docs/dashboard.png)
 
 라이브 대시보드(`-b`) — 위에서부터 OS 컨텍스트, 프로세스별 RSS(top 기준), 서버 메모리의 파라미터 귀속
-(`alloc`·`rss`·`conf`), 동적 힙 분해(왼쪽 방법 B 엔진 직독, 오른쪽 방법 A 청크 추정), 버퍼풀 슬롯(BCB)
+(`alloc`·`rss`·`conf`), 동적 힙 분해(방법 B 엔진 직독), 버퍼풀 슬롯(BCB)
 직독, 메모리 추이, I/O 와 판정문 순이다. 이 화면(`cbench`)에서는:
 
 | 상자 | 읽는 법 |
 |---|---|
 | RSS · server | `data_buffer` 는 설정 크기 520.4M 중 512.3M 가 상주한다(alloc/rss 98%). `glibc arena` 3.6G 는 예약만 하고 상주 0 이다 |
-| dynamic heap | 방법 B 합계 720K(플랜 캐시 569K 포함)는 엔진 변수를 직접 읽은 정확값이다. 방법 A 382.8M 중 −220.4M 는 free·비상주 청크라 상한으로 읽는다 |
+| dynamic heap | 방법 B 합계 720K(플랜 캐시 569K 포함)는 엔진 변수를 직접 읽은 정확값이다 |
 | buffer pool | 32,768 슬롯이 모두 찼고(100%) 그중 cold 존이 24,347 — 버퍼가 가득 찬 채 페이지가 교체되고 있다 |
 | memory trend | 4분 7초 동안 서버 변화 −2.6M, 안정 |
 | i/o | 장치(sda)는 99% 바쁘지만 이 순간 이 인스턴스의 디스크 I/O 는 0B/s 라, 판정문이 부하를 **다른 프로세스**로 돌린다 |
@@ -178,7 +177,7 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 |---|---|
 | `●` | 측정 — `/proc` 또는 엔진 직독으로 실제로 읽은 값 |
 | `◐` | 예약 — 설정값이며 실사용은 별도 |
-| `◌` | 추정 — 청크 히스토그램 등 간접 산출 |
+| `◌` | 추정 — 간접 산출 |
 | `?` | 미귀속 — 설명하지 못한 잔여. **감추지 않고 그대로 노출한다** |
 
 `alloc ≥ rss` 가 항상 성립한다. 설정 초과(`alloc > cfg`)는 BCB·victim 배열 같은 관리구조가
@@ -214,7 +213,7 @@ debug 로 빌드하고 그 DWARF 에서 뽑는다. 구조체 오프셋은 컴파
 | 문서 | 내용 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 설계 원칙, 3계층 데이터 소스, 프레임 구조, 기록·재생 |
-| [docs/methods.md](docs/methods.md) | 방법 A/B, BCB 직독, 영역 분류 |
+| [docs/methods.md](docs/methods.md) | 방법 B, BCB 직독, 영역 분류 |
 | [docs/metrics.md](docs/metrics.md) | 지표 정의와 계산식 |
 | [docs/views.md](docs/views.md) | 화면 구성과 글리프 문법 |
 | [docs/portability.md](docs/portability.md) | 이식성 계층, 구 커널·구 glibc 대응 |
@@ -225,7 +224,7 @@ debug 로 빌드하고 그 DWARF 에서 뽑는다. 구조체 오프셋은 컴파
 ## 검증
 
 ```sh
-for f in tools/check-*.sh; do sh "$f"; done   # 회귀 37종
+for f in tools/check-*.sh; do sh "$f"; done   # 회귀 36종
 sh tools/test-guard.sh                        # 음성 테스트(오프셋 고의 훼손)
 ```
 
@@ -234,7 +233,6 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-hist.sh` | 플롯·대시보드·덤프(`-d`) 세 경로가 같은 시점에 같은 값 (22항목) |
 | `check-replay.sh` | 기록 → 재생 → 재출력이 원본과 키 단위로 동일 + 재생이 `/proc` 미접근 · 서버가 내려간 프레임(conf.*)도 PID 네임스페이스에서 녹화해 키 단위로 재생 비교 · 잘린 줄은 경고 후 건너뜀 · 출력이 보는 쪽 TZ 와 무관 · 이 빌드가 만들지 않은 녹화(`*_pss_bytes`)는 0 으로 재생하지 않고 거부 · `--replay` 없는 `--replay-speed`·`--record` 없는 `--record-overwrite` 는 종료 코드 2 · 서버가 없으면(CI) 이 빌드의 기준 녹화 `examples/10-recording.jsonl` 로 같은 검사를 양방향 실행(0.5초 간격 검사만 생략), 예시를 거부하거나 새 키가 있으면 '재녹화 필요'로 실패 |
 | `check-turnover.sh` | 회전율·재적재율을 합성 BCB 스냅샷으로 검증: 재적재율 = 버퍼 2배가 지켰을 미스의 몫(순환 1.5·1.9배 → 100%, 2.5·3배·끝없는 스캔 → 0%), 0% 일 때 판정문은 "스캔이거나 작업집합이 버퍼의 수 배"와 "2배로 줄어드는 몫"만 말하고 증설이 무의미하다고 단정하지 않음, 큰 버퍼에서도 교체를 놓치지 않음, DB 전환 시 이전 스냅샷을 버림 |
-| `check-mmchunk.sh` | 방법 A 가 단독 mmapped 청크를 셈: malloc(100MB)·20MB×3(병합 VMA)·20MB×5·900MB(순회 상한 초과), 앞뒤로 익명 이웃이 합쳐진 VMA, 0 으로 찬 익명 영역은 0 |
 | `check-escape.sh` | `-d`·`--json`·`--record` 의 따옴표 값: 고정 버퍼에서 잘린 한글은 `?` 로 바뀌어 유효한 UTF-8, `"` `\` 탭이 든 값(라이브러리 경로)은 기록→재생에서 그대로 돌아오고 가짜 키로 쪼개지지 않음 · 서로게이트(CESU-8)·과잉 길이·U+10FFFF 초과 바이트는 `?` · 기록의 `\uXXXX` 서로게이트 쌍은 4바이트 한 글자, 단독 서로게이트·NUL 은 `?` (ensure_ascii 로 다시 쓴 기록의 이모지가 엄격한 UTF-8 로 재생) |
 | `check-flushing.sh` | flush 중(flushing) 페이지는 clean 이 아님: dirty·flushing 을 한 번씩 센 `pgbuf.unflushed`, 가장 오래된 dirty LSA 가 놓치는 flush 중 페이지 수, DWB 가 담을 수 있는 "clean 이지만 볼륨 미반영" 페이지 상한 |
 | `check-dwarf.sh` | `-flto` 의 `.lto_priv.N` 루트 심볼(실제 LTO 빌드 포함)을 찾고 모호한 둘·함수는 거절 · `strip -s` 는 사유로 · 압축(-gz/.zdebug)·`.gnu_debuglink`·split DWARF·dwz 는 정확한 사유 · build-id 메모 키 · 라이브 추출 결과는 파이프로 받아 직접 추출과 같고 파일을 남기지 않음 · 다른 라이브러리의 답은 되돌아갈 때 즉시 재사용 · 라이브 추출은 백그라운드, 끝난 자식은 캐시가 먼저 답해도 회수, 추출 중 라이브러리가 바뀌면 자식과 파이프를 함께 정리 · 인스턴스 전환 뒤 끝난 다른 라이브러리의 자식은 채택 절차를 다시 돌리지 않고 그 자리에서 회수(좀비 0) |
@@ -275,7 +273,6 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 ## 제한
 
 - **Linux 전용** — `/proc/<pid>/smaps`·`process_vm_readv` 의존.
-- **glibc malloc 가정** — 방법 A(청크 히스토그램)는 jemalloc/tcmalloc 빌드에서 무효.
 - **동일 UID 필요** — 커널 ptrace 검사 때문. 다른 계정이면 총량·CPU 만 나오고 `perm.limited=1` 로 표기된다.
 - **Yama `ptrace_scope=0` 에서만 엔진 직독** — 1(Ubuntu 기본) 이상이면 같은 계정이어도 방법 B·버퍼풀·로그 LSA 가 꺼지고 사유가 `perm.reason` 에 나온다.
   Yama `ptrace_scope>=1`(Ubuntu 기본)이면 같은 계정이어도 엔진 직독이 꺼지고 사유에 그 값이 나온다.
