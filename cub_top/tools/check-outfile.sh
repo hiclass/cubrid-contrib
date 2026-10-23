@@ -17,7 +17,8 @@
 # Files cub_top writes (--record, --bcb-dump) never follow a symlink and never empty a file
 # unasked: a recording is created new (0600), an existing one is replaced only with
 # --record-overwrite and only when it is this account's regular file with no other hard
-# link (a FIFO there neither blocks nor is accepted).  Run as root,
+# link (a FIFO there neither blocks nor is accepted).  A --bcb-dump is 0644 under the umask,
+# for cub_volmap run by another account.  Run as root,
 # following a planted link would truncate whatever it points at.
 # A recording that cannot be written (ENOSPC, EIO, a file size limit) stops with a reason on
 # screen and on stderr and exit status 1 - never a status 0 over a short or empty file.
@@ -82,6 +83,18 @@ if "$BIN" -d 2>/dev/null | grep -q '^pgbuf.enabled=1'; then
     else no "--bcb-dump through a symlink: victim '$(head -c 20 "$victim")'"; fi
     left=$(ls "$TMP" | grep -c '\.tmp$')
     if [ "$left" = 0 ]; then ok "no temporary left behind"; else no "$left temporary file(s) left"; fi
+    # Mode 0644 under the umask: cub_volmap --bufmap may run as another account; never
+    # group- or world-writable, and a stricter umask is kept
+    for um in 022 077 000; do
+        rm -f "$TMP/m$um.bin"; (umask $um; "$BIN" --bcb-dump "$TMP/m$um.bin" >/dev/null 2>&1)
+        m=$(stat -c %a "$TMP/m$um.bin" 2>/dev/null); want=644; [ $um = 077 ] && want=600
+        if [ "$m" = "$want" ]; then ok "--bcb-dump under umask $um: mode $m"; else no "--bcb-dump under umask $um: mode '$m' (want $want)"; fi
+    done
+    if [ "$(id -u)" = 0 ] && id hiclass >/dev/null 2>&1; then
+        chmod 755 "$TMP"
+        if su hiclass -s /bin/sh -c "head -c 8 '$TMP/m022.bin'" 2>/dev/null | grep -q CBCBMAP1; then ok "--bcb-dump readable by another account (cub_volmap --bufmap)"
+        else no "--bcb-dump not readable by another account"; fi
+    else echo "  SKIP --bcb-dump read by another account (needs root and a second account)"; fi
     # A leftover <path>.<pid>.tmp of a run that died before its rename, with our pid reused:
     # the shell plants it under its own pid, then becomes cub_top (exec keeps the pid)
     rm -f "$TMP/stale.bin"

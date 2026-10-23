@@ -3116,13 +3116,13 @@ static FILE *out_open(const char *path,int overwrite,char *why,size_t wn){
    The name carries our pid, so one already there is a leftover of an earlier run that died
    between create and rename (no live process shares our pid): it is removed once and the
    create retried - only when it is a plain file of this account, never through a link. */
-static FILE *tmp_create(const char *path,char *tmp,size_t tn){
+static FILE *tmp_create(const char *path,char *tmp,size_t tn,mode_t mode){
     snprintf(tmp,tn,"%s.%d.tmp",path,(int)getpid());
-    int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);
     if(fd<0 && errno==EEXIST){
         struct stat st;
         if(lstat(tmp,&st)==0 && S_ISREG(st.st_mode) && st.st_uid==geteuid() && unlink(tmp)==0)
-            fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+            fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);
         else errno=EEXIST;
     }
     if(fd<0) return NULL;
@@ -3143,7 +3143,9 @@ static int dwb_pages(void){
 }
 static void pgbuf_dump(const char*db){
     if(!g_bcb_dump[0]||!PG.ok) return;
-    char tmp[320]; FILE*f=tmp_create(g_bcb_dump,tmp,sizeof tmp);
+    /* 0644 under the umask: cub_volmap --bufmap may run as another account, and the file
+       holds page ids, flags and LSAs only - no row data */
+    char tmp[320]; FILE*f=tmp_create(g_bcb_dump,tmp,sizeof tmp,0644);
     if(!f){ snprintf(g_bcb_why,sizeof g_bcb_why,"%s %s",g_ascii?"cannot create the temporary file:":"임시 파일 생성 실패:",strerror(errno)); return; }
     struct { char magic[8]; uint32_t version, reclen; int64_t ts_sec, ts_nsec;
              int32_t nbuf, nrec, dirty, pagesize;
@@ -4925,7 +4927,7 @@ static void cap_ceiling(void){
     }
     if(sat && cur_iops>0){
         if(g_cap_state[0]){    /* Writes only to our own file; the target process and DB are untouched */
-            char tmp[320]; FILE*f=tmp_create(g_cap_state,tmp,sizeof tmp);
+            char tmp[320]; FILE*f=tmp_create(g_cap_state,tmp,sizeof tmp,0600);
             if(f){ fprintf(f,"# cub_top capacity ceilings by device and profile (block size x read ratio)\n");
                    for(int i=0;i<g_capdev_n;i++) for(int b=0;b<CAP_BS_N;b++) for(int r=0;r<CAP_RW_N;r++){
                        cap_cell_t*c=&g_capdev[i].m[b][r];
