@@ -754,7 +754,7 @@ typedef struct { unsigned long total,avail,cached,swtotal,swfree;
     /* Per-core usage, sorted descending.  A total alone cannot tell "12 cores' worth
        spread over 12" from "6 saturated", and the latter is the bottleneck.
        The same information as btop's per-core meters, compressed into one row. */
-    double core_pct[MAXCORE]; int ncore_pct, sat_cores, hi_cores;
+    double core_max; int ncore_pct, sat_cores, hi_cores;   /* busiest core %, cores measured, saturated (>=95%), high (50-95%) */
     double load1,load5,load15;
 } mem_t;
 /* Per-field deltas of one /proc/stat cpu line, the way procps top takes them: a
@@ -814,7 +814,7 @@ static void parse_hostcpu(mem_t *M){
     { static unsigned long long pc[MAXCORE][10];   /* the previous cpuN fields */
       static int primed=0;
       char *big=(char*)cbuf; size_t bn=sizeof cbuf;
-      M->ncore_pct=0; M->sat_cores=0; M->hi_cores=0;
+      M->ncore_pct=0; M->sat_cores=0; M->hi_cores=0; M->core_max=0;
       if(read_file("/proc/stat",big,bn)>0){
           char *p=big; int idx=0;
           while((p=strstr(p,"cpu"))){
@@ -835,18 +835,13 @@ static void parse_hostcpu(mem_t *M){
                   double b=(1.0-(d[3]+d[4])/dt)*100.0;
                   if(b<0) b=0;
                   if(b>100) b=100;
-                  if(idx<MAXCORE) M->core_pct[idx++]=b;
+                  idx++; if(b>M->core_max) M->core_max=b;
                   if(b>=95.0) M->sat_cores++;
                   else if(b>=50.0) M->hi_cores++;
               }
               memcpy(pc[cid],v,sizeof pc[cid]);
           }
           M->ncore_pct=idx; primed=1;
-          /* Sort descending, so the bars run busiest-first and the saturated width is visible.
-             Few enough cores that insertion sort suffices (microseconds at 64). */
-          for(int i=1;i<M->ncore_pct;i++){ double k=M->core_pct[i]; int j=i-1;
-              while(j>=0 && M->core_pct[j]<k){ M->core_pct[j+1]=M->core_pct[j]; j--; }
-              M->core_pct[j+1]=k; }
       } }
     if(read_file("/proc/loadavg",buf,sizeof buf)>0)
         sscanf(buf,"%lf %lf %lf",&M->load1,&M->load5,&M->load15);
@@ -3954,25 +3949,6 @@ static void cv_meter(int x,int y,int w,double frac){
    bottleneck; sorted, the width of the dark run is the saturated core count.
    With more cores than columns a cell takes the maximum, not the average -
    averaging would hide the saturation this view exists to show. */
-static void cv_cores(int x,int y,int w,const double *pct,int n){
-    if(w<=0||n<=0) return;
-    for(int i=0;i<w;i++){
-        int a=(int)((long long)i*n/w), b=(int)((long long)(i+1)*n/w);
-        if(b<=a) b=a+1;
-        if(b>n) b=n;
-        double mx=0;
-        for(int k=a;k<b;k++) if(pct[k]>mx) mx=pct[k];
-        /* Only the two glyphs the other gauges use (filled and empty) - mixing in block
-           characters would change the texture within one box.  The distinction is
-           carried by colour alone: red saturated, orange high, green mid, grey idle. */
-        const char *g,*c;
-        if(mx>=95)      { g="⠿"; c="1;38;5;203"; }  /* Saturated: red, bold */
-        else if(mx>=50) { g="⠿"; c="38;5;215"; }    /* High: orange */
-        else if(mx>=10) { g="⠿"; c="38;5;150"; }    /* Mid: light green */
-        else            { g="⠤"; c="38;5;236"; }    /* Idle: the empty glyph */
-        cv_put(x+i,y,g,c);
-    }
-}
 /* Braille 2x4 line chart, resampling the whole window to the x resolution */
 static const int BRD[2][4]={{0x01,0x02,0x04,0x40},{0x08,0x10,0x20,0x80}};
 /* Up to CV_NS series.  The caller supplies colours as palette indices (38;5;N) so the
@@ -5847,11 +5823,8 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
         else       snprintf(cn,sizeof cn,"%dc",nc);
         snprintf(cl,sizeof cl,"CPU %s",cn);
         cv_put(2,y+1,padf(cl,22,0),"250");
-        /* Per-core distribution instead of a total gauge - the distribution is what reveals
-           saturation.  Before the first frame delivers per-core values, fall back to
-           the old gauge. */
-        if(M->ncore_pct>0) cv_cores(25,y+1,VX-26,M->core_pct,M->ncore_pct);
-        else               cv_meter(25,y+1,VX-26,M->busy_cores/nc);
+        /* A total gauge; saturation shows in the counts beside it (sat/high/max core) */
+        cv_meter(25,y+1,VX-26,M->busy_cores/nc);
         { char c1[16],c2[16],c4[16],c5[16];
           snprintf(c1,sizeof c1,"%d",nc);
           snprintf(c2,sizeof c2,"%.1f",M->busy_cores);
@@ -6950,14 +6923,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,
        evenly or a few cores are at 100%.  sat is 95% and above, hi is 50-95%, max is the
        busiest core. */
     printf("os.cores_saturated=%d os.cores_high=%d os.core_max_pct=%.1f\n",
-           M->sat_cores,M->hi_cores,M->ncore_pct>0?M->core_pct[0]:0.0);
-    /* The sorted per-core distribution, which the core bars draw and which sat/hi counts
-       alone cannot reconstruct.  Descending, so replay needs no re-sort. */
-    if(M->ncore_pct>0){
-        printf("os.core_pct_n=%d os.core_pct=\"",M->ncore_pct);
-        for(int i=0;i<M->ncore_pct;i++) printf("%s%.1f",i?",":"",M->core_pct[i]);
-        printf("\"\n");
-    }
+           M->sat_cores,M->hi_cores,M->core_max);
     /* The detected CUBRID version and the adopted offset table - the only mechanical way to
        check support status on a foreign deployment. */
     printf("cubrid.version=\"%s\" heapB.table=\"%s\" heapB.lib=\"%s\"\n",
@@ -7378,15 +7344,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     M->cpu_wa=rp_num(t,"os.cpu_wa_pct",0);
     M->load1 =rp_num(t,"os.load1",0); M->load5=rp_num(t,"os.load5",0);
     M->load15=rp_num(t,"os.load15",0);
-    /* Per-core distribution, recorded already sorted descending. */
-    M->ncore_pct=0;
-    /* Its own buffer: MAXCORE entries of up to "100.0," outgrow the shared 512 bytes at 86 cores */
-    static char cb[MAXCORE*8];
-    if(rp_find(t,"os.core_pct",cb,sizeof cb)){
-        char *q=cb; int i=0;
-        while(*q && i<MAXCORE){ M->core_pct[i++]=strtod(q,&q); if(*q==',') q++; else break; }
-        M->ncore_pct=i;
-    }
+    M->core_max=rp_num(t,"os.core_max_pct",0);
 
     P->pid     =(int)rp_num(t,"server.pid",-1);
     g_seg_gen  =(unsigned)rp_num(t,"collect.segment",0);              /* the history follows the recorded segments */

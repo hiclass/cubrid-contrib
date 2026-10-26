@@ -83,7 +83,7 @@ OS RAM  188.0G
 
 ```
  수집 23ms                        2026-09-02 02:26 AM        상단 상태줄(프레임 수집시간 · 시각)
-╭─┤ OS 컨텍스트 · load .. ├──┤ total|used|pct|avail|cache|swap ├╮  L0 호스트 — CPU 코어분포·포화 N·메모리·인스턴스별
+╭─┤ OS 컨텍스트 · load .. ├──┤ total|used|pct|avail|cache|swap ├╮  L0 호스트 — CPU 사용·포화 N·메모리·인스턴스별
 ╭─┤ RSS · 프로세스 ├──────────────────┤ Δ3m00s │ All ..M ├╮  L1 티어(master/server/PL/broker/CAS) RSS(top 기준) + 코어 수 + Δ(관측창)·스파크라인
 ╭─┤ RSS · 서버 ├┤ 설정으로 설명 N% ├──┤보기1 · 할당/상주 ┤─┤ alloc|rss|conf|grow ├╮  L2 영역별 게이지 · 값 4열
 ╭─┤ 동적 메모리 상세 · 엔진이 직접 보고(B) ├╮╭─┤ 동적 메모리 상세 · 크기 추정(A) — HH:MM:SS chked ├╮  L3 힙 분해(좌우 우열 없음)
