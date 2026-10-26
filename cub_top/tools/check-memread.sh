@@ -108,10 +108,13 @@ int main(int c,char**v){
     printf("  sample: %d headers read (want 140 = zone 1-2 minus 10 not resident), %d skipped as not resident, cold mismatches %d (want 0), untouched page still not resident: %s\n",
            PG.nhdr,PG.nonres,PG.mismatch_raw,still_out?"yes":"NO");
     if(!PG.ok || PG.nhdr!=140 || PG.nonres!=10 || PG.mismatch_raw!=0 || !still_out) bad=1;
-    g_pg_detail=0;                                /* 2b: large buffer, not asked for */
+    g_pg_detail=0;                                /* 2b: large buffer, not asked for: one pass, then the pass stands */
+    pgbuf_scan(&P); int h1=PG.nhdr;
+    printf("  large buffer unasked: the first frame makes one pass (enabled=%d large=%d from_last=%d, %d headers)\n",PG.ok,PG.large,PG.from_last,PG.nhdr);
+    if(!PG.ok || !PG.large || PG.from_last) bad=1;
     pgbuf_scan(&P);
-    printf("  large buffer unasked: enabled=%d large=%d (want 0 1) reason=\"%s\"\n",PG.ok,PG.large,PG.why);
-    if(PG.ok || !PG.large) bad=1;
+    printf("  the next frame: no pass, no header read (from_last=%d, headers still %d)\n",PG.from_last,PG.nhdr);
+    if(!PG.from_last || PG.nhdr!=h1) bad=1;
     return bad;
 }
 C
@@ -128,7 +131,7 @@ probe "no restriction"  'vm_readv=1 .*perm.limited=0'                       ''  
 probe "denied"          'vm_readv=0 mem_pread=0 perm.limited=1 why=.*EPERM' 'ptrace_scope|root|CAP_' LD_PRELOAD="$TMP/yama.so"
 probe "scope 1"         'ptrace_scope=1.*ptrace_scope=0'                    'root|CAP_'       LD_PRELOAD="$TMP/yama.so" YAMA_SCOPE=1
 probe "scope 3"         'perm.limited=1 .*ptrace_scope=3'                   'root|CAP_'       LD_PRELOAD="$TMP/yama.so" YAMA_SCOPE=3
-echo "2. page headers: recent sample only, resident only; large buffer on request"
+echo "2. page headers: recent sample only, resident only; large buffer: one pass, then on its period"
 "$TMP/t" || bad=1
 
 # 2c. Residency is read afresh every frame: header pages that come in or go out between two

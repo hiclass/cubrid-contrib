@@ -3095,6 +3095,10 @@ static struct {
     lsa_t log_nxio, log_append, log_eof; int have_log;
     uint64_t raw_oldest, raw_nxio, raw_append, raw_eof;
     double ms; long frame;
+    long scan_seq;              /* one more per whole-array pass: cap_turnover works per pass */
+    /* A large buffer: the pass runs on a period set by its own cost; between passes the last
+       one stands (from_last) with its age, and a slot sample gives the admission rate */
+    double scan_at_ms, scan_ms_full, scan_age_s; int scan_pid, from_last, ok_last;
     pgrec_t *rec; int nrec, reccap;
     struct timespec when;
 } PG;
@@ -3260,7 +3264,49 @@ static void pg_log(proc_t*P){
     }
 }
 static int g_pg_detail=0;   /* Page-level detail on a large buffer: asked for (live d, --pgbuf-detail, --bcb-dump) */
-#define PG_LARGE 262144     /* BCBs above which the whole-array scan runs only on request */
+#define PG_LARGE 262144     /* BCBs above which the whole-array pass runs on a period, not every frame */
+#define PG_BUDGET 0.01      /* share of wall time the pass may take on a large buffer */
+#define PG_LARGE_MIN_S 5.0  /* and never more often than this */
+#define PG_SAMPLE_STRIDE 64 /* every 64th slot is read each frame between passes */
+/* The slot sample: the VPID of every PG_SAMPLE_STRIDE-th BCB, read each frame on a large
+   buffer.  A slot whose page changed since the last frame admitted a page, and the sample
+   is unbiased for the whole array, so admissions per second = changed/sampled x nbuf / dt.
+   The slot within each bucket of PG_SAMPLE_STRIDE is picked by a fixed hash, so a pattern
+   in the engine's slot use with a period dividing the stride cannot bias the sample.
+   A slot that changed twice in one frame counts once (under-count): at or above half the
+   sample changed the rate is low-confidence, as adm_frac is for the pass. */
+static struct { int n, cap, pid; uint64_t *key, *addr; unsigned char *buf, *ok; double at_ms, miss_pps, frac; } SM={0,0,-1,NULL,NULL,NULL,NULL,0,-1,-1};
+static int g_miss_sample=0;   /* this frame's admissions came from the sample, not a pass */
+static void pg_sample(proc_t*P,unsigned long pool,int nbuf){
+    SM.miss_pps=-1; SM.frac=-1;
+    uint64_t tab=0;
+    if(vmread(P->pid,pool+g_bt->pg.bcbtab,&tab,8)!=8 || !tab || nbuf<=0) return;
+    int n=nbuf/PG_SAMPLE_STRIDE; if(n<=0) return;
+    if(n>SM.cap){ free(SM.key); free(SM.addr); free(SM.buf); free(SM.ok);
+        SM.key=malloc(sizeof(uint64_t)*(size_t)n); SM.addr=malloc(sizeof(uint64_t)*(size_t)n); SM.buf=malloc(32*(size_t)n); SM.ok=malloc((size_t)n);
+        SM.cap=(SM.key&&SM.addr&&SM.buf&&SM.ok)?n:0; SM.pid=-1; if(!SM.cap) return; }
+    int o_v=g_bt->pg.vpid, o_f=g_bt->pg.flags, lo=o_v<o_f?o_v:o_f, hi=(o_v+6>o_f+4?o_v+6:o_f+4);
+    size_t each=(size_t)(hi-lo); if(each>32) return;
+    size_t szb=(size_t)g_bt->pg.sz_bcb;
+    for(int i=0;i<n;i++){ unsigned j=(unsigned)i*2654435761u % PG_SAMPLE_STRIDE;
+        SM.addr[i]=tab+((uint64_t)i*PG_SAMPLE_STRIDE+j)*szb+(uint64_t)lo; }
+    vm_gather(P->pid,SM.addr,n,each,SM.buf,SM.ok);
+    int same = SM.pid==P->pid && SM.n==n && SM.at_ms>0;
+    long changed=0, valid=0;
+    for(int i=0;i<n;i++){
+        if(!SM.ok[i]){ if(same) SM.key[i]=0; continue; }
+        const unsigned char *b=SM.buf+(size_t)i*each;
+        int32_t pageid; int16_t volid; memcpy(&pageid,b+(o_v-lo),4); memcpy(&volid,b+(o_v-lo)+4,2);
+        uint64_t k = (volid==-1||pageid==-1) ? 0 : (((uint64_t)(uint16_t)volid<<32)|(uint32_t)pageid);
+        if(same){ valid++; if(k!=SM.key[i]) changed++; }
+        SM.key[i]=k;
+    }
+    double now=now_ms();
+    if(same && valid>0){ double dt=(now-SM.at_ms)/1000.0;
+        SM.frac=(double)changed/(double)valid;
+        SM.miss_pps = dt>0.05 ? SM.frac*(double)nbuf/dt : -1; }
+    SM.at_ms=now; SM.pid=P->pid; SM.n=n;
+}
 #define PG_SAMPLE 256       /* Headers read to verify the offsets; a wrong offset mismatches all of them */
 #define PG_MIN_VERIFY 32    /* Below this many hot/warm headers, cold ones top the sample up */
 static void pgbuf_scan(proc_t*P){
@@ -3280,12 +3326,22 @@ static void pgbuf_scan(proc_t*P){
     int32_t nbuf=rd_i32(P->pid,pool+g_bt->off_pgbuf_nbuf);
     /* A whole-array scan of a large buffer (2M BCBs = 300MB a pass) is load the monitor would
        put on the host: by default only the engine's own aggregates are shown */
-    if(nbuf>PG_LARGE && !detail){ PG.ok=0; PG.large=1; PG.nbuf=nbuf;
-        snprintf(PG.why,sizeof PG.why,
-                 g_ascii?"%d slots: page-level scan only on request (live d, --pgbuf-detail, --bcb-dump); engine aggregates shown"
-                        :"슬롯 %d개: 페이지 단위 스캔은 요청 시에만 (라이브 d, --pgbuf-detail, --bcb-dump) — 엔진 집계로 표시",nbuf);
-        return; }
-    PG.large=0;
+    if(nbuf>PG_LARGE && !detail){
+        /* A large buffer: the whole-array pass (2M BCBs = 300MB) runs on a period set by its
+           own cost, the last pass stands with its age between, and the slot sample every
+           frame gives the admission rate */
+        PG.large=1; double now=now_ms();
+        int due = PG.scan_pid!=P->pid;
+        if(!due){ double period=PG.scan_ms_full/PG_BUDGET; if(period<PG_LARGE_MIN_S*1000.0) period=PG_LARGE_MIN_S*1000.0;
+                  due = now-PG.scan_at_ms>=period; }
+        if(!due){
+            PG.nbuf=nbuf; PG.ok=PG.ok_last; PG.from_last=1; PG.scan_age_s=(now-PG.scan_at_ms)/1000.0;
+            pg_sample(P,pool,nbuf);
+            return;
+        }
+        PG.scan_at_ms=now; PG.scan_pid=P->pid; PG.scan_ms_full=50; PG.ok_last=0;   /* a failed pass is retried on the period, not every frame */
+        PG.from_last=0; PG.scan_age_s=0;
+    } else { PG.large=0; PG.from_last=0; PG.scan_age_s=0; }
     uint64_t tab=0;
     if(vmread(P->pid,pool+g_bt->pg.bcbtab,&tab,8)!=8 || !tab || nbuf<=0 || nbuf>(1<<26)){
         PG.ok=0; snprintf(PG.why,sizeof PG.why,g_ascii?"BCB_table pointer unreadable":"BCB_table 포인터 읽기 실패"); return; }
@@ -3518,6 +3574,7 @@ static void pgbuf_scan(proc_t*P){
         snprintf(PG.why,sizeof PG.why,g_ascii?"%d page slots checked (%d headers%s)":"페이지 슬롯 %d개 확인 (헤더 %d개%s)",
                  nbuf,PG.nhdr,full?(g_ascii?", all":", 전수"):(g_ascii?" sampled":" 표본"));
     PG.ms=now_ms()-t0;
+    PG.scan_seq++; PG.ok_last=PG.ok; if(PG.large) PG.scan_ms_full=PG.ms;
     { struct timeval tv; gettimeofday(&tv,NULL); PG.when.tv_sec=tv.tv_sec; PG.when.tv_nsec=tv.tv_usec*1000L; }
     /* Order matters: pgbuf_dump overwrites the --bcb-dump file, so a one-shot run must
        read the turnover baseline BEFORE that, or the baseline becomes this very frame
@@ -4256,7 +4313,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->cap_readmit=CAP2.readmit_pct;          /* -1 = not measured: it alone separates shortage from scan */
     s->cap_admfrac=CAP2.adm_frac;
     s->cap_hit=CAP2.hit_pct<0?0:CAP2.hit_pct; s->cap_miss=CAP2.miss_pps;   /* -1 = not measured */
-    s->cap_mperf = !strcmp(CAP2.miss_src,"perfmon");
+    s->cap_mperf = !strcmp(CAP2.miss_src,"perfmon") ? 1 : !strcmp(CAP2.miss_src,"sample") ? 2 : 0;
     s->cap_head=CAP2.headroom_pct<0?0:CAP2.headroom_pct;
     s->pg_ok      = PG.ok || AG.ok;
     if(!PG.ok && AG.ok){                /* Not scanned: the engine's own aggregates; no oldest dirty */
@@ -4712,9 +4769,19 @@ static int cap_turnover_from_dump(void){
 }
 static void cap_turnover(double now_s){
     CAP2.turnover_pct=-1; CAP2.readmit_pct=-1; CAP2.miss_pps=-1; CAP2.adm_frac=-1;
+    static long last_seq=-1; static double k_t=-1,k_r=-1,k_m=-1,k_f=-1;
     { static unsigned seen=0;
-      if(seen!=g_seg_gen){ seen=g_seg_gen; cap_prev_n=0; vp_hist_n=0; vp_evseq=0; } }
+      if(seen!=g_seg_gen){ seen=g_seg_gen; cap_prev_n=0; vp_hist_n=0; vp_evseq=0; last_seq=-1; k_t=k_r=k_m=k_f=-1; } }
+    g_miss_sample=0;
+    if(PG.ok && PG.large && PG.from_last && PG.scan_seq==last_seq){
+        /* Between passes: the last pass's turnover and re-admit stand; admissions come from
+           this frame's slot sample when it has one */
+        CAP2.turnover_pct=k_t; CAP2.readmit_pct=k_r; CAP2.miss_pps=k_m; CAP2.adm_frac=k_f;
+        if(SM.miss_pps>=0){ CAP2.miss_pps=SM.miss_pps; CAP2.adm_frac=SM.frac; g_miss_sample=1; }
+        return;
+    }
     if(!PG.ok||PG.nrec<=0) return;
+    if(PG.from_last) return;                       /* the last pass already went through here */
     /* A degraded frame holds only verified records; comparing it would count the dropped
        ones as evicted.  It is skipped and the baseline kept for the next full frame. */
     if(PG.degraded) return;
@@ -4755,6 +4822,7 @@ static void cap_turnover(double now_s){
             CAP2.adm_frac     = PG.nbuf>0 ? (double)admitted/(double)PG.nbuf : -1;
         }
     }
+    last_seq=PG.scan_seq; k_t=CAP2.turnover_pct; k_r=CAP2.readmit_pct; k_m=CAP2.miss_pps; k_f=CAP2.adm_frac;
     { uint64_t *t=vp_prev; vp_prev=vp_cur; vp_cur=t;
       int c=vp_prev_cap; vp_prev_cap=vp_cur_cap; vp_cur_cap=c; }
     cap_prev_n=n; cap_prev_t=now_s;
@@ -4895,7 +4963,7 @@ static int db_disks(int pid,const char *db,char out[][32],int max,char *why,size
    quantity - pages read into the buffer - when a watcher keeps it running and two frames
    give a rate (live).  Re-admit stays unmeasured: that needs the page set. */
 static void cap_miss_from_engine(void){
-    if(CAP2.miss_pps>=0){ snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"scan"); return; }
+    if(CAP2.miss_pps>=0){ snprintf(CAP2.miss_src,sizeof CAP2.miss_src,g_miss_sample?"sample":"scan"); return; }
     snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"-");
     if(CAP2.ps_ok && !strcmp(CAP2.hit_src,"perfmon")){      /* a per-second delta, not the cumulative figure */
         CAP2.miss_pps=CAP2.pb_ioread_ps; snprintf(CAP2.miss_src,sizeof CAP2.miss_src,"perfmon"); }
@@ -5325,9 +5393,12 @@ static void vd_buf(char*o,size_t n,const char**col){
         snprintf(o,n,g_ascii?"admissions not measured (no page-scan baseline) - buffer not judged, %s"
                            :"· 버퍼 적재 미측정(페이지 스캔 기준 없음) — 버퍼 판단 보류, %s",disk); return; }
     if(ab>=8.0*1024*1024 && b->cap_readmit<0){ *col=VD_INFO;
-        if(b->cap_mperf)   /* a large buffer not scanned: the rate is the engine's, the page set is not read */
+        if(b->cap_mperf==1)   /* the rate is the engine's; the page set was not read */
             snprintf(o,n,g_ascii?"admitting %s/s by the engine counter (%s) - no page scan, so re-admit is not measured: d (--pgbuf-detail) tells shortage from scan"
                                :"· 적재 %s/s(엔진 카운터, %s) — 페이지 스캔이 없어 재적재율 미측정: d(--pgbuf-detail)로 켜면 버퍼 부족과 스캔 구분",H(ab),disk);
+        else if(b->cap_mperf==2)   /* a large buffer between passes: the slot sample has no re-admit yet */
+            snprintf(o,n,g_ascii?"admitting %s/s by the slot sample (%s) - re-admit comes with the next whole-array pass"
+                               :"· 적재 %s/s(슬롯 표본, %s) — 재적재율은 다음 전수 스캔에서",H(ab),disk);
         else
             snprintf(o,n,g_ascii?"admitting %s/s (%s) - re-admit not measured, so shortage and scan are not told apart"
                                :"· 적재 %s/s(%s) — 재적재율 미측정이라 버퍼 부족과 스캔을 가르지 않음",H(ab),disk);
@@ -5483,6 +5554,9 @@ static void vd_capacity(char*o,size_t n,const char**col){
         double res = PG.ok ? (PG.nbuf>0?100.0*PG.resident/PG.nbuf:0)
                            : (AG.nbuf>0?100.0*(double)(AG.z1+AG.z2+AG.z3)/AG.nbuf:0);
         int mperf = !strcmp(c->miss_src,"perfmon");
+        if(c->readmit_pct<0 && c->miss_pps>=200 && !strcmp(c->miss_src,"sample")){ *col=VD_NOTE;
+            snprintf(o,n,g_ascii?"! %.0f pages/s admitted (slot sample) - re-read share comes with the next whole-array pass"
+                                :"⚠ 초당 %.0f페이지 적재(슬롯 표본) — 재적재 비율은 다음 전수 스캔에서",c->miss_pps); return; }
         if(c->readmit_pct<0 && c->miss_pps>=200 && mperf){ *col=VD_NOTE;
             snprintf(o,n,g_ascii?"! %.0f pages/s admitted (engine counter) - a large buffer not scanned, so re-read share unknown: d (--pgbuf-detail) tells buffer shortage from scan"
                                 :"⚠ 초당 %.0f페이지 적재(엔진 카운터) — 페이지 스캔을 끈 대형 버퍼라 재적재 비율 미상: d(--pgbuf-detail)로 켜면 버퍼 부족과 스캔 구분",
@@ -6266,6 +6340,7 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
     {
         char pt[96];
         snprintf(pt,sizeof pt,g_ascii?"buffer pool · page slots — buffer control blocks (◌, %.0fms)":"버퍼풀 · 페이지 슬롯 = 버퍼 제어블록(BCB) (◌, %.0fms)",PG.ok?PG.ms:0.0);
+        if(PG.ok && PG.from_last) snprintf(pt,sizeof pt,g_ascii?"buffer pool · page slots (◌, pass %.0fms, %.0fs ago · slot sample each frame)":"버퍼풀 · 페이지 슬롯 (◌, 전수 %.0fms, %.0f초 전 · 매 프레임 슬롯 표본)",PG.ms,PG.scan_age_s);
         if(!PG.ok && AG.ok) snprintf(pt,sizeof pt,g_ascii?"buffer pool · engine aggregates (●, %.2fms)":"버퍼풀 · 엔진 집계 (●, %.2fms)",AG.ms);
         cv_box(0,y,W,6,pt);
         if(!PG.ok && AG.ok){
@@ -7102,7 +7177,7 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,
     { char vb[320]; const char*vc=VD_INFO; vd_capacity_shown(vb,sizeof vb,&vc);
       printf("cap.verdict=\"%s\"\n",tq(vb)); }
     /* BCB direct read, graded as an estimate (a latch-free snapshot).  The keys share their source (the dump) with volmap --bufmap. */
-    printf("pgbuf.enabled=%d pgbuf.reason=\"%s\"\n",PG.ok,tq(PG.why));
+    printf("pgbuf.enabled=%d pgbuf.reason=\"%s\" pgbuf.scan_age_s=%.1f pgbuf.sample_miss_per_s=%.0f\n",PG.ok,tq(PG.why),PG.scan_age_s,SM.miss_pps);
     if(PG.ok){
         printf("pgbuf.num_buffers=%d pgbuf.resident=%d pgbuf.dirty=%d pgbuf.flushing=%d"
                " pgbuf.zone1_hot=%d pgbuf.zone2_warm=%d pgbuf.zone3_cold=%d pgbuf.zone_void=%d pgbuf.zone_free=%d"
@@ -7504,6 +7579,7 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     PG.mismatch=(int)rp_num(t,"pgbuf.hdr_mismatch",0);
     PG.unread=(int)rp_num(t,"pgbuf.hdr_unread",0);
     PG.ms=rp_num(t,"pgbuf.scan_ms",0);
+    PG.scan_age_s=rp_num(t,"pgbuf.scan_age_s",0); PG.from_last=PG.scan_age_s>0; SM.miss_pps=rp_num(t,"pgbuf.sample_miss_per_s",-1);
     PG.zinv=(int)rp_num(t,"pgbuf.zone_free",0);   /* emitted as zone_free */
     PG.mismatch_raw=(int)rp_num(t,"pgbuf.hdr_mismatch_raw",0);
     PG.recheck=(int)rp_num(t,"pgbuf.rechecked",0);

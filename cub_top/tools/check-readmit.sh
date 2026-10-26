@@ -17,7 +17,8 @@
 # The re-admit rate is the one signal separating "buffer too small" from "scan without
 # reuse".  When it was not measured (-1) it must stay -1 in the history and the verdict
 # must not pick either conclusion; a 0 there read as a scan.  A large buffer scanned on
-# request is scanned every frame, so every frame after the first has a measured rate.
+# request is scanned every frame, so every frame after the first has a measured rate; without
+# a request the pass runs once and then on its own period (check-largebuf).
 # A large buffer not scanned has no page set: admissions then come from the engine's ioread
 # counter when a watcher keeps it running and two frames give a rate (live) - never from
 # the cumulative one-shot figure - with re-admit still unmeasured, and the verdicts say so.
@@ -208,9 +209,12 @@ int main(void){
     }
     printf("  %s   re-admit by frame: %s (want -1 then measured every frame, 100 from the third)\n",bad2?"FAIL":"ok  ",seq);
     bad|=bad2;
-    g_pg_detail=0; pgbuf_scan(&P); cap_turnover(104.0);
-    printf("  %s   not requested: scanned=%d re-admit=%.0f (want 0, -1)\n",(!PG.ok&&CAP2.readmit_pct<0)?"ok  ":"FAIL",PG.ok,CAP2.readmit_pct);
-    if(PG.ok||CAP2.readmit_pct>=0) bad=1;
+    g_pg_detail=0; pgbuf_scan(&P); cap_turnover(104.0); double rm=CAP2.readmit_pct;
+    printf("  %s   not requested: the first frame still makes one pass (scanned=%d, large=%d, re-admit %.0f)\n",(PG.ok&&PG.large&&!PG.from_last)?"ok  ":"FAIL",PG.ok,PG.large,rm);
+    if(!(PG.ok&&PG.large&&!PG.from_last)) bad=1;
+    pgbuf_scan(&P); cap_turnover(104.5);
+    printf("  %s   the next frame: no pass, the last one stands (from_last=%d, re-admit %.0f)\n",(PG.ok&&PG.from_last&&CAP2.readmit_pct==rm)?"ok  ":"FAIL",PG.from_last,CAP2.readmit_pct);
+    if(!(PG.ok&&PG.from_last&&CAP2.readmit_pct==rm)) bad=1;
     printf("3. re-admit estimates what doubling the buffer saves (exact LRU, uniform random - where it holds)\n");
     { double m[]={4,6,10,15}; for(int i=0;i<4;i++) bad|=lru_case(4096,m[i]); }
     printf("4. where the estimate is not a bound (review A-3)\n");
