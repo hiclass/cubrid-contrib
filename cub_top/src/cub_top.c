@@ -316,7 +316,7 @@ typedef struct {
     unsigned long rss_kb,pss_kb,swap_kb,vsize_kb;
     /* Whole-process totals summed from this frame's smaps, every region included (even past
        MAXREG): the same figures smaps_rollup gives, without reading it again */
-    int smaps_ok; unsigned long s_rss_kb,s_pss_kb,s_swap_kb;
+    int smaps_ok; unsigned long s_rss_kb,s_pss_kb,s_swap_kb,s_thp_kb,thp_kb;   /* thp: AnonHugePages, the share of the heap on huge pages */
     /* smaps is read on a period set by its own cost (see proc_read_mem); between reads the
        regions are kept and the totals come from status */
     double smaps_at_ms, smaps_ms, smaps_age_s; int smaps_pid; unsigned long maps_sig;
@@ -543,7 +543,7 @@ static int inst_find(const char*db){
 /* Full smaps parse: regions plus Rss/Pss */
 static void parse_smaps(proc_t *P){
     char f[64]; snprintf(f,sizeof f,"/proc/%d/smaps",P->pid);
-    P->smaps_ok=0; P->s_rss_kb=P->s_pss_kb=P->s_swap_kb=0;
+    P->smaps_ok=0; P->s_rss_kb=P->s_pss_kb=P->s_swap_kb=P->s_thp_kb=0;
     P->nreg=0; P->reg_dropped=0;       /* before the open: a refused smaps must not leave the last target's regions */
     FILE *fp=fopen(f,"re"); if(!fp) return;
     char line[1024]; region_t *cur=NULL;
@@ -572,6 +572,7 @@ static void parse_smaps(proc_t *P){
             if(!strncmp(line,"Rss:",4)){ v=strtoul(line+4,NULL,10); P->s_rss_kb+=v; if(cur) cur->rss_kb=v; }
             else if(!strncmp(line,"Pss:",4)){ v=strtoul(line+4,NULL,10); P->s_pss_kb+=v; if(cur) cur->pss_kb=v; }
             else if(!strncmp(line,"Swap:",5))           P->s_swap_kb +=strtoul(line+5,NULL,10);
+            else if(!strncmp(line,"AnonHugePages:",14)) P->s_thp_kb  +=strtoul(line+14,NULL,10);
         }
     }
     fclose(fp);
@@ -583,7 +584,7 @@ static void parse_rollup(proc_t *P){
     P->rss_kb=P->pss_kb=P->swap_kb=0;
     /* This frame's smaps already gives the totals: smaps_rollup is not read again */
     if(P->smaps_ok && P->s_rss_kb){
-        P->rss_kb=P->s_rss_kb; P->pss_kb=P->s_pss_kb; P->swap_kb=P->s_swap_kb;
+        P->rss_kb=P->s_rss_kb; P->pss_kb=P->s_pss_kb; P->swap_kb=P->s_swap_kb; P->thp_kb=P->s_thp_kb;
         return;
     }
     if(CAP.rollup){
@@ -595,6 +596,7 @@ static void parse_rollup(proc_t *P){
                 if(!strncmp(line,"Rss:",4)&&sscanf(line+4,"%lu",&v)==1) P->rss_kb=v;
                 else if(!strncmp(line,"Pss:",4)&&sscanf(line+4,"%lu",&v)==1) P->pss_kb=v;
                 else if(!strncmp(line,"Swap:",5)&&sscanf(line+5,"%lu",&v)==1) P->swap_kb=v;
+                else if(!strncmp(line,"AnonHugePages:",14)&&sscanf(line+14,"%lu",&v)==1) P->thp_kb=v;
             }
             fclose(fp);
             if(P->rss_kb) return;
@@ -756,6 +758,11 @@ typedef struct { unsigned long total,avail,cached,swtotal,swfree;
        The same information as btop's per-core meters, compressed into one row. */
     double core_max; int ncore_pct, sat_cores, hi_cores;   /* busiest core %, cores measured, saturated (>=95%), high (50-95%) */
     double load1,load5,load15;
+    /* The target's memory cgroup: the OOM boundary in a container or a systemd slice is
+       its limit, not the host's RAM.  limit -1 = none; path as /proc/<pid>/cgroup gives it */
+    double cg_limit, cg_usage; char cg_path[96];
+    /* Memory pressure stall information (kernel 4.20+ or psi=1): -1 = not provided */
+    double psi_some10, psi_full10;
 } mem_t;
 /* Per-field deltas of one /proc/stat cpu line, the way procps top takes them: a
    field that steps backwards (iowait does, proc(5)) contributes 0, and the total
@@ -856,6 +863,47 @@ static void parse_meminfo(mem_t *M){
     if((p=strstr(buf,"Cached:")))       M->cached =strtoul(p+7,NULL,10);
     if((p=strstr(buf,"SwapTotal:")))    M->swtotal=strtoul(p+10,NULL,10);
     if((p=strstr(buf,"SwapFree:")))     M->swfree =strtoul(p+9,NULL,10);
+}
+
+/* The memory cgroup of pid: v2 ("0::<path>", memory.max/memory.current) or v1
+   ("N:memory:<path>", memory.limit_in_bytes/memory.usage_in_bytes).  In a container the
+   path seen in /proc/<pid>/cgroup may not exist under the mount (the container's own group
+   is the mount root), so the root is tried after the path.  "max" and the v1 no-limit
+   value read as none. */
+static double cg_num(const char *dir,const char *file){
+    char p[320],b[64]; snprintf(p,sizeof p,"%s/%s",dir,file);
+    if(read_file(p,b,sizeof b)<=0) return -2;             /* not there */
+    if(!strncmp(b,"max",3)) return -1;
+    double v=strtod(b,NULL); return v>=(double)(1ULL<<60) ? -1 : v;
+}
+static void parse_cgroup(mem_t *M,int pid){
+    M->cg_limit=-1; M->cg_usage=-1; M->cg_path[0]=0;
+    if(pid<0) return;
+    char f[64],buf[4096]; snprintf(f,sizeof f,"/proc/%d/cgroup",pid);
+    if(read_file(f,buf,sizeof buf)<=0) return;
+    char path[256]=""; int v2=0;
+    for(char *ln=buf;ln && *ln;){
+        char *nl=strchr(ln,'\n'); if(nl) *nl=0;
+        if(!strncmp(ln,"0::",3)){ if(!path[0]){ snprintf(path,sizeof path,"%.255s",ln+3); v2=1; } }
+        else { char *c=strchr(ln,':'); if(c && !strncmp(c,":memory:",8)){ snprintf(path,sizeof path,"%.255s",c+8); v2=0; } }
+        ln=nl?nl+1:NULL;
+    }
+    if(!path[0]) return;
+    snprintf(M->cg_path,sizeof M->cg_path,"%.95s",path);
+    const char *base = v2 ? "/sys/fs/cgroup" : "/sys/fs/cgroup/memory";
+    const char *lf = v2 ? "memory.max" : "memory.limit_in_bytes", *uf = v2 ? "memory.current" : "memory.usage_in_bytes";
+    char dir[600]; snprintf(dir,sizeof dir,"%s%s",base,strcmp(path,"/")?path:"");
+    double lim=cg_num(dir,lf), use=cg_num(dir,uf);
+    if(lim==-2){ lim=cg_num(base,lf); use=cg_num(base,uf); }   /* the mount root is this group */
+    if(lim==-2) return;
+    M->cg_limit=lim; M->cg_usage=use<0?-1:use;
+}
+static void parse_psi(mem_t *M){
+    M->psi_some10=-1; M->psi_full10=-1;
+    char b[512]; if(read_file("/proc/pressure/memory",b,sizeof b)<=0) return;
+    char *p;
+    if((p=strstr(b,"some avg10="))) M->psi_some10=strtod(p+11,NULL);
+    if((p=strstr(b,"full avg10="))) M->psi_full10=strtod(p+11,NULL);
 }
 
 /* diskstats: whole devices present in /sys/block only */
@@ -4130,6 +4178,7 @@ typedef struct {
     double rss_srv, rss_master, rss_pl, rss_broker, rss_cas;
     /* Capacity axis, read by plots B and D and by the verdict */
     double cap_iops, cap_await, cap_hit, cap_miss, cap_head;
+    double cg_pct, psi_full;     /* memory cgroup use over its limit (-1 none); PSI memory full avg10 (-1 not provided) */
     int    pg_ok;
     double pg_res_pct;          /* Resident over total, percent */
     double pg_dirty;            /* Dirty page count */
@@ -4185,6 +4234,8 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->absorb  = IO->absorb_ok ? IO->absorb*100.0 : 0.0;
     s->cpu     = IO->cpu_pct;
     s->ram     = (double)M->total*1024.0;
+    s->cg_pct  = (M->cg_limit>0 && M->cg_usage>=0) ? 100.0*M->cg_usage/M->cg_limit : -1;
+    s->psi_full= M->psi_full10;
     s->osused  = (double)(M->total-M->avail)*1024.0;
     s->cub     = P->rss_kb*1024.0 + T->master + T->broker + T->cas + T->pl;   /* RSS, as top */
     /* CPU and I/O extension, holding the dashboard's values in the dashboard's units. */
@@ -5328,6 +5379,14 @@ static void vd_host(char*o,size_t n,const char**col,int ncores){
         snprintf(o,n,g_ascii?"! device %.0f%% busy - host storage is the constraint (see panels 3/4 for this instance)"
                            :"⚠ 장치 %.0f%% — 호스트 스토리지가 제약 (이 인스턴스 몫은 3·4번 패널에서)",
                  b->devutil); return; }
+    if(b->cg_pct>=90){ *col=VD_WARN;
+        snprintf(o,n,g_ascii?"! memory cgroup at %.0f%% of its limit - the OOM boundary is this limit, not host RAM (CUBRID %.0f%% of RAM)"
+                           :"⚠ 메모리 cgroup 한도의 %.0f%% 사용 — OOM 기준은 호스트 RAM 이 아니라 이 한도 (CUBRID 는 RAM 의 %.0f%%)",
+                 b->cg_pct,cubpct); return; }
+    if(b->psi_full>=5){ *col=VD_NOTE;
+        snprintf(o,n,g_ascii?"! memory pressure: PSI full %.1f%% over 10s - tasks stalled on reclaim (host-wide)"
+                           :"⚠ 메모리 압박 — PSI full(10초) %.1f%%: 회수 대기로 멈춘 시간 (호스트 전체)",
+                 b->psi_full); return; }
     if(b->ram>0 && b->osused/b->ram>0.92){ *col=VD_NOTE;
         snprintf(o,n,g_ascii?"! host RAM %.0f%% used - little headroom left (CUBRID %.0f%%)"
                            :"⚠ 호스트 RAM %.0f%% 사용 — 여유가 적다 (CUBRID 는 %.0f%%)",
@@ -5788,9 +5847,12 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
     /* load is host-wide and includes I/O waiting, so it goes in the title rather than a
        column.  The right of the title is taken by column headings, so it follows the
        left title. */
-    { char ot[80];
-      snprintf(ot,sizeof ot,"%s · load %.1f %.1f %.1f",L("OS 컨텍스트"),
-               M->load1,M->load5,M->load15);
+    { char ot[160], cg[64]="", ps[40]="";
+      if(M->cg_limit>0) snprintf(cg,sizeof cg,g_ascii?" · cgroup %s/%s":" · cgroup 한도 %s/%s",
+                                 H(M->cg_usage>=0?M->cg_usage:0),H(M->cg_limit));
+      if(M->psi_full10>=0) snprintf(ps,sizeof ps," · PSI %.1f%%",M->psi_full10);
+      snprintf(ot,sizeof ot,"%s · load %.1f %.1f %.1f%s%s",L("OS 컨텍스트"),
+               M->load1,M->load5,M->load15,cg,ps);
       cv_box(0,y,W,oh,ot); }
     /* Same form as the region box: column headings on the border and values in columns.
        Cached, avail and swap are gathered on one row instead of flowing as sentences. */
@@ -6150,6 +6212,8 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
                                              :"Σ 합계 · PSS %s (공유 .so 배분 %s%s)",
                        H(pss), df>=0?"-":"+", H(df<0?-df:df));
           else snprintf(lab,sizeof lab,g_ascii?"Σ sum":"Σ 합계");
+          if(P->thp_kb>0 && P->rss_kb>0){ size_t l=strlen(lab);
+              snprintf(lab+l,sizeof lab-l,g_ascii?" · THP %.0f%%":" · THP %.0f%%",100.0*P->thp_kb/P->rss_kb); }
           cv_put(2,yy,cutf(lab,PCT_X-3),"38;5;244");
           cv_put(VAL_X,   yy,padf(sm>0?H(sm):"-",7,1),"244");
           cv_put(VAL_X+8, yy,"|","38;5;240");
@@ -6910,6 +6974,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,
     printf("os.ram_total_kb=%lu os.ram_avail_kb=%lu os.cached_kb=%lu "
            "os.swap_total_kb=%lu os.swap_free_kb=%lu\n",
            M->total,M->avail,M->cached,M->swtotal,M->swfree);
+    /* The target's memory cgroup (limit -1 = none) and the host's memory PSI (-1 = not provided) */
+    printf("os.cgroup_limit_bytes=%.0f os.cgroup_usage_bytes=%.0f os.cgroup_path=\"%s\" os.psi_mem_some10=%.2f os.psi_mem_full10=%.2f\n",
+           M->cg_limit,M->cg_usage,tq(M->cg_path),M->psi_some10,M->psi_full10);
     /* Host CPU, the same values as the TUI's OS box.  us/sy/wa are percentages
        averaged over all cores (top's %Cpu(s) convention) and busy_cores converts
        that to cores.  server.cpu_pct uses top's "one core = 100" convention, so
@@ -6966,9 +7033,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,
            "server.pss_kb=%lu server.swap_kb=%lu server.workers=%d"
            " server.minflt_per_s=%.0f server.majflt_per_s=%.0f"
            " server.cpu_pct=%.1f server.host_cores=%d server.start_ticks=%llu"
-           " server.smaps_age_s=%.1f server.smaps_ms=%.1f\n",
+           " server.smaps_age_s=%.1f server.smaps_ms=%.1f server.thp_kb=%lu\n",
            tq(ds),P->pid,P->vsize_kb,P->rss_kb,P->pss_kb,P->swap_kb,P->nthreads,
-           minflt_ps,majflt_ps,cpu_pct,ncpu,g_track_start,P->smaps_age_s,P->smaps_ms); }
+           minflt_ps,majflt_ps,cpu_pct,ncpu,g_track_start,P->smaps_age_s,P->smaps_ms,P->thp_kb); }
     for(int i=0;i<NSR;i++){
         srg_t *r=&SR[i];
         /* Strip spaces and parentheses from keys so a key=value parser does not break */
@@ -7344,12 +7411,16 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     M->cpu_wa=rp_num(t,"os.cpu_wa_pct",0);
     M->load1 =rp_num(t,"os.load1",0); M->load5=rp_num(t,"os.load5",0);
     M->load15=rp_num(t,"os.load15",0);
+    M->cg_limit=rp_num(t,"os.cgroup_limit_bytes",-1); M->cg_usage=rp_num(t,"os.cgroup_usage_bytes",-1);
+    rp_str(t,"os.cgroup_path",M->cg_path,sizeof M->cg_path);
+    M->psi_some10=rp_num(t,"os.psi_mem_some10",-1); M->psi_full10=rp_num(t,"os.psi_mem_full10",-1);
     M->core_max=rp_num(t,"os.core_max_pct",0);
 
     P->pid     =(int)rp_num(t,"server.pid",-1);
     g_seg_gen  =(unsigned)rp_num(t,"collect.segment",0);              /* the history follows the recorded segments */
     g_track_start=(unsigned long long)rp_num(t,"server.start_ticks",0);
     P->smaps_age_s=rp_num(t,"server.smaps_age_s",0); P->smaps_ms=rp_num(t,"server.smaps_ms",0);
+    P->thp_kb=(unsigned long)rp_num(t,"server.thp_kb",0);
     P->rss_kb  =(unsigned long)rp_num(t,"server.rss_kb",0);
     P->pss_kb  =(unsigned long)rp_num(t,"server.pss_kb",0);
     P->vsize_kb=(unsigned long)rp_num(t,"server.mapped_kb",0);
@@ -7890,7 +7961,7 @@ again:
         if(g_tty_fd!=STDOUT_FILENO){ printf("\033[H\033[2K%s",g_ascii?"resumed: measuring a new window...":"재개: 새 측정 구간 수집 중..."); fflush(stdout); }
         goto again;
     }
-    parse_meminfo(M);
+    parse_meminfo(M); parse_cgroup(M,P->pid); parse_psi(M);
     parse_hostcpu(M);                  /* Host CPU and load; a delta, so called every frame */
     /* Refresh the instance summary every frame (one rollup per process, under 1ms).
        The current instance was already measured precisely this frame, so that value

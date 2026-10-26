@@ -243,6 +243,9 @@ cub_volmap 페이지 박스의 `buf:DIRTY unflushed / flushed` 는 마지막 두
 | `cap.buffer_hit_pct` | perfmon: `1 − ioreads/fetches`. turnover: `100 − 회전율` (성격이 다르므로 출처를 반드시 함께 읽는다) |
 | `cap.turnover_pct` | 관측창에 **새로 들어온** 페이지 ÷ 상주 = 버퍼 교체율 |
 | `cap.miss_pages_per_s` | 초당 적재 페이지 = 미스 |
+| `os.cgroup_limit_bytes` / `os.cgroup_usage_bytes` / `os.cgroup_path` | 대상 서버의 메모리 cgroup 한도·사용량·경로(v2 `memory.max`/`current`, v1 `limit_in_bytes`/`usage_in_bytes`). 한도 -1 = 없음. 컨테이너·systemd 슬라이스에서 OOM 기준은 호스트 RAM 이 아니라 이 한도다 |
+| `os.psi_mem_some10` / `os.psi_mem_full10` | `/proc/pressure/memory` 의 10초 평균(%). -1 = 커널이 제공하지 않음(4.20 미만 또는 psi=0) |
+| `server.thp_kb` | 대상 서버 메모리 중 투명 거대 페이지(AnonHugePages)에 올라간 양. smaps 를 읽을 때 갱신 |
 | `server.smaps_age_s` / `server.smaps_ms` | 영역별 상주·PSS 를 마지막으로 읽은 뒤 지난 초 / 그 읽기에 걸린 ms. smaps 는 소요 시간의 100배 주기로만 읽는다(limitations 침습도 표) |
 | `cap.miss_source` | `scan`(BCB 스냅샷의 페이지 집합 차) / `perfmon`(스캔 안 한 대형 버퍼: 엔진 ioread 카운터 초당 델타, watcher 가 있고 창 안에 fetch 가 있을 때만) |
 | `cap.readmit_pct` | 적재분 중 **최근 nbuf건의 내보내기 안에서 빠졌다 다시 들어온** 비율((volid, pageid) 정확 집합으로 비교). 정확한 LRU 에서 이 페이지들은 버퍼가 2배였다면 상주했을 것이므로 **2배 증설로 줄어드는 읽기의 추정치(LRU 가정)** 다 — 하한이 아니다(중간점 삽입·프레임 안 적재·앨리어싱은 views.md 3번 패널 절). 30% 이상 = 작업집합 > 버퍼(증설 근거). 낮은 값은 재사용 거리가 버퍼 밖이라는 뜻이며, 스캔인지 버퍼의 수 배인 작업집합인지는 가르지 않는다 |

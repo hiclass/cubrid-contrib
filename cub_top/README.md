@@ -224,7 +224,7 @@ debug 로 빌드하고 그 DWARF 에서 뽑는다. 구조체 오프셋은 컴파
 ## 검증
 
 ```sh
-for f in tools/check-*.sh; do sh "$f"; done   # 회귀 36종
+for f in tools/check-*.sh; do sh "$f"; done   # 회귀 37종
 sh tools/test-guard.sh                        # 음성 테스트(오프셋 고의 훼손)
 ```
 
@@ -241,6 +241,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-libpath.sh` | maps 의 라이브러리 경로는 줄의 나머지 전체(공백 든 설치 경로) · 교체돼 "(deleted)" 인데 map_files 를 못 열면 방법 B 거부 · map_files 가 열리면 실행 중인 바이트를 읽음 |
 | `check-samedb.sh` | 같은 DB 이름이 두 계정에서 돌 때: 계정별로 구분, PL 은 자기 계정 서버에, 시작 시 실행 계정 우선, 보던 서버가 내려가도 다른 계정의 같은 이름 DB 로 넘어가지 않음 |
 | `check-adaptive.sh` | smaps 는 비용 기준 주기로만 읽음: 변화 없으면 영역 나이 증가, 상주 증가는 status 로 매 프레임 반영, 새 매핑이 생기면 즉시 재읽기 · /proc 전수 순회 2초 주기, 사이에 뜬 서버는 한 주기 안에·끝난 서버는 다음 프레임에 반영 |
+| `check-hostmem.sh` | 가짜 /proc·/sys 로: cgroup v2 `max`/한도 1GiB·v1 컨테이너(마운트 루트 폴백)·무제한 값, PSI 유무, smaps AnonHugePages 합산, 재생 복원 · 호스트 판정이 cgroup 한도 90% 를 RAM 보다 먼저 봄 |
 | `check-ustop.sh` | 사용자 정지(Ctrl-Z·일시정지·도움말) 동안에만 CPU 를 쓰는 대리 서버·브로커로: 정지 구간이 섞인 프레임 0·정지 중 녹화 0·정지마다 `collect.segment` +1·재생 히스토리가 구간마다 새로 시작 · pid 재사용(ns_last_pid): 다른 DB 서버를 옛 이름으로 보이지 않고, 같은 DB 가 같은 pid 로 재기동하면 새 구간 |
 | `check-rectty.sh` | `--record` 가 프레임을 렌더링하는 도중의 Ctrl-Z·fg·충돌(SIGSEGV): 복원·재진입 시퀀스가 녹화 프레임에 들어가지 않고(0건) 터미널에 도달 |
 | `check-tui.sh` | 화살표·페이지 키는 한 키로, 모르는 ESC 접두는 친 그대로 · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort, 기본 동작이 종료인 SIGUSR1·USR2·ALRM·XCPU·PIPE 에서 터미널 복원 |
