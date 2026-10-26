@@ -8310,6 +8310,10 @@ again:
             break;
         }
     }
+    /* A stop that landed after the window's reads but before here - during the tier walk
+       or the scans - would still put the stopped time into the tier CPU deltas, which are
+       taken in the walk: the frame is measured again from the resume */
+    if(g_ustop_n!=g_ustop_seen){ seg_break(); goto again; }
     /* ---- Capacity axis collection ----
        Collection for interpretation must not affect operation.  It measures under
        1ms, but slow storage or a huge buffer could stretch it, so a 0.5s budget
