@@ -56,9 +56,9 @@ def pump(sec):
         if r:
             try: os.read(fd,65536)
             except OSError: return
-def burn(sec):
-    os.kill(sp,signal.SIGUSR1); os.kill(bp,signal.SIGUSR1); time.sleep(sec)
-    os.kill(sp,signal.SIGUSR1); os.kill(bp,signal.SIGUSR1); time.sleep(0.3)
+def burn(sec):   # keep draining the pty meanwhile: paused/help screens still redraw, and a full pty blocks cub_top
+    os.kill(sp,signal.SIGUSR1); os.kill(bp,signal.SIGUSR1); pump(sec)
+    os.kill(sp,signal.SIGUSR1); os.kill(bp,signal.SIGUSR1); pump(0.3)
 marks=[]
 try:
     fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',50,160,0,0))
