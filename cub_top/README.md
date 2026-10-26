@@ -62,6 +62,7 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 ```sh
 ./cub_top -t                   # 드릴다운 트리 (터미널용, 1회 출력)
 ./cub_top -d                   # key=value 덤프 (모니터링 연동)
+./cub_top --stream             # 화면 없이 프레임을 JSONL 로 계속 내보냄 (수집기 연동, 상주)
 ./cub_top --dump-json          # -d 와 같은 내용·같은 순서를 JSON 으로
 ./cub_top -b                   # btop형 대시보드 (라이브, -i 와 같음)
 ./cub_top -p                   # 시계열 플롯 (4패널, p 로 대시보드와 전환)
@@ -131,6 +132,7 @@ sh tools/build.sh legacy    # 구 시스템(CentOS 6 등) — 대상에서 직�
 | `--interval S` | 샘플 창 (0.05~3600초, 기본 0.5초). 범위 밖이면 종료 코드 2 |
 | `--ascii` / `--ko` | 라벨 영문/한글 강제 (자동 판정이 틀렸을 때) |
 | `--record F` | 라이브 프레임을 새 파일 F(0600)로 기록 (JSONL). 라이브(`-b`/`-p`) 전용이며 `--replay` 와 함께 쓸 수 없다(녹화 파일 보호). F 가 이미 있거나 심볼릭 링크면 거부한다 |
+| `--stream` | 화면 없이 `--interval` 주기로 프레임을 JSONL 로 표준 출력에 계속 내보낸다(녹화 형식과 같은 키). 수집기 연동용: 프로세스 하나가 상주하므로 `-d` 를 주기 실행할 때처럼 매번 paramdump 접속을 하지 않는다. INT/TERM 또는 파이프가 닫히면 0 으로 끝난다 |
 | `--record-overwrite` | `--record` 의 기존 파일을 덮어쓴다 — 이 계정 소유이고 다른 하드링크가 없는 일반 파일일 때만(심볼릭 링크는 따라가지 않고, FIFO 는 막히지 않고 거부) |
 | `--replay F` | 기록을 재생. **서버도 CUBRID 설치본도 필요 없다** |
 | `--replay-speed N` | 재생 배속 (1=실측 간격, 0=최대속도) |
@@ -224,7 +226,7 @@ debug 로 빌드하고 그 DWARF 에서 뽑는다. 구조체 오프셋은 컴파
 ## 검증
 
 ```sh
-for f in tools/check-*.sh; do sh "$f"; done   # 회귀 40종
+for f in tools/check-*.sh; do sh "$f"; done   # 회귀 41종
 sh tools/test-guard.sh                        # 음성 테스트(오프셋 고의 훼손)
 ```
 
@@ -245,6 +247,7 @@ sh tools/test-guard.sh                        # 음성 테스트(오프셋 고�
 | `check-largebuf.sh` | 가짜 풀 30만 슬롯: 요청 없는 대형 버퍼는 첫 프레임 1회 통과 후 주기까지 마지막 통과 유지, 슬롯 표본이 무작위 10% 교체를 10%로 추정, 다음 통과에서 회전율 10%·재적재 0%→돌아온 페이지 100%, `d` 로 매 프레임 통과 |
 | `check-volcache.sh` | 대리 서버가 연 `<db>`·`<db>_lgat` 파일로: 한 파일은 캐시에, 다른 파일은 DONTNEED 로 내보낸 뒤 상주율이 약 50% · 두 번째 프레임은 주기 안이라 재측정 없이 나이만 증가 · fd 중복(같은 파일 두 번 open)은 한 번만 · 다른 계정 서버는 미측정 사유 |
 | `check-longwin.sh` | 1분 평균 링: 180초 표본에서 2분 닫힘, 평균값 정확(미측정 -1 프레임 제외, 한 분 내내 미측정이면 -1), 뷰 1=최근 60분·2=전체, 세그먼트 변경이 열린 분을 닫음, 플롯이 링을 바꿔 읽고 라이브 링을 원상 복구 |
+| `check-stream.sh` | `--stream`: SIGTERM 에 0 으로 종료, 매 줄 JSON·키 집합 일정·이스케이프 없음, `--record` 와 키 동일, 소비자가 파이프를 닫으면 바로 0 으로 종료, `--record`·`-d`·`--replay` 와의 조합 거부 |
 | `check-ustop.sh` | 사용자 정지(Ctrl-Z·일시정지·도움말) 동안에만 CPU 를 쓰는 대리 서버·브로커로: 정지 구간이 섞인 프레임 0·정지 중 녹화 0·정지마다 `collect.segment` +1·재생 히스토리가 구간마다 새로 시작 · pid 재사용(ns_last_pid): 다른 DB 서버를 옛 이름으로 보이지 않고, 같은 DB 가 같은 pid 로 재기동하면 새 구간 |
 | `check-rectty.sh` | `--record` 가 프레임을 렌더링하는 도중의 Ctrl-Z·fg·충돌(SIGSEGV): 복원·재진입 시퀀스가 녹화 프레임에 들어가지 않고(0건) 터미널에 도달 |
 | `check-tui.sh` | 화살표·페이지 키는 한 키로, 모르는 ESC 접두는 친 그대로 · 60칸/10줄 미만은 안내만 · Ctrl-Z 중 터미널 원상태·fg 뒤 raw 복귀와 화면 지움 · SIGHUP·SIGQUIT·abort, 기본 동작이 종료인 SIGUSR1·USR2·ALRM·XCPU·PIPE 에서 터미널 복원 |

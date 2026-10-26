@@ -3135,7 +3135,9 @@ static int cap_turnover_from_dump(void);   /* Must be read as the baseline befor
 /* Output files a user names.  Never through a symlink, never into someone else's file: run as
    root, following one would let any account that can plant a name truncate or write a file. */
 static int g_rec_overwrite=0;      /* --record-overwrite: replace an existing recording of ours */
+static int g_stream=0;             /* --stream: the live loop without a terminal, frames as JSONL on stdout */
 static FILE *out_open(const char *path,int overwrite,char *why,size_t wn){
+    if(!strcmp(path,"-")) return stdout;          /* --stream: the frames go to the consumer */
     /* O_NONBLOCK: a FIFO planted at the path would block the open; it is cleared after fstat */
     int fd=open(path,O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK|(overwrite?0:O_EXCL),0600);
     if(fd<0){
@@ -7491,7 +7493,7 @@ static double rp_time(const char *txt){
    but a short or empty file would be trusted. */
 static void rec_fail(const char *what,int e){
     if(!g_rec_err[0]) snprintf(g_rec_err,sizeof g_rec_err,"%s: %s",what,strerror(e?e:EIO));
-    if(RPR.f){ fclose(RPR.f); RPR.f=NULL; }
+    if(RPR.f){ if(RPR.f!=stdout) fclose(RPR.f); RPR.f=NULL; }
     g_rec_path=NULL;
 }
 /* The frame is rendered in memory (memfd, else a temporary file) - not on a /tmp that may be full */
@@ -8391,6 +8393,7 @@ static const opt_t OPTS[]={
  {"-p, --plot",  "", "시계열 플롯 (라이브, p 키로 대시보드와 상호 전환)"},
  {"--interval",  "S","샘플 창(초, 0.05~3600, 기본 0.5)"},
  {"--record", "F", "라이브(-b/-p) 프레임을 새 파일 F 로 기록 (JSONL — -d/--dump-json 과 같은 키, --replay 와 병용 불가). 이미 있거나 심볼릭 링크면 거부"},
+ {"--stream", "", "화면 없이 --interval 주기로 프레임을 JSONL 로 표준 출력에 계속 내보냄 (수집기 연동; INT/TERM 또는 파이프 종료로 끝남)"},
  {"--record-overwrite","","--record 의 기존 파일을 덮어씀 (이 계정 소유의 일반 파일일 때만)"},
  {"--replay", "F", "기록 파일 F 를 재생 (서버·/proc 불필요, -b/-p 키 그대로)"},
  {"--replay-speed", "N", "재생 배속 (1=실측 간격, 0=최대속도, 기본 1)"},
@@ -9063,6 +9066,7 @@ int main(int argc,char **argv){
         else if(!strcmp(argv[i],"-p")||!strcmp(argv[i],"--plot")){ live=1; view0=1; }
         else if(!strcmp(argv[i],"--record")&&i+1<argc) g_rec_path=argv[++i];
         else if(!strcmp(argv[i],"--record-overwrite")) g_rec_overwrite=1;
+        else if(!strcmp(argv[i],"--stream")){ live=1; g_stream=1; }
         else if(!strcmp(argv[i],"--replay")&&i+1<argc) g_rep_path=argv[++i];
         else if(!strcmp(argv[i],"--replay-speed")&&i+1<argc){ if(!opt_num(argv[i],argv[i+1],0,1e6,&g_rep_speed)) return 2; i++; speed_set=1; }
         else if(!strcmp(argv[i],"--dump-hist")) dump_hist=1;
@@ -9100,6 +9104,9 @@ int main(int argc,char **argv){
         fprintf(stderr,"cub_top: --record 는 라이브 모드(-b 또는 -p)에서만 기록합니다.\n");
         return 2;
     }
+    if(g_stream && g_rec_path){
+        fprintf(stderr,g_ascii?"cub_top: --stream writes the frames to stdout; --record is not combined with it\n":"cub_top: --stream 은 프레임을 표준 출력에 내보내므로 --record 와 함께 쓰지 않습니다\n");
+        return 2; }
     /* One output mode per run: the tree, the dump and the live screens all write to stdout. */
     if(tree + terse + live > 1){
         fprintf(stderr,"cub_top: 출력 모드는 하나만 지정합니다 (-t · -d/--dump-json · -b/-p)\n");
@@ -9117,7 +9124,7 @@ int main(int argc,char **argv){
         #define NOREP(c_,s_) do{ if(c_) nl+=(size_t)snprintf(no+nl,nl<sizeof no?sizeof no-nl:0,"%s%s",nl?", ":"",s_); }while(0)
         NOREP(want_db,"<db>"); NOREP(interval_set,"--interval"); NOREP(g_bcb_dump[0],"--bcb-dump");
         NOREP(g_offs_file[0],"--offsets");
-        NOREP(g_pg_detail,"--pgbuf-detail"); NOREP(dump_hist,"--dump-hist"); NOREP(g_rec_overwrite,"--record-overwrite");
+        NOREP(g_pg_detail,"--pgbuf-detail"); NOREP(dump_hist,"--dump-hist"); NOREP(g_rec_overwrite,"--record-overwrite"); NOREP(g_stream,"--stream");
         #undef NOREP
         if(no[0]){
             fprintf(stderr,g_ascii?"cub_top: --replay shows the recording as recorded - not applicable: %s\n"
@@ -9215,7 +9222,11 @@ int main(int argc,char **argv){
         /* ---- Live dashboard ---- */
         int paused=0,help=0,view=view0;
         g_pd_idle=&pd;
-        tui_enter();
+        if(g_stream){
+            /* No terminal: the frames go to stdout as the recording format, one per interval,
+               until INT/TERM/HUP or the consumer closing the pipe (EPIPE ends the run quietly) */
+            g_rec_path="-"; signal(SIGINT,on_sig); signal(SIGTERM,on_sig); signal(SIGHUP,on_sig); signal(SIGPIPE,on_sig);
+        } else tui_enter();
         while(!g_stop){
             if(help){
                 /* The help does not fit one screen, so it is collected as lines and handed to the pager,
@@ -9236,6 +9247,7 @@ int main(int argc,char **argv){
                 localtime_r(&rt,&tmv); strftime(rts,sizeof rts,"%Y-%m-%d %H:%M:%S",&tmv);
                 g_ts_frac=fr_t; rp_record(&P,&M,&T,&IO,rts,(long)rt); g_ts_frac=-1;
             }
+            if(g_stream){ if(g_rec_err[0]) break; work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,&pd); continue; }
             if(view) render_plot(&P,&M,&T,&IO,paused);
             else     render_dash(&P,&M,&T,&IO,paused,work_ms);
             /* Key handling */
@@ -9275,13 +9287,14 @@ int main(int argc,char **argv){
             if(paused){ pd_idle_tick(); usleep(150000); continue; }
             work_ms=sample_once(&P,&P0,&M,&T,&IO,interval,&pd);
         }
-        tui_leave();
+        if(!g_stream) tui_leave();
         paramdump_abort(&pd);          /* a request still waiting must not outlive the run */
         if(g_mem_fd>=0) close(g_mem_fd);
         if(RPR.f){ FILE *rf=RPR.f; int e=0; RPR.f=NULL;
                    if(fflush(rf)!=0 || ferror(rf)) e=errno?errno:EIO;
-                   if(fclose(rf)!=0 && !e) e=errno?errno:EIO;
+                   if(rf!=stdout && fclose(rf)!=0 && !e) e=errno?errno:EIO;
                    if(e) rec_fail(g_ascii?"closing":"닫기",e); }
+        if(g_stream && g_rec_err[0] && strstr(g_rec_err,strerror(EPIPE))) return 0;   /* the consumer went away */
         if(g_rec_err[0]){
             fprintf(stderr,g_ascii?"cub_top: --record stopped after %d frame(s) - %s\n"
                                   :"cub_top: --record 가 %d 프레임 뒤 중단됨 — %s\n",RPR.n,g_rec_err);
