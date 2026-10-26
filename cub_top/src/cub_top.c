@@ -27,6 +27,7 @@
  *     kernel does not provide it.
  */
 #define _GNU_SOURCE
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -4255,7 +4256,40 @@ typedef struct {
     int    cap_mperf;     /* Admissions came from the engine's ioread counter (a large buffer not scanned) */
     char hh[12];
 } hsam_t;
-static hsam_t HS[HIST_MAX]; static int HN=0, HCAP=HIST_MAX;
+static hsam_t HS_live[HIST_MAX]; static hsam_t *HS=HS_live; static int HN=0, HCAP=HIST_MAX;
+/* Minute averages for the long views (plot key w): every double of the sample averaged over
+   the frames of one wall-clock minute - a negative value means "not measured" in every
+   field and is left out, so a minute with no measurement stays -1 - the ints and the label
+   from the minute's last frame; HM_MAX minutes = 24 hours.  A segment change closes the
+   minute.  The same fields as HS, so the plots and verdicts read a long view unchanged. */
+#define HM_MAX 1440
+static hsam_t HMR[HM_MAX]; static int HMN=0;
+static const size_t HS_DBL[]={offsetof(hsam_t,t),offsetof(hsam_t,srv),offsetof(hsam_t,dyn),offsetof(hsam_t,rbps),offsetof(hsam_t,wbps),offsetof(hsam_t,riops),offsetof(hsam_t,majflt),offsetof(hsam_t,srv_rss),offsetof(hsam_t,db),offsetof(hsam_t,lg),offsetof(hsam_t,etc),offsetof(hsam_t,vsz),offsetof(hsam_t,rss),offsetof(hsam_t,dynmap),offsetof(hsam_t,minflt),offsetof(hsam_t,devutil),offsetof(hsam_t,absorb),offsetof(hsam_t,osused),offsetof(hsam_t,cub),offsetof(hsam_t,ram),offsetof(hsam_t,dbdev_util),offsetof(hsam_t,cpu),offsetof(hsam_t,busy_cores),offsetof(hsam_t,sat_cores),offsetof(hsam_t,cpu_wa),offsetof(hsam_t,load1),offsetof(hsam_t,d_thr),offsetof(hsam_t,blkpct),offsetof(hsam_t,wiops),offsetof(hsam_t,c_master),offsetof(hsam_t,c_pl),offsetof(hsam_t,c_broker),offsetof(hsam_t,c_cas),offsetof(hsam_t,rss_srv),offsetof(hsam_t,rss_master),offsetof(hsam_t,rss_pl),offsetof(hsam_t,rss_broker),offsetof(hsam_t,rss_cas),offsetof(hsam_t,cap_iops),offsetof(hsam_t,cap_await),offsetof(hsam_t,cap_hit),offsetof(hsam_t,cap_miss),offsetof(hsam_t,cap_head),offsetof(hsam_t,cg_pct),offsetof(hsam_t,psi_full),offsetof(hsam_t,vc_pct),offsetof(hsam_t,pg_res_pct),offsetof(hsam_t,pg_dirty),offsetof(hsam_t,pg_cold_pct),offsetof(hsam_t,pg_span),offsetof(hsam_t,pg_lag),offsetof(hsam_t,heapb),offsetof(hsam_t,cap_readmit),offsetof(hsam_t,cap_admfrac)};
+#define HS_NDBL (sizeof HS_DBL/sizeof HS_DBL[0])
+static hsam_t HM_acc, HM_last; static int HM_n[HS_NDBL]; static int HM_cnt=0; static long HM_min=-1;
+static void hm_close(void){
+    if(HM_cnt<=0) return;
+    for(size_t k=0;k<HS_NDBL;k++){ double *d=(double*)((char*)&HM_acc+HS_DBL[k]); *d = HM_n[k]>0 ? *d/HM_n[k] : -1; }
+    HM_acc.pg_ok=HM_last.pg_ok; HM_acc.absorb_ok=HM_last.absorb_ok; HM_acc.cap_mperf=HM_last.cap_mperf;
+    memcpy(HM_acc.hh,HM_last.hh,sizeof HM_acc.hh);
+    if(HMN>=HM_MAX){ memmove(HMR,HMR+1,sizeof(hsam_t)*(HM_MAX-1)); HMN=HM_MAX-1; }
+    HMR[HMN++]=HM_acc; HM_cnt=0; HM_min=-1;
+}
+static void hm_add(const hsam_t *s){
+    long m=(long)(s->t/60.0);
+    if(HM_cnt>0 && m!=HM_min) hm_close();
+    if(HM_cnt==0){ memset(&HM_acc,0,sizeof HM_acc); memset(HM_n,0,sizeof HM_n); HM_min=m; }
+    for(size_t k=0;k<HS_NDBL;k++){ double v=*(const double*)((const char*)s+HS_DBL[k]);
+        if(v>=0){ *(double*)((char*)&HM_acc+HS_DBL[k])+=v; HM_n[k]++; } }
+    HM_last=*s; HM_cnt++;
+}
+/* The window the plots draw: 0 the live ring, 1 the last hour of minutes, 2 all minutes */
+static int g_plot_win=0;
+static int hm_view(int win,hsam_t **p,int *n){
+    if(!win || HMN<=0){ *p=NULL; *n=0; return 0; }
+    int take = win==1 ? (HMN<60?HMN:60) : HMN;
+    *p=HMR+(HMN-take); *n=take; return 1;
+}
 
 /* One place for the value sources.  Region values go through the sr_*() name lookups without exception; never by index. */
 /* The volumes' page-cache residency, measured by vol_cache_scan (defined with the collection) */
@@ -4267,7 +4301,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
        samples would be compared with the new process (a "server -X GB" drop that is only a
        restart, a flush minimum and plots mixing two processes).  Live and in a replay alike. */
     if(P->pid!=g_hist_pid || g_inst_gen!=g_hist_gen || g_seg_gen!=g_hist_seg || g_track_start!=g_hist_start){
-        HN=0; g_hist_pid=P->pid; g_hist_gen=g_inst_gen; g_hist_seg=g_seg_gen; g_hist_start=g_track_start; }
+        HN=0; g_hist_pid=P->pid; g_hist_gen=g_inst_gen; g_hist_seg=g_seg_gen; g_hist_start=g_track_start; hm_close(); }
     if(HN>=HCAP){ memmove(HS,HS+1,sizeof(hsam_t)*(HCAP-1)); HN=HCAP-1; }
     hsam_t*s=&HS[HN++];
     memset(s,0,sizeof *s);
@@ -4337,6 +4371,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     }
     time_t tt=(time_t)t; struct tm tmv; rep_localtime(tt,&tmv);
     strftime(s->hh,sizeof s->hh,"%H:%M:%S",&tmv);        /* 24-hour clock; the date is in the top box */
+    hm_add(s);
 }
 /* Dump the last history sample to stderr, leaving the terse stdout contract clean.
    tools/check-hist.sh compares this against the terse keys to catch numbers that
@@ -6898,7 +6933,19 @@ static int tui_too_small(const char *what,const char *keys_en,const char *keys_k
     fflush(stdout);
     return 1;
 }
+static void render_plot_in(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused);
+/* A long view (key w) draws the minute ring in place of the live ring for this screen only:
+   the plots and verdicts read HS/HN and nothing else */
 static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
+    hsam_t *lp; int ln;
+    if(hm_view(g_plot_win,&lp,&ln)){
+        hsam_t *shs=HS; int shn=HN, scap=HCAP;
+        HS=lp; HN=ln; HCAP=ln;
+        render_plot_in(P,M,T,IO,paused);
+        HS=shs; HN=shn; HCAP=scap;
+    } else render_plot_in(P,M,T,IO,paused);
+}
+static void render_plot_in(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
     (void)IO; (void)T;
     int raw=term_cols_raw();
     if(tui_too_small(g_ascii?"plot view":"플롯 화면","[p] dashboard  [q] quit","[p] 대시보드  [q] 종료")) return;
@@ -6955,9 +7002,12 @@ static void render_plot(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused){
     else        snprintf(wtxt,sizeof wtxt,"%.0fs",win);
     /* These two strings become panel 1's title and right-hand badge; there is no separate
        header box, so its rows go to the chart. */
-    if(g_ascii) snprintf(t1,sizeof t1,"1 host · db=%.32s · window %s (%d samples, %.1fs)",
+    if(g_plot_win && HS!=HS_live){
+        if(g_ascii) snprintf(t1,sizeof t1,"1 host · db=%.32s · window %s (%d minute means) [w]",P->db[0]?P->db:"-",wtxt,HN);
+        else        snprintf(t1,sizeof t1,"1 호스트 · db=%.32s · 관측창 %s (1분 평균 %d개) [w]",P->db[0]?P->db:"-",wtxt,HN); }
+    else if(g_ascii) snprintf(t1,sizeof t1,"1 host · db=%.32s · window %s (%d samples, %.1fs) [w]",
                          P->db[0]?P->db:"-",wtxt,HN,g_interval);
-    else        snprintf(t1,sizeof t1,"1 호스트 · db=%.32s · 관측창 %s (샘플 %d개, 간격 %.1f초)",
+    else        snprintf(t1,sizeof t1,"1 호스트 · db=%.32s · 관측창 %s (샘플 %d개, 간격 %.1f초) [w]",
                          P->db[0]?P->db:"-",wtxt,HN,g_interval);   /* The pid is on the dashboard */
     if(g_ninst>1) snprintf(t2,sizeof t2,"%d/%d %s · %s  %s",g_cur+1,g_ninst,
                            g_ascii?"inst":"인스턴스",g_ascii?"host-wide":"호스트 전체",
@@ -7929,6 +7979,7 @@ static int rp_run(const char *path,int view0,int terse,int jsonout){
             else if(k=='p'||k=='g') view=!view;
             else if(k=='l') g_ascii=!g_ascii;
             else if(k>='1'&&k<='4'){ if(view) g_plot_zoom=(k=='1'||g_plot_zoom==k-'0')?0:k-'0'; }
+            else if(k=='w'){ if(view) g_plot_win=(g_plot_win+1)%3; }
             else if(k=='.') step=1;                       /* step forward while paused */
             else if(k==','){ if(i>0){ i--; rebuild=1; step=-1; } }   /* step back: history is rebuilt */
         }
@@ -8933,6 +8984,7 @@ static void help_keys_plot(void){
 "    1             기본 화면(4패널)으로 복귀. 1번은 확대 대상이 아니다\n"
 "                    (줌에서도 1번은 항상 위에 남으므로 따로 크게 볼 이유가 없다)\n"
 "                    확대한 키를 다시 눌러도 복귀한다\n"
+"    w             관측창 전환: 라이브(표본 그대로) → 1시간(1분 평균) → 24시간(1분 평균). 판정문의 창 길이도 따라간다\n"
 "    <  >          인스턴스(DB) 이동 — 2~4번이 그 DB 로 바뀌고 히스토리도 새로 쌓는다\n"
 "    p             대시보드 화면으로 (지금 값의 분해를 보러)\n"
 "    space         일시정지 / 재개 — 멈춰 두고 구간을 비교할 때\n"
@@ -9193,6 +9245,7 @@ int main(int argc,char **argv){
                     if(view) g_plot_zoom = (k=='1' || g_plot_zoom==k-'0') ? 0 : k-'0';
                 }
                 else if(k==' '){ paused=!paused; if(!paused) g_ustop_n++; }   /* resuming starts a new segment */
+                else if(k=='w'){ if(view) g_plot_win=(g_plot_win+1)%3; }      /* live / last hour / 24 h of minute means */
                 else if(k=='d') g_pg_detail=!g_pg_detail;   /* Page-level scan of a large buffer, every frame, on request */
                 else if(k=='l') g_ascii=!g_ascii;   /* Switch labels between Korean and English, for a tty without Hangul support */
                 else if(k=='p'||k=='g'){ view=!view;   /* Dashboard and time-series plots */
