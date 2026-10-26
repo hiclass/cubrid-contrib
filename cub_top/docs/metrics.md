@@ -246,6 +246,7 @@ cub_volmap 페이지 박스의 `buf:DIRTY unflushed / flushed` 는 마지막 두
 | `os.cgroup_limit_bytes` / `os.cgroup_usage_bytes` / `os.cgroup_path` | 대상 서버의 메모리 cgroup 한도·사용량·경로(v2 `memory.max`/`current`, v1 `limit_in_bytes`/`usage_in_bytes`). 한도 -1 = 없음. 컨테이너·systemd 슬라이스에서 OOM 기준은 호스트 RAM 이 아니라 이 한도다 |
 | `os.psi_mem_some10` / `os.psi_mem_full10` | `/proc/pressure/memory` 의 10초 평균(%). -1 = 커널이 제공하지 않음(4.20 미만 또는 psi=0) |
 | `server.thp_kb` | 대상 서버 메모리 중 투명 거대 페이지(AnonHugePages)에 올라간 양. smaps 를 읽을 때 갱신 |
+| `volcache.bytes` / `volcache.resident_bytes` / `volcache.resident_pct` / `volcache.files` / `volcache.age_s` / `volcache.reason` | DB 볼륨·로그 파일(서버 fd 표의 `<db>`, `<db>_*`, 없으면 databases.txt 디렉터리)이 OS 페이지캐시에 올라 있는 비율. 읽기 전용 mmap 위에서 `mincore` 만 호출(페이지 폴트·I/O 없음, GB당 약 7ms)하고 소요 시간의 100배 주기(최소 10초)로 갱신하며 `age_s` 가 나이다. bytes 0 = 미측정(`reason`) |
 | `server.smaps_age_s` / `server.smaps_ms` | 영역별 상주·PSS 를 마지막으로 읽은 뒤 지난 초 / 그 읽기에 걸린 ms. smaps 는 소요 시간의 100배 주기로만 읽는다(limitations 침습도 표) |
 | `cap.miss_source` | `scan`(BCB 전수 통과의 페이지 집합 차) / `sample`(대형 버퍼의 통과 사이: 슬롯 1/64 표본에서 바뀐 비율 × 슬롯 수) / `perfmon`(표본도 없을 때 엔진 ioread 카운터 초당 델타, watcher 가 있고 창 안에 fetch 가 있을 때만) |
 | `pgbuf.scan_age_s` / `pgbuf.sample_miss_per_s` | 대형 버퍼: 마지막 전수 통과 뒤 지난 초(0 = 이 프레임이 통과) / 이 프레임 슬롯 표본의 초당 적재 추정(-1 없음) |

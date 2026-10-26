@@ -3885,7 +3885,7 @@ static const char* L(const char*ko){
       {"포화=95% 이상","saturated = >=95%"},
       {"판정문 근거","verdict evidence"},
       {"server 는 위 활동 패널","server: activity panel above"},
-      {"디스크 읽기","disk read"},{"디스크 쓰기","disk write"},{"캐시 흡수율","cache absorb"},
+      {"디스크 읽기","disk read"},{"디스크 쓰기","disk write"},{"캐시 흡수율","cache absorb"},{"볼륨 페이지캐시","volume page cache"},
       {"유휴","idle"},{"B 합계(정확)","B total (exact)"},{"A 합계(청크)","A total (chunks)"},{"A 합계(청크·일부)","A total (chunks, partial)"},
       {"미설명 잔여","unexplained"},{"과대계상(free+비상주)","overcount(free+nonres)"},
       {"방법 B 비활성","method B disabled"},{"힙 순회 중…","walking heap…"},
@@ -4236,6 +4236,7 @@ typedef struct {
     /* Capacity axis, read by plots B and D and by the verdict */
     double cap_iops, cap_await, cap_hit, cap_miss, cap_head;
     double cg_pct, psi_full;     /* memory cgroup use over its limit (-1 none); PSI memory full avg10 (-1 not provided) */
+    double vc_pct;               /* share of the volumes' bytes in the page cache (-1 not measured) */
     int    pg_ok;
     double pg_res_pct;          /* Resident over total, percent */
     double pg_dirty;            /* Dirty page count */
@@ -4257,6 +4258,8 @@ typedef struct {
 static hsam_t HS[HIST_MAX]; static int HN=0, HCAP=HIST_MAX;
 
 /* One place for the value sources.  Region values go through the sr_*() name lookups without exception; never by index. */
+/* The volumes' page-cache residency, measured by vol_cache_scan (defined with the collection) */
+static struct { double total, resident, at_ms, ms, age_s; int nfiles, pid; char db[64]; char why[160]; } VC={0,0,-1,0,0,0,-1,"",""};
 static int g_hist_pid=-2; static unsigned g_hist_gen=0, g_hist_seg=0;   /* The process and segment the history belongs to */
 static unsigned long long g_hist_start=0;
 static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const iod_t*IO){
@@ -4293,6 +4296,7 @@ static void hist_push(double t,const proc_t*P,const mem_t*M,const tier_t*T,const
     s->ram     = (double)M->total*1024.0;
     s->cg_pct  = (M->cg_limit>0 && M->cg_usage>=0) ? 100.0*M->cg_usage/M->cg_limit : -1;
     s->psi_full= M->psi_full10;
+    s->vc_pct  = VC.total>0 ? 100.0*VC.resident/VC.total : -1;
     s->osused  = (double)(M->total-M->avail)*1024.0;
     s->cub     = P->rss_kb*1024.0 + T->master + T->broker + T->cas + T->pl;   /* RSS, as top */
     /* CPU and I/O extension, holding the dashboard's values in the dashboard's units. */
@@ -5380,9 +5384,10 @@ static void vd_buf(char*o,size_t n,const char**col){
        Disk reads only say how much of the misses the page cache did not absorb. */
     double rb=b->rbps, ps=g_pagesize>0?(double)g_pagesize:16384.0;
     double ab = b->cap_miss>=0 ? b->cap_miss*ps : -1;          /* bytes/s admitted; -1 not measured */
-    char disk[96];
-    if(ab>0 && rb<ab*0.5) snprintf(disk,sizeof disk,g_ascii?"disk %s/s, the rest from the OS page cache":"디스크 %s/s, 나머지는 OS 페이지 캐시",H(rb));
-    else snprintf(disk,sizeof disk,g_ascii?"disk %s/s":"디스크 %s/s",H(rb));
+    char disk[128], vc[40]="";
+    if(b->vc_pct>=0) snprintf(vc,sizeof vc,g_ascii?", volumes %.0f%% in page cache":", 볼륨 페이지캐시 상주 %.0f%%",b->vc_pct);
+    if(ab>0 && rb<ab*0.5) snprintf(disk,sizeof disk,g_ascii?"disk %s/s, the rest from the OS page cache%s":"디스크 %s/s, 나머지는 OS 페이지 캐시%s",H(rb),vc);
+    else snprintf(disk,sizeof disk,g_ascii?"disk %s/s%s":"디스크 %s/s%s",H(rb),vc);
     if(!b->pg_ok){ *col=VD_INFO;
         snprintf(o,n,g_ascii?"buffer-pool state unavailable - disk read %s/s, cache absorb %s":"· 버퍼풀 상태 읽기 비활성 — 디스크 읽기 %s/s, 캐시 흡수율 %s",
                  H(rb), b->absorb_ok?pf_val(b->absorb,1):(g_ascii?"idle":"유휴")); return; }
@@ -6435,10 +6440,11 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
         int vdrows = g_vdn;
         if(verdict && (g_vdn==0 || g_vd[0].kind!=verdict)) vdrows++;
         if(vdrows>VDKEEP) vdrows=VDKEEP;
-        int nrow = 5 + has_dev + vdrows;
+        int has_vc = VC.total>0 ? 1 : 0;
+        int nrow = 5 + has_dev + has_vc + vdrows;
         cv_box(0,y,W,nrow+2,L("I/O · cub_server + 최다사용 장치"));
         double pr=hist_peak(0,8.0*1024*1024), pw=hist_peak(1,8.0*1024*1024), pi=hist_peak(2,200);
-        struct { const char*g,*nm; double frac; char prim[24],sec[28]; int warn; } R[8];
+        struct { const char*g,*nm; double frac; char prim[24],sec[28]; int warn; } R[9];
         int n=0;
         /* CPU utilization itself is not repeated here - the OS and process boxes show it
            twice already.  Only iowait stays: it is an I/O metric and belongs beside the
@@ -6467,6 +6473,10 @@ static void render_dash(proc_t*P,mem_t*M,tier_t*T,iod_t*IO,int paused,
         else { R[n].g="◌"; R[n].nm=L("캐시 흡수율"); R[n].frac=0; R[n].warn=0;
             snprintf(R[n].prim,24,"%s",L("유휴")); }
         snprintf(R[n].sec,28,"rchar %s/s",H(IO->rchar)); n++;
+        if(has_vc){ double pct=100.0*VC.resident/VC.total;   /* how much of the volumes the OS holds: a miss that is not here is a disk read */
+            R[n].g="◌"; R[n].nm=L("볼륨 페이지캐시"); R[n].frac=pct/100.0; R[n].warn=0;
+            snprintf(R[n].prim,24,"%.0f%%",pct);
+            snprintf(R[n].sec,28,"%s/%s %.0fs",H(VC.resident),H(VC.total),VC.age_s); n++; }
         if(IO->devnm[0]){ R[n].g="●"; R[n].frac=IO->devutil/100.0; R[n].warn=IO->devutil>=90;
             static char dn[80]; snprintf(dn,sizeof dn,"%s %s%s",L("장치"),IO->devnm,
                                          g_ascii?"(host)":"(OS)"); R[n].nm=dn;
@@ -7213,6 +7223,9 @@ static void render_terse(proc_t *P,mem_t *M,tier_t *T,
                " pgbuf.engine.zone1=%ld pgbuf.engine.zone2=%ld pgbuf.engine.zone3=%ld pgbuf.engine.victim_candidates=%ld"
                " pgbuf.engine.dirty=%lld pgbuf.engine.read_ms=%.2f\n",
                AG.nbuf,AG.nlist,AG.nshared,AG.z1+AG.z2+AG.z3,AG.z1,AG.z2,AG.z3,AG.vict,AG.dirty,AG.ms);
+    /* The volumes' page-cache residency (mincore), on its own period: bytes 0 = not measured */
+    printf("volcache.bytes=%.0f volcache.resident_bytes=%.0f volcache.resident_pct=%.1f volcache.files=%d volcache.age_s=%.1f volcache.reason=\"%s\"\n",
+           VC.total,VC.resident,VC.total>0?100.0*VC.resident/VC.total:-1.0,VC.nfiles,VC.age_s,tq(VC.why));
     printf("io.read_bps=%.0f io.write_bps=%.0f io.read_iops=%.0f io.write_iops=%.0f ",
            rb,wb,ri,wi);
     /* Below the rchar floor the ratio is meaningless, so the key is omitted entirely rather
@@ -7509,6 +7522,8 @@ static void rp_apply(const char *t,proc_t*P,mem_t*M,tier_t*T,iod_t*IO){
     IO->ri=rp_num(t,"io.read_iops",0); IO->wi=rp_num(t,"io.write_iops",0);
     IO->blkpct=rp_num(t,"io.blkio_wait_pct",0);
     IO->rchar =rp_num(t,"io.rchar_bps",0);
+    VC.total=rp_num(t,"volcache.bytes",0); VC.resident=rp_num(t,"volcache.resident_bytes",0);
+    VC.nfiles=(int)rp_num(t,"volcache.files",0); VC.age_s=rp_num(t,"volcache.age_s",0); rp_str(t,"volcache.reason",VC.why,sizeof VC.why);
     IO->absorb_ok=(int)rp_num(t,"io.cache_absorb_ok",0);
     IO->absorb=IO->absorb_ok?rp_num(t,"io.cache_absorb_pct",0)/100.0:-1.0;
     IO->devutil=rp_num(t,"hostdev.util_pct",0);
@@ -7988,6 +8003,86 @@ static void json_line_from_terse(FILE*tf,FILE*o){
  * Returns collection work time in ms, excluding waits.  Window:
  *   baseline -> interval -> smaps/rollup/io -> classify/method B
  */
+/* ---- Page-cache residency of the database's files (mincore) ----
+   CUBRID reads through the OS page cache, so whether a buffer miss becomes a disk read
+   depends on how much of the volumes the page cache holds.  mincore on a read-only mapping
+   of each volume answers that without touching a page (no fault, no read): about 7 ms per
+   GB measured, so it runs on a period of 100x its own duration (1% of wall time, at least
+   VC_MIN_S), as smaps does.  The files are the server's open <db>, <db>_* files through its
+   fd table (one per inode), else those in the databases.txt directories.  Opening a volume
+   needs the install account: another account's server reads as not available. */
+#define VC_BUDGET 0.01
+#define VC_MIN_S 10.0
+static int vc_files(int pid,const char *db,char out[][PATH_MAX],int max){
+    int n=0; size_t dl=strlen(db); dev_t dv[32]; ino_t in[32]; if(max>32) max=32;
+    char p[64]; snprintf(p,sizeof p,"/proc/%d/fd",pid);
+    DIR *d=opendir(p); struct dirent *e;
+    while(d && (e=readdir(d)) && n<max){
+        if(e->d_name[0]=='.') continue;
+        char fp[400], lk[PATH_MAX]; snprintf(fp,sizeof fp,"%s/%s",p,e->d_name);
+        ssize_t k=readlink(fp,lk,sizeof lk-1); if(k<=0) continue; lk[k]=0;
+        if(lk[0]!='/') continue;
+        const char *bn=strrchr(lk,'/')+1;
+        if(strncmp(bn,db,dl) || (bn[dl] && bn[dl]!='_')) continue;
+        struct stat st; if(stat(fp,&st)!=0 || !S_ISREG(st.st_mode)) continue;
+        int dup=0; for(int i=0;i<n;i++) if(dv[i]==st.st_dev && in[i]==st.st_ino){ dup=1; break; }
+        if(dup) continue;
+        dv[n]=st.st_dev; in[n]=st.st_ino; snprintf(out[n++],PATH_MAX,"%s",fp);
+    }
+    if(d) closedir(d);
+    if(n) return n;
+    const char *dbs=getenv("CUBRID_DATABASES"); char tp[PATH_MAX], ln[4096]; FILE *f=NULL;
+    if(dbs){ snprintf(tp,sizeof tp,"%.4000s/databases.txt",dbs); f=fopen(tp,"re"); }
+    static char dirs[2][2048]; int nd=0;
+    while(f && fgets(ln,sizeof ln,f)){ char nm[256], vp[2048], hs[256], lp[2048];
+        int nf=sscanf(ln,"%255s %2047s %255s %2047s",nm,vp,hs,lp);
+        if(ln[0]=='#' || nf<2 || strcmp(nm,db)) continue;
+        snprintf(dirs[nd++],2048,"%s",vp); if(nf>=4 && strcmp(lp,vp)) snprintf(dirs[nd++],2048,"%s",lp); break; }
+    if(f) fclose(f);
+    for(int i=0;i<nd;i++){ DIR *dd=opendir(dirs[i]); if(!dd) continue;
+        while((e=readdir(dd)) && n<max){
+            if(strncmp(e->d_name,db,dl) || (e->d_name[dl] && e->d_name[dl]!='_')) continue;
+            char fp[PATH_MAX+300]; snprintf(fp,sizeof fp,"%s/%s",dirs[i],e->d_name);
+            struct stat st; if(stat(fp,&st)!=0 || !S_ISREG(st.st_mode)) continue;
+            snprintf(out[n++],PATH_MAX,"%.*s",PATH_MAX-1,fp); }
+        closedir(dd); }
+    return n;
+}
+static void vol_cache_scan(proc_t *P,double interval_s){
+    double now=now_ms();
+    if(P->pid<0){ VC.total=VC.resident=0; VC.nfiles=0; VC.age_s=0; VC.pid=-1;
+                  snprintf(VC.why,sizeof VC.why,"%s",g_ascii?"server not running":"서버 미기동"); return; }
+    int due = VC.pid!=P->pid || strcmp(VC.db,P->db)!=0 || VC.at_ms<0;
+    if(!due){ double period=VC.ms/VC_BUDGET;
+              if(period<VC_MIN_S*1000.0) period=VC_MIN_S*1000.0;
+              if(period<interval_s*1000.0) period=interval_s*1000.0;
+              due = now-VC.at_ms>=period; }
+    if(!due){ VC.age_s=(now-VC.at_ms)/1000.0; return; }
+    static char paths[32][PATH_MAX];
+    int n=vc_files(P->pid,P->db,paths,32);
+    double tot=0, res=0; int nf=0, denied=0;
+    static unsigned char *vec=NULL; static size_t vcap=0;
+    for(int i=0;i<n;i++){
+        int fd=open(paths[i],O_RDONLY|O_CLOEXEC); if(fd<0){ if(errno==EACCES||errno==EPERM) denied++; continue; }
+        struct stat st; if(fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_size<=0){ close(fd); continue; }
+        size_t len=(size_t)st.st_size, chunk=(size_t)1<<30; long rp=0;
+        for(size_t off=0; off<len; off+=chunk){
+            size_t l=len-off<chunk?len-off:chunk, np=(l+4095)/4096;
+            if(np>vcap){ free(vec); vec=malloc(np); vcap=vec?np:0; if(!vec) break; }
+            void *m=mmap(NULL,l,PROT_READ,MAP_SHARED,fd,(off_t)off); if(m==MAP_FAILED) break;
+            if(mincore(m,l,vec)==0) for(size_t k=0;k<np;k++) rp+=vec[k]&1;
+            munmap(m,l);
+        }
+        close(fd);
+        tot+=(double)len; res+=(double)rp*4096.0; nf++;
+    }
+    VC.total=tot; VC.resident=res>tot?tot:res; VC.nfiles=nf; VC.pid=P->pid; snprintf(VC.db,sizeof VC.db,"%s",P->db);
+    VC.ms=now_ms()-now; VC.at_ms=now_ms(); VC.age_s=0;
+    if(nf==0) snprintf(VC.why,sizeof VC.why,"%s",denied?(g_ascii?"volumes not readable (another account)":"볼륨 파일 읽기 불가(다른 계정)")
+                                                  :n?(g_ascii?"volumes not readable":"볼륨 파일 읽기 불가")
+                                                    :(g_ascii?"no volume file found (fd table, databases.txt)":"볼륨 파일 찾지 못함(fd 표·databases.txt)"));
+    else VC.why[0]=0;
+}
 /* A user stop (Ctrl-Z, pause, help) ends the collection segment: frame-to-frame state is
    dropped and the next walk of the tiers is only their CPU baseline */
 static void seg_break(void){
@@ -8181,6 +8276,9 @@ again:
         } else CAP2.over_budget=0;
     } else { memset(&CAP2,0,sizeof CAP2); cap_reset_values();
              snprintf(CAP2.ps_why,sizeof CAP2.ps_why,g_ascii?"server down":"cub_server 미기동"); }
+    /* On its own period and outside the capacity budget: a 100 GB database is 0.7 s of
+       mincore every 70 s, which is this frame's work, not the aggregation's */
+    vol_cache_scan(P,interval);
     return now_ms()-w0-interval*1000.0;
 }
 
