@@ -11,7 +11,7 @@ TOOL=${CUB_CTV_TOOL:-$HERE/../cub_ctv}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 fail() { echo "t22 FAIL: $*"; exit 1; }
-W=-Wl,--wrap=mono_s,--wrap=thr_index_of_tid_mem,--wrap=thr_tid_of,--wrap=os_task_comm,--wrap=os_task_state
+W=-Wl,--wrap=mono_s,--wrap=thr_index_of_tid_mem,--wrap=thr_tid_of,--wrap=os_task_comm,--wrap=os_task_state,--wrap=cs_owner_now
 mapfile -t SRCS < <(sh "$HERE/../build.sh" --list-sources | grep -v -e '/cub_ctv\.c$' -e '/ctv_sampler\.c$')
 gcc -O1 -Wall ${CTV_TEST_CFLAGS:-} -I"$HERE/../src" -o "$T/t22" "$HERE/t22_os_per_cs.c" "${SRCS[@]}" -lm $W \
   || fail "build"

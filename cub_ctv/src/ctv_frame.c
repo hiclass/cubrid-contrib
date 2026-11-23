@@ -493,7 +493,8 @@ view_os_of (int slot)
 }
 
 /* the entry of a thread slot seen holding CS cs - its readings may be none
- * (never on a sample drawn for reading) - or NULL */
+ * (never on a sample drawn, every read failed, or no hold lasted past its
+ * reading) - or NULL */
 const OS_THR *
 view_os_at (int slot, int cs)
 {

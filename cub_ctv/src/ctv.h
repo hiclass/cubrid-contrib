@@ -399,7 +399,7 @@ typedef struct
   uint64_t dk0[3];		/* diskstats at window start: wr_ios, wr_ms, io_ms */
   int dk_ok;
   int no_disk;			/* nothing shows or records disk figures */
-  uint64_t cs_base;		/* the CS array (queue heads are re-checked there) */
+  uint64_t cs_base;		/* the CS array (queue heads and owners are re-checked there) */
 } LIVE_WIN;
 
 /* one rendered moment (a snapshot, or one live window): every answer the
@@ -619,6 +619,7 @@ uint64_t cs_wait_queues (const unsigned char *blob, const CS_LAYOUT * lo, int i,
 const char *cs_layout_probe (uint64_t cs_base, CS_LAYOUT * lo);
 void cs_decode_raw (const unsigned char *blob, const CS_LAYOUT * lo, int i, int32_t * rwlock, uint32_t * wr, uint32_t * ww, int32_t * tran);
 int cs_read_rows (uint64_t cs_base, const CS_LAYOUT * lo, CS_ROW * rows);
+int cs_owner_now (uint64_t cs_base, const CS_LAYOUT * lo, int i, uint64_t * owner);
 int cs_rows_from_blob (const unsigned char *blob, const CS_LAYOUT * lo, CS_ROW * rows);
 const char *state_str (int32_t rwlock, char *buf, size_t n);
 int cs_held (int32_t rwlock, uint64_t owner);

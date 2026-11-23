@@ -1224,7 +1224,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
    2. `tran >= 1 || (tran == 0 && seen_tran[i] < 0)` → `seen_tran[i] = tran`, `seen_cpid[i] = cpid`, `seen_owner[i] = owner` (클라이언트 tran 우선, 엔진은 아직 없을 때만).
    3. owner == 0 이면 k = -1. 아니면 `owner != own_last[i]` 일 때만 `own_last = owner`, `own_slot = thr_index_of_tid_mem(owner)` 갱신, `k = own_slot[i]`.
    4. `act_add(w, i, ACT_HELD, tran, k, cpid)`.
-   5. `k >= 0` 이면 `os_sample(w, k, i)` (그 스레드가 CS i 를 쥔 표본으로 센다).
+   5. `k >= 0` 이면 `os_sample(w, lo, k, i, owner)` (그 스레드가 CS i 를 쥔 표본으로 센다).
 5. `wr != 0 || ww != 0`:
    1. `head = cs_wait_queues(blob, lo, i, &head2, &field)`; `st.wai[i]++`.
    2. head != 0:
@@ -1259,7 +1259,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 - 일치(`cs, kind, tran, cpid` 같고 `tran > 0 || a->thr == key_thr`) → `samples++`; `a->thr < 0` 이면 `a->thr = thr`.
 - 새 항목: `nact < (kind == ACT_HELD ? 4096 : 4096 - 256)` 이면 추가(`samples = 1`, `cpid`), 아니면 `act_dropped++`. 대기 항목은 마지막 256칸을 쓰지 못한다(보유 목격 예약).
 
-### 11.4 OS 샘플 (`os_sample(w, k, cs)`)
+### 11.4 OS 샘플 (`os_sample(w, lo, k, cs, owner)`)
 
 스레드 칸 k 가 CS `cs` 를 쥐고 있는 표본마다 불린다. procfs 는 판독 표본(§11.1a, `w->os_pick`)에서만 읽고, 읽은 상태는 (k, cs) 항목에 센다.
 
@@ -1268,6 +1268,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 3. `!w->os_pick` 이면 여기서 끝(항목은 이름만 가진 채 남는다; 판독 0개 항목도 판정에 `판독 0회` 로 보인다, §6.7). 판독 표본이면 스레드별 판독 캐시 `w->rd[]` 에서 `slot == k` 를 찾고, 없으면 `nrd < OS_RD_MAX`(64) 일 때 새로 만든다(`t = 0`, `seq = -1`). 가득 차면 무시.
 4. 판독은 **스레드당 표본당 한 번**이다. `rd->seq != w->st.samples`(이 표본에서 이 스레드를 처음 봄)이면: `rd->seq = w->st.samples`, `rd->t = mono_s()`, `rd->ok = os_task_state(target_pid, tid, &rd->st, &rd->ticks) == 0` (`/proc/<pid>/task/<tid>/stat` 의 상태 문자와 utime+stime). `rd->seq == w->st.samples` 이면(같은 스레드가 한 표본에 CS 를 둘 이상 쥠) 그 판독값을 그대로 쓴다 — 다시 읽지 않으므로 한 표본은 그 스레드가 쥔 CS 항목 **전부에 세거나(성공) 전부에 세지 않는다(실패)**.
 5. `!rd->ok` → 무시.
+5a. **보유 재확인**: `cs_owner_now(w->cs_base, lo, cs, &now)` 로 그 CS 의 owner 칸(8바이트)을 다시 읽어, 읽지 못했거나 `now != owner`(이 표본의 배열 이미지에 있던 owner)이면 무시한다. 배열 이미지는 procfs 판독보다 먼저 읽은 것이라, 그 사이 보유가 끝났으면 읽은 상태는 놓은 뒤의 것이기 때문이다. 재확인은 판독을 세려는 (스레드, CS) 마다 한 번이고(한 표본에 CS 를 둘 쥔 스레드는 판독 1회·재확인 2회), 판독 표본이 아니면 읽지 않는다. 한 스레드의 판독이 어느 CS 항목에는 세어지고 다른 항목에는 세어지지 않을 수 있다. 버린 판독은 세지 않으며 따로 남기지도 않는다. 같은 스레드가 그 사이 놓았다가 다시 쥔 경우는 owner 가 같아 걸러지지 않는다.
 6. 항목의 첫 성공이면 `ticks0 = rd->ticks`, `t_first = rd->t`. 매번 `t_last = rd->t`, `ticks1 = rd->ticks`, `span_ms = (int)((rd->t - t_first) * 1000 + 0.5)`, `samples++`, 상태 `R` → run++, `D` → dsk++, 그 밖 oth++.
 
 `span_ms`·틱 차이는 그 (스레드, CS) 의 첫 목격부터 마지막 목격까지의 구간이다(그 사이 CS 를 놓았던 시간의 CPU 도 들어간다 — `cpu_pct` 는 그 구간의 평균).

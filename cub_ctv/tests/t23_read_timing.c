@@ -19,11 +19,21 @@
  *     when the thread holds throughout ((OS_MIN_READS + 1) blocks less one
  *     sample): every window of that length does, some window one sample
  *     shorter does not - at 100, 50 and 20 Hz
- * Target reads are replaced (ld --wrap): thread ids, procfs, the clock.
+ *   8 a reading counts only for a hold still on after it: the thread holds
+ *     CS 0 and LOG in every sample; after three readings of four CS 0's
+ *     owner word is no longer the thread's (cleared, another thread's, or
+ *     not readable - the word then left as the image has it) and the state
+ *     read is the one after the release (S).  CS 0's entry counts the
+ *     fourth readings only, none in S; LOG's, still held, counts them all;
+ *     the owner word is read once per (thread, CS) of a reading, after the
+ *     procfs read, and never on a sample that is not read
+ * Target reads are replaced (ld --wrap): thread ids, procfs, the clock, the
+ * owner word read again (the window's own image unless case 8 says else).
  */
 #include "../src/ctv_sampler.c"
 
 #define OWNER_A 0x7f000000a000ULL	/* thread slot 10 */
+#define OWNER_B 0x7f000000b000ULL	/* another thread */
 #define SEED 20261120u
 #define WINDOWS 400
 
@@ -33,6 +43,9 @@ static int g_hold_k;		/* the sample the current hold began in */
 static int g_run;		/* samples on a CPU from the start of a hold */
 static int g_reads;
 static int g_place[5];		/* case 4: readings by place in the block */
+static int g_c8;		/* case 8 is running */
+static int g_after;		/* case 8: CS 0 after this reading: 0 still held, 1 free, 2 another's, 3 unreadable */
+static int g_own_reads;		/* owner words read again */
 
 double
 __wrap_mono_s (void)
@@ -75,8 +88,26 @@ __wrap_os_task_state (int pid, int tid, char *state, long *ticks)
   g_reads++;
   g_place[g_k % 5]++;
   *state = state_now ();
+  if (g_c8)
+    {
+      g_after = g_reads % 4;
+      *state = g_after == 0 ? 'D' : 'S';
+    }
   *ticks = 500;
   return 0;
+}
+
+int
+__wrap_cs_owner_now (uint64_t cs_base, const CS_LAYOUT * l, int i, uint64_t * owner)
+{
+  g_own_reads++;
+  if (g_c8 && i == 0 && (g_after == 1 || g_after == 2))
+    {
+      *owner = g_after == 1 ? 0 : OWNER_B;
+      return 0;
+    }
+  memcpy (owner, (const unsigned char *) (uintptr_t) cs_base + (size_t) i * l->stride + l->off_owner, 8);
+  return g_c8 && i == 0 && g_after == 3 ? -1 : 0;
 }
 
 static CS_LAYOUT lo;
@@ -105,6 +136,7 @@ scene (int hz, unsigned seed, int hold, int run, int rest, int off, int *rd, int
   int win, k, held = 0, held_d = 0, left = off, resting = 1;
 
   w->no_disk = 1;
+  w->cs_base = (uint64_t) (uintptr_t) w->blob;
   g_run = run;
   g_k = 0;
   *rd = *rd_d = 0;
@@ -262,6 +294,7 @@ main (void)
 	int need = os_min_samples (hzs[h]);
 
 	w->no_disk = 1;
+	w->cs_base = (uint64_t) (uintptr_t) w->blob;
 	live_win_reset (w, lo.count);
 	memset (w->blob, 0, (size_t) lo.stride * lo.count);
 	for (i = 0; i < 20000; i++)
@@ -332,9 +365,63 @@ main (void)
 	  }
       }
   }
+  /* 8: 2000 samples at 100 Hz, the thread holds CS 0 and LOG in each */
+  {
+    LIVE_WIN *w = live_win_new (lo.count, lo.stride, 100, SEED);
+    const OS_THR *e0 = NULL, *e1 = NULL;
+    int reads;
+
+    w->no_disk = 1;
+    w->cs_base = (uint64_t) (uintptr_t) w->blob;
+    live_win_reset (w, lo.count);
+    memset (w->blob, 0, (size_t) lo.stride * lo.count);
+    put_cs (w, 0, -1, OWNER_A, -1);
+    put_cs (w, 1, -1, OWNER_A, -1);
+    g_c8 = 1;
+    g_reads = g_own_reads = 0;
+    for (i = 0; i < 2000; i++)
+      {
+	int before = g_own_reads;
+
+	g_now += 0.01;
+	live_accumulate (w, &lo);
+	if (!w->os_pick && g_own_reads != before)
+	  {
+	    printf ("t23 FAIL: 8: the owner word read on a sample that is not read (sample %d)\n", i);
+	    bad = 1;
+	  }
+      }
+    g_c8 = 0;
+    reads = g_reads;
+    for (i = 0; i < w->nos; i++)
+      {
+	/* e1: the CS let go (index 0, read first), e0: the one still held */
+	if (w->os[i].slot == 10 && w->os[i].cs == 1)
+	  {
+	    e0 = &w->os[i];
+	  }
+	if (w->os[i].slot == 10 && w->os[i].cs == 0)
+	  {
+	    e1 = &w->os[i];
+	  }
+      }
+    printf ("  8 %d readings; CS 0 (hold over after 3 of 4): %d counted, D %d other %d; LOG (still held): %d counted, D %d other %d; owner words read %d\n",
+	    reads, e1 ? e1->samples : -1, e1 ? e1->dsk : -1, e1 ? e1->oth : -1,
+	    e0 ? e0->samples : -1, e0 ? e0->dsk : -1, e0 ? e0->oth : -1, g_own_reads);
+    if (reads != 400 || e0 == NULL || e1 == NULL
+	|| e1->samples != reads / 4 || e1->dsk != reads / 4 || e1->oth != 0 || e1->run != 0
+	|| e0->samples != reads || e0->dsk != reads / 4 || e0->oth != reads - reads / 4
+	|| g_own_reads != 2 * reads)
+      {
+	printf ("t23 FAIL: 8: want %d readings, CS 0 %d counted all in D, LOG %d counted (%d D, %d other), %d owner words read\n",
+		400, reads / 4, reads, reads / 4, reads - reads / 4, 2 * reads);
+	bad = 1;
+      }
+    live_win_free (w);
+  }
   if (!bad)
     {
-      printf ("t23 PASS: readings follow the held samples (periods of 50 ms multiples too), one in every block\n");
+      printf ("t23 PASS: readings follow the held samples (periods of 50 ms multiples too), one in every block, none of a hold that is over\n");
     }
   return bad;
 }

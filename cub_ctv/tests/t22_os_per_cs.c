@@ -28,7 +28,8 @@
  *     20 and 26 samples at 100 Hz and for 16 samples at 50 Hz, not for 27
  *     samples at 100 Hz nor for 20 at 50 Hz - the hz of the record's header
  *     decides (records four to eight)
- * Target reads are replaced (ld --wrap): thread ids, procfs, the clock.
+ * Target reads are replaced (ld --wrap): thread ids, procfs, the clock, the
+ * owner word read again after a procfs read (t23 case 8 tests that rule).
  */
 #include "../src/ctv_sampler.c"
 
@@ -88,6 +89,15 @@ __wrap_os_task_state (int pid, int tid, char *state, long *ticks)
     }
   *ticks = 500;
   return g_fail ? -1 : 0;
+}
+
+/* the owner word read again after a procfs read: the window's own image
+ * (every hold is still on) */
+int
+__wrap_cs_owner_now (uint64_t cs_base, const CS_LAYOUT * l, int i, uint64_t * owner)
+{
+  memcpy (owner, (const unsigned char *) (uintptr_t) cs_base + (size_t) i * l->stride + l->off_owner, 8);
+  return 0;
 }
 
 static CS_LAYOUT lo;
@@ -172,6 +182,7 @@ main (int argc, char **argv)
     }
   w = live_win_new (lo.count, lo.stride, 1, 1);
   w->no_disk = 1;
+  w->cs_base = (uint64_t) (uintptr_t) w->blob;
 
   /* 1: 100 samples, every one read */
   live_win_reset (w, lo.count);

@@ -109,15 +109,19 @@ live_win_reset (LIVE_WIN * w, int count)
     }
 }
 
-/* the thread in slot k holds CS cs in this sample: if the sample is the one
- * drawn in its block, procfs is read once for the thread and the state
- * counted on the (thread, CS) entry, so a CS's figures never mix in what
- * its holder did under another CS */
+/* the thread in slot k (thread id owner) holds CS cs in this sample: if the
+ * sample is the one drawn in its block, procfs is read once for the thread
+ * and the state counted on the (thread, CS) entry, so a CS's figures never
+ * mix in what its holder did under another CS.  The array image is older
+ * than the procfs read: the CS's owner word is read again after it, and a
+ * reading whose hold is over by then (another owner, or the word not
+ * readable) counts nowhere - it would be the state after the release */
 static void
-os_sample (LIVE_WIN * w, int k, int cs)
+os_sample (LIVE_WIN * w, const CS_LAYOUT * lo, int k, int cs, uint64_t owner)
 {
   OS_THR *o = NULL;
   OS_RD *rd = NULL;
+  uint64_t now;
   int j, tid = thr_tid_of (k);
 
   if (tid <= 0)
@@ -177,6 +181,10 @@ os_sample (LIVE_WIN * w, int k, int cs)
       rd->ok = os_task_state (target_pid, tid, &rd->st, &rd->ticks) == 0;
     }
   if (!rd->ok)
+    {
+      return;
+    }
+  if (cs_owner_now (w->cs_base, lo, cs, &now) != 0 || now != owner)
     {
       return;
     }
@@ -354,7 +362,7 @@ live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo)
 	  act_add (w, i, ACT_HELD, tran, k, cpid);
 	  if (k >= 0)
 	    {
-	      os_sample (w, k, i);
+	      os_sample (w, lo, k, i, owner);
 	    }
 	}
       if (wr != 0 || ww != 0)

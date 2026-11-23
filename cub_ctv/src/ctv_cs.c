@@ -313,7 +313,13 @@ cs_decode_raw (const unsigned char *blob, const CS_LAYOUT * lo, int i,
   *tran = rd_i32 (blob, off + lo->off_tran);
 }
 
-
+/* the writer thread id of CS i as it is now (one 8-byte read): 0 when read */
+int
+cs_owner_now (uint64_t cs_base, const CS_LAYOUT * lo, int i, uint64_t * owner)
+{
+  return mem_read (cs_base + (uint64_t) i * (uint64_t) lo->stride + (uint64_t) lo->off_owner,
+		   owner, sizeof (*owner));
+}
 
 int
 cs_read_rows (uint64_t cs_base, const CS_LAYOUT * lo, CS_ROW * rows)

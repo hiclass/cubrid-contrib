@@ -208,6 +208,7 @@ type 이름표 (`pool_type_names`, 인덱스 = type): `{"?", "CSECT", "RWLOCK", 
 | `uint64_t cs_wait_queues(const unsigned char *blob, const CS_LAYOUT *lo, int i, uint64_t *head2, int *field)` | 공개 | 첫 큐 머리 |
 | `const char *cs_layout_probe(uint64_t cs_base, CS_LAYOUT *lo)` | 공개 | NULL / 사유 |
 | `void cs_decode_raw(const unsigned char *blob, const CS_LAYOUT *lo, int i, int32_t *rwlock, uint32_t *wr, uint32_t *ww, int32_t *tran)` | 공개 | — |
+| `int cs_owner_now(uint64_t cs_base, const CS_LAYOUT *lo, int i, uint64_t *owner)` | 공개 | 0 / −1. CS i 의 owner 칸 8바이트를 지금 다시 읽는다(`mem_read(cs_base + i × stride + off_owner)`); 샘플러의 보유 재확인용(06 §11.4) |
 | `int cs_read_rows(uint64_t cs_base, const CS_LAYOUT *lo, CS_ROW *rows)` | 공개 | 0 / −1 |
 | `int cs_rows_from_blob(const unsigned char *blob, const CS_LAYOUT *lo, CS_ROW *rows)` | 공개 | 항상 0 |
 | `const char *state_str(int32_t rwlock, char *buf, size_t n)` | 공개 | `buf` |
