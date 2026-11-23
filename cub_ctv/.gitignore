@@ -3,10 +3,11 @@
 csql.err
 __pycache__/
 # --dump detail dumps (JSON) and ad-hoc --record files carry client identities;
-# only the fixtures under tests/fixtures/ and the hand-made inputs under tests/inputs/ are committed.
+# only the fixtures under tests/fixtures/ and the test inputs under tests/inputs/ are committed.
 *.dump.json
 /*.json
 *.rec
 *.ctv
 !tests/fixtures/*.rec
 !tests/inputs/*.rec
+!tests/inputs/damaged/*.rec

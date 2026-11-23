@@ -36,7 +36,9 @@
 | `tests/t8_replay_keys.py` | pty 에서 재생 키(일시정지·구간·속도·종료), 요약 화면 세션 강조, 색상·`--plain` | 불필요 |
 | `tests/t10_os_probe.sh` | OS tid·스레드 이름·대기 사유를 `/proc` 과 대조 (I-17/I-18) | 필요 |
 | `tests/t9_quick_trace.sh` | 빠른 확인: 부하 중 라이브 요약 1구간 + 기록, 판정·대기 세션 검사, 라이브 `r` 녹화 시작·중지 (usage.md §3) | 필요 |
-| `tests/t24_replay_inputs.sh` | `tests/inputs/*.rec`(도구가 쓰는 정상 기록 가운데 픽스처가 지나지 않는 경로: 클라이언트가 없는 유휴 서버, 신원이 바뀌지 않아 변화분이 빈 프레임)를 여섯 가지 보기로 재생해 종료 코드와 프레임 수 확인. `sanitize.sh` 에서 돌면 그 경로의 정의되지 않은 동작을 잡는다 | 불필요 |
+| `tests/t24_replay_inputs.sh` | `tests/inputs/*.rec`(픽스처가 지나지 않는 판독 경로를 지나도록 손으로 만든 최소 기록: 클라이언트가 없는 유휴 서버, 신원이 바뀌지 않아 변화분이 빈 프레임, 명세 05 §10.2 의 예시 기록. 줄 모양은 도구가 쓰는 것과 같고 값은 실행에서 얻은 것이 아니다)를 여섯 가지 보기로 재생해 종료 코드 0 과 보기마다 프레임 수 확인. `sanitize.sh` 에서 돌면 그 경로의 정의되지 않은 동작을 잡는다 | 불필요 |
+| `tests/t25_fuzz_replay.sh` | 손상된 기록은 거부되거나 재생되어야 하고, 크래시·멈춤·종료 코드 0/1 밖·(sanitizer 빌드에서) 목록에 없는 지적이 없어야 한다. `tests/inputs/damaged/MANIFEST` 의 고정 입력을 먼저 돌리고, 씨앗을 고정한 변형 기록 12,000개를 돌린다(`tests/fuzz_replay.py`, 일반 빌드 약 12초·매번 같은 결과). MANIFEST 의 `open` 행은 판독부가 아직 거부하지 않는 손상 입력(부호 있는 정수 넘침)으로, sanitizer 빌드에서 그 함수의 부호 있는 정수 넘침 지적이 **나와야** 통과한다 — 고쳐서 지적이 사라지면 실패하므로 그 행을 `fixed` 로 옮긴다 | 불필요 |
+| `tests/fuzz_full.sh` | 퍼저 전체 실행: ASan + UBSan 빌드로 씨앗 3개 × 60,000개, pty 화면 포함(8개 동시 실행으로 약 20분). 회귀에는 넣지 않고 **푸시 전**과 **기록 판독부(`src/ctv_rec.c`)나 기록 값을 쓰는 보기를 바꾸는 커밋**에서 돌린다. 새로 찾은 입력은 `tests/inputs/damaged/` 에 넣고 MANIFEST 에 행을 더한다. 종료 코드 0 = 새 지적 없음, 1 = 있음, 2 = sanitizer 빌드 실패 | 불필요 |
 | `tests/check_msg_pairs.py` | 한/영 메시지 쌍의 printf 지시자 동일성 | 불필요 |
 | `tests/sanitize.sh` | 서버가 필요 없는 테스트 전부(t5·t6·t8·t11~t20·t22…)를 AddressSanitizer + UndefinedBehaviorSanitizer 로 빌드한 실행 파일과 테스트 프로그램으로 다시 실행(`CUB_CTV_TOOL`·`CTV_TEST_CFLAGS` 로 넘김, 첫 지적에서 중단). 종료 코드 0 = 전부 통과, 1 = 실패, 2 = 런타임(libasan·libubsan)이 없어 실행 못 함. 커밋마다 통과해야 한다 | 불필요 |
 | `tests/t2_show_compare.py` | `SHOW CRITICAL SECTIONS` 브래킷 비교 + 자기영향 0 (설치 경로 자동, `CUB=`·`CUB_CTV_TOOL=` 로 지정 가능) | 필요 |

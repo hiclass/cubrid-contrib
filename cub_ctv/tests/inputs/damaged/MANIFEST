@@ -1,0 +1,22 @@
+# Damaged records kept as fixed inputs of tests/t25_fuzz_replay.sh:
+#   <file> <view> <state> <function>
+# open:  the reader accepts the line and the tool runs into undefined
+#        behaviour (signed integer overflow) in <function>; a sanitizer
+#        build must report that there.  When the reader refuses the record, the row
+#        fails as "no report" and is moved to fixed.
+# fixed: no sanitizer report in any build.
+# Every .rec here has a row.  Found by tests/fuzz_replay.py, but the last
+# three, made by hand: the fuzzer reaches their functions only on a pty.
+v-count.rec              scroll  open   rd_V
+q-count.rec              wide    open   rd_Q
+slot-json.rec            json    open   json_cs_rows
+slot-owner.rec           wide    open   owner_block
+slot-queue.rec           wide    open   owner_block
+slot-detail-queue.rec    detail  open   print_detail_row
+slot-detail-chain.rec    detail  open   print_detail_row
+pool-sum.rec             scroll  open   pool_print_groups
+ident-none-updated.rec   json    fixed  idents_settle
+ident-none-removed.rec   trans   fixed  idents_settle
+wait-reason-sum.rec      scroll  open   print_thread_waits
+idle-lock-sum.rec        pty:50x140:+++++++q  open  screen_summary
+session-sum.rec          pty:50x140:+++++++q  open  print_sessions
