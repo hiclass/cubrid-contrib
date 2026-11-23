@@ -6,7 +6,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 G=$HERE/fixtures/demodb-live.rec.verdict.golden
 mapfile -t SRCS < <(sh "$HERE/../build.sh" --list-sources | grep -v '/cub_ctv\.c$')
-gcc -O1 -Wall -I"$HERE/../src" -o "$T/t13" "$HERE/t13_verdict.c" "${SRCS[@]}" \
+gcc -O1 -Wall ${CTV_TEST_CFLAGS:-} -I"$HERE/../src" -o "$T/t13" "$HERE/t13_verdict.c" "${SRCS[@]}" \
   || { echo "t13 FAIL: build"; exit 1; }
 LANG=C "$T/t13" "$HERE/fixtures/demodb-live.rec" > "$T/out" || { echo "t13 FAIL: run"; exit 1; }
 if [ "${1:-}" = "--update" ]; then cp "$T/out" "$G"; echo "t13 golden updated"; exit 0; fi
@@ -21,7 +21,7 @@ cmp -s "$T/out" "$G" || { diff "$T/out" "$G" | head; echo "t13 FAIL: verdict fig
 check () {
   awk "\$1 == \"C\" && \$2 == \"1\" && !d { $2; d = 1 } { print }" \
     "$HERE/fixtures/demodb-live.rec" > "$T/c.rec"
-  "$HERE/../cub_ctv" --replay "$T/c.rec" --json 2>/dev/null | head -1 | python3 -c '
+  "${CUB_CTV_TOOL:-$HERE/../cub_ctv}" --replay "$T/c.rec" --json 2>/dev/null | head -1 | python3 -c '
 import json, sys
 d = json.loads(sys.stdin.readline())
 r = [c for c in d["cs"] if c["name"] == "LOG"][0]

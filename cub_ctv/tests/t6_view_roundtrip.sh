@@ -7,7 +7,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 W=-Wl,--wrap=thr_index_of_tid_mem,--wrap=thr_waiters_mem,--wrap=thr_waiters_mem2,--wrap=tran_identity_cached
 mapfile -t SRCS < <(sh "$HERE/../build.sh" --list-sources | grep -v '/cub_ctv\.c$')
-gcc -O1 -Wall -I"$SRC" -o "$T/t6" "$HERE/t6_view_roundtrip.c" \
+gcc -O1 -Wall ${CTV_TEST_CFLAGS:-} -I"$SRC" -o "$T/t6" "$HERE/t6_view_roundtrip.c" \
   "${SRCS[@]}" $W || { echo "t6 FAIL: build"; exit 1; }
 "$T/t6" record "$T/r.rec" > "$T/a.out" || { echo "t6 FAIL: record"; exit 1; }
 "$T/t6" replay "$T/r.rec" > "$T/b.out" || { echo "t6 FAIL: replay"; exit 1; }

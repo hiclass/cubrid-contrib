@@ -62,6 +62,6 @@ print(sum(l.startswith('F ') for l in L), sum(l.startswith('X ') for l in L), su
 cmp -s "$T/full.out" "$T/delta.out" || { diff "$T/full.out" "$T/delta.out" | head; fail "delta replay differs"; }
 
 mapfile -t SRCS < <(sh "$HERE/../build.sh" --list-sources | grep -v '/cub_ctv\.c$')
-gcc -O1 -Wall -I"$HERE/../src" -o "$T/seek" "$HERE/t11_seek.c" "${SRCS[@]}" || fail "build seek check"
+gcc -O1 -Wall ${CTV_TEST_CFLAGS:-} -I"$HERE/../src" -o "$T/seek" "$HERE/t11_seek.c" "${SRCS[@]}" || fail "build seek check"
 "$T/seek" "$T/delta.rec" || fail "seek"
 echo "t11 PASS: $NF frames ($NK0 delta, $NX removals) replay as the full record; seeks match sequential"

@@ -35,7 +35,9 @@
 | `tests/t8_replay_keys.py` | pty 에서 재생 키(일시정지·구간·속도·종료), 요약 화면 세션 강조, 색상·`--plain` | 불필요 |
 | `tests/t10_os_probe.sh` | OS tid·스레드 이름·대기 사유를 `/proc` 과 대조 (I-17/I-18) | 필요 |
 | `tests/t9_quick_trace.sh` | 빠른 확인: 부하 중 라이브 요약 1구간 + 기록, 판정·대기 세션 검사, 라이브 `r` 녹화 시작·중지 (usage.md §3) | 필요 |
+| `tests/t24_replay_inputs.sh` | `tests/inputs/*.rec`(도구가 쓰는 정상 기록 가운데 픽스처가 지나지 않는 경로: 클라이언트가 없는 유휴 서버, 신원이 바뀌지 않아 변화분이 빈 프레임)를 여섯 가지 보기로 재생해 종료 코드와 프레임 수 확인. `sanitize.sh` 에서 돌면 그 경로의 정의되지 않은 동작을 잡는다 | 불필요 |
 | `tests/check_msg_pairs.py` | 한/영 메시지 쌍의 printf 지시자 동일성 | 불필요 |
+| `tests/sanitize.sh` | 서버가 필요 없는 테스트 전부(t5·t6·t8·t11~t20·t22…)를 AddressSanitizer + UndefinedBehaviorSanitizer 로 빌드한 실행 파일과 테스트 프로그램으로 다시 실행(`CUB_CTV_TOOL`·`CTV_TEST_CFLAGS` 로 넘김, 첫 지적에서 중단). 종료 코드 0 = 전부 통과, 1 = 실패, 2 = 런타임(libasan·libubsan)이 없어 실행 못 함. 커밋마다 통과해야 한다 | 불필요 |
 | `tests/t2_show_compare.py` | `SHOW CRITICAL SECTIONS` 브래킷 비교 + 자기영향 0 (설치 경로 자동, `CUB=`·`CUB_CTV_TOOL=` 로 지정 가능) | 필요 |
 | `tests/t4_trans_check.sh` | 해제 슬롯 미표시, 라이브 trid, `cubrid tranlist` 대조 | 필요 |
 | `tests/demo_contention.sh` | CS 인덱스(0–17)별 표적 경합 / 스큐 부하, 전후 증분 판정 | 필요 |

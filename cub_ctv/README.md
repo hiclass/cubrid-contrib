@@ -289,7 +289,9 @@ MVCC 이전 버전을 읽는 경우는 LOG 를 reader 로 지난다).
 | `tests/t8_replay_keys.py` | 가짜 터미널에서 재생 키(일시정지·구간 이동·속도·종료), 요약 화면 세션 강조, 색상·`--plain`·파이프 무이스케이프 | **불필요** |
 | `tests/t10_os_probe.sh` | `--dump` 의 OS tid 가 모두 `/proc/<pid>/task` 의 서로 다른 tid 이고 개수가 스레드 수 −1 의 ±8 이내, 이름 일치(I-17), 대기 사유 코드 범위·스냅샷 줄(I-18) | 필요 |
 | `tests/t9_quick_trace.sh` | **빠른 확인**: 짧은 부하 중 라이브 요약 화면 1구간 캡처 + 기록 → 판독·판정·대기 세션 식별 PASS/FAIL, 화면 출력(docs/usage.md §3) | 필요 |
+| `tests/t24_replay_inputs.sh` | 픽스처가 지나지 않는 정상 기록(유휴 서버, 신원 변화분이 빈 프레임)의 재생 — 재생 경로 | **불필요** |
 | `tests/check_msg_pairs.py` | 한/영 메시지 쌍의 printf 지시자 동일성(정적) | 불필요 |
+| `tests/sanitize.sh` | 서버가 필요 없는 테스트 전부를 ASan + UBSan 빌드(실행 파일과 테스트 프로그램 모두)로 다시 실행. 종료 코드 2 = 런타임 미설치로 실행 못 함 | **불필요** |
 | `tests/demo_contention.sh` | CS 인덱스(0–17)별 표적 경합 유발 또는 스큐 부하(기본), 전/후 증분 판정 | 필요 |
 
 ## 9. 한계

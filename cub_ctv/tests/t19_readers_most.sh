@@ -12,7 +12,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 fail() { echo "t19 FAIL: $*"; exit 1; }
 mapfile -t SRCS < <(sh "$HERE/../build.sh" --list-sources | grep -v -e '/cub_ctv\.c$' -e '/ctv_sampler\.c$')
-gcc -O1 -Wall -I"$HERE/../src" -o "$T/t19" "$HERE/t19_readers_most.c" "${SRCS[@]}" -lm \
+gcc -O1 -Wall ${CTV_TEST_CFLAGS:-} -I"$HERE/../src" -o "$T/t19" "$HERE/t19_readers_most.c" "${SRCS[@]}" -lm \
   || fail "build"
 LANG=C "$T/t19" "$T/r.rec" || exit 1
 # the summary screen (a terminal) of the replayed record, English, plain

@@ -404,8 +404,14 @@ idents_settle (int keyframe)
 	{
 	  die ("out of memory", "메모리 부족", NULL);
 	}
-      memcpy (upd, view.ident, (size_t) nupd * sizeof (VIEW_IDENT));
-      qsort (rm, (size_t) nrm, sizeof (int), cmp_int);
+      if (nupd > 0)		/* none changed: view.ident may be NULL */
+	{
+	  memcpy (upd, view.ident, (size_t) nupd * sizeof (VIEW_IDENT));
+	}
+      if (nrm > 0)		/* none removed: rm may be NULL */
+	{
+	  qsort (rm, (size_t) nrm, sizeof (int), cmp_int);
+	}
       view.nident = 0;
       while (i < ncar || j < nupd)
 	{
@@ -439,7 +445,10 @@ idents_settle (int keyframe)
       car = p;
       car_cap = view.nident;
     }
-  memcpy (car, view.ident, (size_t) view.nident * sizeof (VIEW_IDENT));
+  if (view.nident > 0)		/* no identity: car may still be NULL */
+    {
+      memcpy (car, view.ident, (size_t) view.nident * sizeof (VIEW_IDENT));
+    }
   ncar = view.nident;
 }
 static int rec_nframes = 0;

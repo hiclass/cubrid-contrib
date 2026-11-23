@@ -12,7 +12,7 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "t22 FAIL: $*"; exit 1; }
 W=-Wl,--wrap=mono_s,--wrap=thr_index_of_tid_mem,--wrap=thr_tid_of,--wrap=os_task_comm,--wrap=os_task_state
 mapfile -t SRCS < <(sh "$HERE/../build.sh" --list-sources | grep -v -e '/cub_ctv\.c$' -e '/ctv_sampler\.c$')
-gcc -O1 -Wall -I"$HERE/../src" -o "$T/t22" "$HERE/t22_os_per_cs.c" "${SRCS[@]}" -lm $W \
+gcc -O1 -Wall ${CTV_TEST_CFLAGS:-} -I"$HERE/../src" -o "$T/t22" "$HERE/t22_os_per_cs.c" "${SRCS[@]}" -lm $W \
   || fail "build"
 LANG=C "$T/t22" "$T/r.rec" || exit 1
 for want in "O 10 1 1010 20 0 20 0 " "O 10 0 1010 79 79 0 0 " "O 11 1 1011 75 0 75 0 " "O 11 0 1011 1 0 1 0 "; do

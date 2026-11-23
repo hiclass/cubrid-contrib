@@ -6,7 +6,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 mapfile -t SRCS < <(sh "$HERE/../build.sh" --list-sources | grep -v -e '/cub_ctv\.c$' -e '/ctv_sampler\.c$')
-gcc -O1 -Wall -I"$HERE/../src" -o "$T/t16" "$HERE/t16_act_samples.c" "${SRCS[@]}" \
+gcc -O1 -Wall ${CTV_TEST_CFLAGS:-} -I"$HERE/../src" -o "$T/t16" "$HERE/t16_act_samples.c" "${SRCS[@]}" \
   || { echo "t16 FAIL: build"; exit 1; }
 LANG=C "$T/t16" record "$T/r.rec" || { echo "t16 FAIL: record"; exit 1; }
 LANG=C "$T/t16" replay "$T/r.rec" || { echo "t16 FAIL: the record does not replay"; exit 1; }
