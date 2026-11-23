@@ -139,7 +139,7 @@ verdict_row (FILE * out, const char *item, const char *judge, const char *eviden
 }
 
 static void
-print_verdict (FILE * out, const CS_FIG * top, const CS_FIG * second)
+print_verdict (FILE * out, const CS_FIG * top, const CS_FIG * second, int hz)
 {
   VERDICT v;
   const CS_ROW *c = &view.rows[top->ix];
@@ -357,11 +357,29 @@ print_verdict (FILE * out, const CS_FIG * top, const CS_FIG * second)
 		 "디스크·CPU 모두 여유 -> 짧은 보유가 잦음")
 	    : M ("holder thread state unknown", "쥔 스레드 상태 미확보"));
   ev[0] = '\0';
-  if (v.os != NULL)
+  if (v.os != NULL && v.os_few)
     {
-      snprintf (ev, sizeof (ev), M ("%s: D %.0f%% R %.0f%% cpu %.0f%%",
-				    "%s: D %.0f%% R %.0f%% cpu %.0f%%"),
-		v.os->comm[0] ? v.os->comm : "thr", v.dsk_pct, v.run_pct, v.cpu_pct);
+      /* too few to judge: the readings themselves, not their shares */
+      snprintf (ev, sizeof (ev), M ("%s: %d reads (under %d): D %d R %d other %d",
+				    "%s: 판독 %d회(%d회 미만): D %d R %d 그 외 %d"),
+		v.os->comm[0] ? v.os->comm : "thr", v.os->samples, OS_MIN_READS,
+		v.os->dsk, v.os->run, v.os->oth);
+      /* a window this short never holds that many: not the holder's doing */
+      if (view.st.samples < os_min_samples (hz))
+	{
+	  size_t o = strlen (ev);
+
+	  snprintf (ev + o, sizeof (ev) - o,
+		    M ("; window too short for %d reads (%d samples, %d needed)",
+		       "; 구간이 짧아 %d회 불가(표본 %d개, %d개부터 가능)"),
+		    OS_MIN_READS, view.st.samples, os_min_samples (hz));
+	}
+    }
+  else if (v.os != NULL)
+    {
+      snprintf (ev, sizeof (ev), M ("%s: %d reads D %.0f%% R %.0f%% cpu %.0f%%",
+				    "%s: 판독 %d회 D %.0f%% R %.0f%% cpu %.0f%%"),
+		v.os->comm[0] ? v.os->comm : "thr", v.os->samples, v.dsk_pct, v.run_pct, v.cpu_pct);
     }
   if (view.disk_avail)
     {
@@ -724,7 +742,7 @@ screen_summary (const CS_LAYOUT * lo, double dt, int hz,
   history_push (view.seq, fig[0].severity >= 2 ? fig[0].ix : -1);
   if (fig[0].severity >= 2)
     {
-      print_verdict (out, &fig[0], lo->count > 1 ? &fig[1] : NULL);
+      print_verdict (out, &fig[0], lo->count > 1 ? &fig[1] : NULL, hz);
     }
   else
     {

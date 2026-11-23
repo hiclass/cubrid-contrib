@@ -467,7 +467,7 @@ void
 verdict_compute (const CS_FIG * top, const CS_FIG * second, VERDICT * v)
 {
   const CS_ROW *c = &view.rows[top->ix];
-  int k, hs, thr_samples, hthr;
+  int k, hs, thr_samples, hthr, judged;
   double waited = 0.0;
 
   memset (v, 0, sizeof (*v));
@@ -517,7 +517,8 @@ verdict_compute (const CS_FIG * top, const CS_FIG * second, VERDICT * v)
    * the log device */
   hthr = holder_slot_of (top->ix);
   v->os = !v->readers_most && hthr >= 0 ? view_os_at (hthr, top->ix) : NULL;
-  if (v->os != NULL)
+  v->os_few = v->os != NULL && v->os->samples < OS_MIN_READS;
+  if (v->os != NULL && v->os->samples > 0)
     {
       /* the tick delta covers first..last sighting, not the whole window */
       double seen_s = v->os->span_ms / 1000.0;
@@ -525,26 +526,27 @@ verdict_compute (const CS_FIG * top, const CS_FIG * second, VERDICT * v)
       v->dsk_pct = 100.0 * v->os->dsk / v->os->samples;
       v->run_pct = 100.0 * v->os->run / v->os->samples;
       v->cpu_pct = seen_s >= 0.05
-	? 100.0 * (double) (v->os->ticks1 - v->os->ticks0) / os_clock_ticks () / seen_s : 0.0;
+	? 100.0 * ((double) v->os->ticks1 - (double) v->os->ticks0) / os_clock_ticks () / seen_s : 0.0;
     }
+  judged = v->os != NULL && !v->os_few;	/* a few readings decide nothing */
   if (v->os == NULL && !view.disk_avail)
     {
       v->bound = VB_NONE;
     }
   /* the log device's await speaks for the log sections only; any other
    * section needs its holder seen in D state */
-  else if ((v->os != NULL && v->dsk_pct >= 50.0)
+  else if ((judged && v->dsk_pct >= 50.0)
 	   || (strncmp (c->name, "LOG", 3) == 0 && view.disk_avail
 	       && view.disk_await_ms >= 5.0))
     {
       v->bound = VB_DISK;
     }
-  else if (v->os != NULL && (v->run_pct >= 80.0 || v->cpu_pct >= 80.0))
+  else if (judged && (v->run_pct >= 80.0 || v->cpu_pct >= 80.0))
     {
       v->bound = VB_CPU;
     }
   else
     {
-      v->bound = v->os != NULL ? VB_SHORT : VB_UNKNOWN;
+      v->bound = judged ? VB_SHORT : VB_UNKNOWN;
     }
 }

@@ -9,14 +9,25 @@
  *     once (both in that sample): four entries, one read a sample per
  *     thread, the verdict on CS 0 = thread 10 under CS 0 (R), not its LOG
  *     entry (D) nor thread 11
- *   2 20 Hz a thread: 20 samples 10 ms apart read 4 times
+ *   2 20 Hz a thread: at 100 Hz one sample in every block of 5 is read
  *   3 a new window forgets the readings of the last one
- *   4 a failing read is throttled like any other and counts nowhere
- *   5 a thread holding two sections: both entries get the same samples,
- *     also when the clock passes the 50 ms mark between them
+ *   4 a failing read is paced like any other and counts nowhere
+ *   5 a thread holding two sections: both entries get the same samples
+ *     from one read, whatever time the first read takes
+ * The window reads every sample (made for 1 Hz) except where a case sets
+ * the 100 Hz pace (live_os_pace, seed fixed).
  *   6 readers hold most of the CS: no holder is named, no thread state
  *   7 the holder's thread is unknown: no other thread's state instead
  *   8 more threads than readings kept (OS_RD_MAX): names only past it
+ *   9 no reading of the holder at all - every read failed, or (100 Hz) it
+ *     held in every sample but the ones drawn for reading: its entry is
+ *     shown with 0 readings, not "no thread" (that frame goes to the third
+ *     record); fewer readings than OS_MIN_READS: shown, not judged (the
+ *     second record); exactly OS_MIN_READS: judged
+ *  10 a window too short for OS_MIN_READS readings: the screen says so for
+ *     20 and 26 samples at 100 Hz and for 16 samples at 50 Hz, not for 27
+ *     samples at 100 Hz nor for 20 at 50 Hz - the hz of the record's header
+ *     decides (records four to eight)
  * Target reads are replaced (ld --wrap): thread ids, procfs, the clock.
  */
 #include "../src/ctv_sampler.c"
@@ -128,7 +139,7 @@ main (int argc, char **argv)
   const OS_THR *a, *b, *c, *d;
   int i, k, bad = 0, r0, r1;
 
-  if (argc != 2)
+  if (argc != 10)
     {
       return 2;
     }
@@ -159,10 +170,10 @@ main (int argc, char **argv)
     {
       return 1;
     }
-  w = live_win_new (lo.count, lo.stride);
+  w = live_win_new (lo.count, lo.stride, 1, 1);
   w->no_disk = 1;
 
-  /* 1: 100 samples 60 ms apart (every one may read procfs) */
+  /* 1: 100 samples, every one read */
   live_win_reset (w, lo.count);
   memset (w->blob, 0, (size_t) lo.stride * lo.count);
   for (k = 0; k < 100; k++)
@@ -217,8 +228,9 @@ main (int argc, char **argv)
 	 v.dsk_pct, v.run_pct, v.bound);
   view_record_frame ();
 
-  /* 2: 20 samples 10 ms apart */
+  /* 2: 20 samples at the 100 Hz pace: 4 blocks of 5 */
   live_win_reset (w, lo.count);
+  live_os_pace (w, 100, 20261120);
   r0 = g_reads[0];
   put_free (w, 1);
   for (k = 0; k < 20; k++)
@@ -228,7 +240,9 @@ main (int argc, char **argv)
       live_accumulate (w, &lo);
     }
   CHECK (g_reads[0] - r0 == 4 && SAMPLES (os_of (w, 10, 0)) == 4,
-	 "throttle: %d reads, %d samples in 0.2 s (want 4, 4)", g_reads[0] - r0, SAMPLES (os_of (w, 10, 0)));
+	 "pace: %d reads, %d samples in 20 samples at 100 Hz (want 4, 4)", g_reads[0] - r0,
+	 SAMPLES (os_of (w, 10, 0)));
+  live_os_pace (w, 1, 1);
 
   /* 3: the last window saw thread 10 last in its sample 19; so does this one */
   live_win_reset (w, lo.count);
@@ -252,6 +266,7 @@ main (int argc, char **argv)
 
   /* 4: reads that fail */
   live_win_reset (w, lo.count);
+  live_os_pace (w, 100, 20261120);
   r0 = g_reads[0];
   g_fail = 1;
   g_now += 1.0;
@@ -263,16 +278,18 @@ main (int argc, char **argv)
     }
   g_fail = 0;
   CHECK (g_reads[0] - r0 == 4 && SAMPLES (os_of (w, 10, 0)) == 0,
-	 "failing reads: %d attempts, %d samples in 0.2 s (want 4, 0)", g_reads[0] - r0, SAMPLES (os_of (w, 10, 0)));
+	 "failing reads: %d attempts, %d samples in 20 samples at 100 Hz (want 4, 0)", g_reads[0] - r0,
+	 SAMPLES (os_of (w, 10, 0)));
 
   /* 5: one thread holds both sections; the clock moves between the two */
   live_win_reset (w, lo.count);
+  live_os_pace (w, 100, 20261120);
   r1 = g_reads[1];
   g_now += 1.0;
-  /* 20 ms a sample, and 20 ms pass in each clock read: seen from the
-   * second section the 50 ms mark is passed when it is not from the first */
+  /* 100 Hz pace, and 20 ms pass in each clock read: the second section
+   * takes the first one's reading, it is not read again */
   g_tick = 0.02;
-  for (k = 0; k < 100; k++)
+  for (k = 0; k < 250; k++)
     {
       g_now += 0.02;
       put_cs (w, 0, -1, 0, OWNER_B, 6);
@@ -280,9 +297,10 @@ main (int argc, char **argv)
       live_accumulate (w, &lo);
     }
   g_tick = 0.0;
+  live_os_pace (w, 1, 1);
   CHECK (SAMPLES (os_of (w, 11, 0)) == g_reads[1] - r1 && SAMPLES (os_of (w, 11, 1)) == g_reads[1] - r1
 	 && g_reads[1] - r1 == 50,
-	 "two sections a sample: %d / %d samples from %d reads (want 50 / 50 from 50)",
+	 "two sections a sample: %d / %d samples from %d reads (want 50 / 50 from 50: 250 samples at 100 Hz)",
 	 SAMPLES (os_of (w, 11, 0)), SAMPLES (os_of (w, 11, 1)), g_reads[1] - r1);
 
   /* 6: CS 0 read in 86 samples, written by thread 10 in 4 */
@@ -357,6 +375,186 @@ main (int argc, char **argv)
 	 "70 threads: %d readings kept, %d entries, %d reads (want %d, 70, %d; names only past them)",
 	 w->nrd, w->nos, g_reads_other - r0, OS_RD_MAX, OS_RD_MAX);
 
+  /* 9: thread 10 holds CS 0 in 20 samples, no read succeeds */
+  live_win_reset (w, lo.count);
+  g_now += 1.0;
+  g_fail = 1;
+  put_free (w, 1);
+  for (k = 0; k < 100; k++)
+    {
+      g_now += 0.06;
+      if (k < 20)
+	{
+	  put_cs (w, 0, -1, 1, OWNER_A, 5);
+	}
+      else
+	{
+	  put_free (w, 0);
+	}
+      live_accumulate (w, &lo);
+    }
+  g_fail = 0;
+  view_capture (&lo, rows, w, 6.0);
+  cs_figures (0, 6.0, &f);
+  verdict_compute (&f, NULL, &v);
+  CHECK (v.os != NULL && v.os->samples == 0 && v.os_few && v.bound == VB_UNKNOWN,
+	 "no reading: os %s readings %d few %d bound %d (want the entry, 0, few, %d - not %d)",
+	 v.os != NULL ? "shown" : "none", v.os != NULL ? v.os->samples : -1, v.os_few, v.bound,
+	 VB_UNKNOWN, VB_NONE);
+
+  /* the same at 100 Hz with every read working: which samples the seed
+   * draws is learnt in a first pass, then thread 10 holds in all the others */
+  {
+    static char drawn[200];
+
+    live_os_pace (w, 100, 20261120);
+    live_win_reset (w, lo.count);
+    put_free (w, 0);
+    for (k = 0; k < 200; k++)
+      {
+	live_accumulate (w, &lo);
+	drawn[k] = (char) w->os_pick;
+      }
+    live_os_pace (w, 100, 20261120);
+    live_win_reset (w, lo.count);
+    g_now += 1.0;
+    r0 = g_reads[0];
+    for (k = 0, r1 = 0; k < 200; k++)
+      {
+	g_now += 0.01;
+	if (drawn[k])
+	  {
+	    put_free (w, 0);
+	  }
+	else
+	  {
+	    put_cs (w, 0, -1, 1, OWNER_A, 5);
+	    r1++;
+	  }
+	live_accumulate (w, &lo);
+      }
+    live_os_pace (w, 1, 1);
+    view_capture (&lo, rows, w, 2.0);
+    cs_figures (0, 2.0, &f);
+    verdict_compute (&f, NULL, &v);
+    CHECK (r1 == 160 && g_reads[0] == r0 && v.os != NULL && v.os->samples == 0 && v.os_few
+	   && v.bound == VB_UNKNOWN,
+	   "never on a drawn sample: held %d samples, %d reads, os %s readings %d bound %d (want 160, 0, the entry, 0, %d)",
+	   r1, g_reads[0] - r0, v.os != NULL ? "shown" : "none", v.os != NULL ? v.os->samples : -1, v.bound, VB_UNKNOWN);
+    if (view_record_close () != 0 || view_record_open (argv[3], &h, 0) != 0)
+      {
+	return 1;
+      }
+    view_record_frame ();
+    /* 10: 20 samples at 100 Hz, thread 10 holds CS 0 in all of them */
+    live_os_pace (w, 100, 20261120);
+    live_win_reset (w, lo.count);
+    g_now += 1.0;
+    for (k = 0; k < 20; k++)
+      {
+	g_now += 0.01;
+	put_cs (w, 0, -1, 1, OWNER_A, 5);
+	live_accumulate (w, &lo);
+      }
+    live_os_pace (w, 1, 1);
+    view_capture (&lo, rows, w, 0.2);
+    cs_figures (0, 0.2, &f);
+    verdict_compute (&f, NULL, &v);
+    CHECK (v.os != NULL && v.os->samples == 4 && v.os_few && view.st.samples < os_min_samples (100),
+	   "short window: %d readings in %d samples (want 4 in 20, fewer than the %d a judgement needs %d samples for)",
+	   v.os != NULL ? v.os->samples : -1, view.st.samples, OS_MIN_READS, os_min_samples (100));
+    if (view_record_close () != 0 || view_record_open (argv[4], &h, 0) != 0)
+      {
+	return 1;
+      }
+    view_record_frame ();
+    /* 26 and 27 samples at 100 Hz, held in the first 10; 16 samples at
+     * 50 Hz, held throughout; 20 samples at 50 Hz, held in the first 10 */
+    for (r0 = 0; r0 < 4; r0++)
+      {
+	VIEW_HDR h2 = h;
+	int hz = r0 >= 2 ? 50 : 100, len = r0 == 0 ? 26 : r0 == 1 ? 27 : r0 == 2 ? 16 : 20;
+
+	h2.hz = hz;
+	live_os_pace (w, hz, 20261120);
+	live_win_reset (w, lo.count);
+	g_now += 1.0;
+	for (k = 0; k < len; k++)
+	  {
+	    g_now += 1.0 / hz;
+	    if (r0 == 2 || k < 10)
+	      {
+		put_cs (w, 0, -1, 1, OWNER_A, 5);
+	      }
+	    else
+	      {
+		put_free (w, 0);
+	      }
+	    live_accumulate (w, &lo);
+	  }
+	live_os_pace (w, 1, 1);
+	view_capture (&lo, rows, w, (double) len / hz);
+	cs_figures (0, (double) len / hz, &f);
+	verdict_compute (&f, NULL, &v);
+	CHECK (v.os != NULL && v.os_few && view.st.samples == len
+	       && (view.st.samples < os_min_samples (hz)) == (r0 == 0 || r0 == 2),
+	       "window of %d samples at %d Hz: os %s few %d, %d samples, least for a judgement %d",
+	       len, hz, v.os != NULL ? "shown" : "none", v.os_few, view.st.samples, os_min_samples (hz));
+	if (view_record_close () != 0 || view_record_open (argv[5 + r0], &h2, 0) != 0)
+	  {
+	    return 1;
+	  }
+	view_record_frame ();
+      }
+    if (view_record_close () != 0 || view_record_open (argv[9], &h, 0) != 0)
+      {
+	return 1;
+      }
+  }
+
+  /* thread 10 holds CS 0 (running) in OS_MIN_READS samples, then in one
+   * fewer (that frame goes to the second record) */
+  for (r0 = OS_MIN_READS; r0 >= OS_MIN_READS - 1; r0--)
+    {
+      live_win_reset (w, lo.count);
+      g_now += 1.0;
+      g_state[0] = 'R';
+      put_free (w, 1);
+      for (k = 0; k < 100; k++)
+	{
+	  g_now += 0.06;
+	  if (k < r0)
+	    {
+	      put_cs (w, 0, -1, 1, OWNER_A, 5);
+	    }
+	  else
+	    {
+	      put_free (w, 0);
+	    }
+	  live_accumulate (w, &lo);
+	}
+      view_capture (&lo, rows, w, 6.0);
+      cs_figures (0, 6.0, &f);
+      verdict_compute (&f, NULL, &v);
+      if (r0 < OS_MIN_READS)
+	{
+	  CHECK (v.os != NULL && v.os->samples == r0 && v.os_few && v.bound == VB_UNKNOWN,
+		 "%d readings: os %s few %d bound %d (want shown, few, %d: not judged)", r0,
+		 v.os != NULL ? "shown" : "none", v.os_few, v.bound, VB_UNKNOWN);
+	}
+      else
+	{
+	  CHECK (v.os != NULL && v.os->samples == r0 && !v.os_few && v.bound == VB_CPU,
+		 "%d readings: os %s few %d bound %d (want shown, judged, %d)", r0,
+		 v.os != NULL ? "shown" : "none", v.os_few, v.bound, VB_CPU);
+	}
+    }
+
   live_win_free (w);
+  if (view_record_close () != 0 || view_record_open (argv[2], &h, 0) != 0)
+    {
+      return 1;
+    }
+  view_record_frame ();
   return view_record_close () != 0 || bad;
 }

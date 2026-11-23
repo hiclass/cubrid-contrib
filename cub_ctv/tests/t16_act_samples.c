@@ -41,7 +41,7 @@ main (int argc, char **argv)
 	{
 	  return 1;
 	}
-      w = live_win_new (lo.count, lo.stride);
+      w = live_win_new (lo.count, lo.stride, 1, 1);
       w->no_disk = 1;
       live_win_reset (w, lo.count);
       /* 100 samples: tran -1 waiters on threads 10 and 11 in every one,

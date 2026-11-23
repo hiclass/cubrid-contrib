@@ -47,7 +47,7 @@ main (void)
       rows[i].tran = -1;
       rows[i].has_stats = 1;
     }
-  w = live_win_new (lo.count, lo.stride);
+  w = live_win_new (lo.count, lo.stride, 1, 1);
   w->no_disk = 1;
   live_win_reset (w, lo.count);
   memset (w->blob, 0, (size_t) lo.stride * lo.count);

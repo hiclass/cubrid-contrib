@@ -23,7 +23,7 @@
 | `VERDICT_WAITERS_LISTED` | 4 | 판정 `who suffers` 근거에 나열하는 대기 세션 수 |
 | `HIST_CAP` (verdict.c 내부) | 4096 | 프레임 번호→1위 CS 링 테이블 크기 |
 | `CHAIN_REWALK_S` | 0.25 | 같은 큐 헤드 재순회 최소 간격(초) |
-| `OS_SAMPLE_MIN_S` | 0.05 | 새 큐 헤드 순회 및 procfs 스레드 상태 샘플 최소 간격(초) |
+| `OS_SAMPLE_MIN_S` | 0.05 | 새 큐 헤드 순회 최소 간격, procfs 스레드 상태 판독 블록의 길이(초) |
 | `OS_MAX` | 128 | 윈도우당 OS 상태 항목 수((스레드, CS) 쌍) |
 | `OS_RD_MAX` | 64 | 윈도우당 procfs 상태를 읽는 스레드 수 |
 | `OS_COMM_LEN` | 16 | 스레드 이름 버퍼 |
@@ -52,7 +52,7 @@
 | `VB_DISK` | 1 | 디스크 쓰기 지연 |
 | `VB_CPU` | 2 | 쥔 스레드 CPU 포화 |
 | `VB_SHORT` | 3 | 둘 다 포화 아님(짧은 보유가 잦음) |
-| `VB_UNKNOWN` | 4 | 장치는 아는데 스레드 상태는 모름 |
+| `VB_UNKNOWN` | 4 | 스레드 상태를 모름(판독이 없거나 `OS_MIN_READS` 미만) |
 
 ### 1.3 표시 관련 전역 변수
 
@@ -131,6 +131,7 @@
 | `wtran[4]`, `wsamples[4]` | `int` | 나열할 대기 세션 tran 과 목격 샘플 수(`VERDICT_WAITERS_LISTED`) |
 | `nlisted`, `more_waiters` | `int` | 나열 수(≤4), 5번째 이상 있음 |
 | `os` | `const OS_THR *` | `누가` 행이 지목한 보유자의 스레드가 **top CS 를 쥔 동안**의 OS 상태, 없으면 NULL(`view.os` 안을 가리킴) |
+| `os_few` | `int` | `os` 의 판독 수가 `OS_MIN_READS`(7) 미만: 판독값은 보이되 판단에 쓰지 않는다 |
 | `dsk_pct`, `run_pct`, `cpu_pct` | `double` | 그 스레드의 D·R 상태 비율, CPU 사용률(%) |
 | `bound` | `int` | `VB_*` |
 
@@ -742,22 +743,23 @@ push 되는 값: 요약 화면이 그려질 때 `fig[0].severity >= 2 ? fig[0].i
 | `wtran[]`, `wsamples[]`, `nlisted` | 위 항목을 act 순서로 앞에서 4개 |
 | `more_waiters` | 5번째 이상이 있으면 1 |
 | `waited_pct` | `nwaiters > 0 && view.st.samples > 0` 이면 `100.0 * waited / nwaiters / view.st.samples`, 아니면 0(memset 값). `waited`(double) = **위 조건의 모든 항목**(`nwaiters` 개 전부, 나열된 4개만이 아님)의 `samples` 합 |
-| `os` | `thr = holder_slot_of(top->ix)`. `readers_most` 가 아니고 `thr >= 0` 이면 `view_os_at(thr, top->ix)`(그 스레드가 top CS 를 쥔 동안의 표본, `samples > 0`), 아니면 NULL. 판정의 행들은 같은 보유자를 가리킨다: `누가` 가 지목한 보유자(holder)의 스레드만 쓰고, 그 스레드가 다른 CS 를 쥐고 있던 표본은 섞지 않는다. 보유자를 지목하지 않는 경우(`readers_most`, holder −2)와 그 스레드의 top CS 표본이 없는 경우는 NULL — 다른 스레드의 상태로 대신하지 않는다(그때 디스크/CPU 행은 장치 수치만으로 판단하거나 `쥔 스레드 상태 미확보`). 클라이언트 보유자의 활동은 (cs, tran, cpid) 당 한 항목이고 `thr` 은 처음 알려진 칸이므로, 그 tran 이 구간 중 다른 워커에서도 돌았으면 처음 칸의 표본만 본다 |
-| `dsk_pct` | `100.0 * os->dsk / os->samples` (실수) |
+| `os` | `thr = holder_slot_of(top->ix)`. `readers_most` 가 아니고 `thr >= 0` 이면 `view_os_at(thr, top->ix)`(그 스레드가 top CS 를 쥔 동안의 판독 항목; 판독이 0 개여도 항목이 있으면 그것), 아니면 NULL. 판정의 행들은 같은 보유자를 가리킨다: `누가` 가 지목한 보유자(holder)의 스레드만 쓰고, 그 스레드가 다른 CS 를 쥐고 있던 표본은 섞지 않는다. 보유자를 지목하지 않는 경우(`readers_most`, holder −2)와 그 스레드의 top CS 표본이 없는 경우는 NULL — 다른 스레드의 상태로 대신하지 않는다(그때 디스크/CPU 행은 장치 수치만으로 판단하거나 `쥔 스레드 상태 미확보`). 클라이언트 보유자의 활동은 (cs, tran, cpid) 당 한 항목이고 `thr` 은 처음 알려진 칸이므로, 그 tran 이 구간 중 다른 워커에서도 돌았으면 처음 칸의 표본만 본다 |
+| `os_few` | `os != NULL && os->samples < OS_MIN_READS` |
+| `dsk_pct` | `100.0 * os->dsk / os->samples` (실수; `os->samples == 0` 이면 계산하지 않고 0) |
 | `run_pct` | `100.0 * os->run / os->samples` (실수) |
-| `cpu_pct` | `seen_s = os->span_ms / 1000.0`; `seen_s >= 0.05` 이면 `100.0 * (double)(ticks1 - ticks0) / os_clock_ticks() / seen_s`, 아니면 0.0. `os_clock_ticks()` 는 `long` = `sysconf(_SC_CLK_TCK)` (≤0 이면 100) |
+| `cpu_pct` | `seen_s = os->span_ms / 1000.0`; `seen_s >= 0.05` 이면 `100.0 * ((double) ticks1 - (double) ticks0) / os_clock_ticks() / seen_s`(실수로 바꿔 뺀다: 기록의 틱 토큰이 어떤 값이어도 넘치지 않는다), 아니면 0.0. `os_clock_ticks()` 는 `long` = `sysconf(_SC_CLK_TCK)` (≤0 이면 100) |
 
-`dsk_pct`·`run_pct`·`cpu_pct` 는 `os != NULL` 일 때만 계산되고, 아니면 0(memset). samples 0 프레임(스냅샷형)에서도 위 가드 덕분에 NaN 이 생기지 않는다(요약 화면은 라이브·대화형 재생에서만 그려지므로 samples ≥ 1 이 정상이다).
+`dsk_pct`·`run_pct`·`cpu_pct` 는 `os != NULL && os->samples > 0` 일 때만 계산되고, 아니면 0(memset). samples 0 프레임(스냅샷형)에서도 위 가드 덕분에 NaN 이 생기지 않는다(요약 화면은 라이브·대화형 재생에서만 그려지므로 samples ≥ 1 이 정상이다).
 
-`bound` (위에서부터 첫 일치):
+`bound` (위에서부터 첫 일치). `judged = os != NULL && !os_few` — 판독이 `OS_MIN_READS` 미만이면 그 스레드의 상태로는 판단하지 않는다(판독 1개가 D 면 D 100% 가 되는 식의 판단을 막는다):
 
 | 값 | 조건 |
 |---|---|
 | `VB_NONE` | `os == NULL && !view.disk_avail` |
-| `VB_DISK` | (`os != NULL && dsk_pct >= 50.0`) 또는 (CS 이름이 `LOG` 로 시작(`strncmp(name, "LOG", 3)`, `LOG_ARCHIVE` 포함) && `view.disk_avail` && `view.disk_await_ms >= 5.0`) |
-| `VB_CPU` | `os != NULL && (run_pct >= 80.0 \|\| cpu_pct >= 80.0)` |
-| `VB_SHORT` | `os != NULL` |
-| `VB_UNKNOWN` | 그 밖(장치만 앎) |
+| `VB_DISK` | (`judged && dsk_pct >= 50.0`) 또는 (CS 이름이 `LOG` 로 시작(`strncmp(name, "LOG", 3)`, `LOG_ARCHIVE` 포함) && `view.disk_avail` && `view.disk_await_ms >= 5.0`) |
+| `VB_CPU` | `judged && (run_pct >= 80.0 \|\| cpu_pct >= 80.0)` |
+| `VB_SHORT` | `judged` |
+| `VB_UNKNOWN` | 그 밖(판독이 없거나 모자람). 보유 스레드의 항목이 있으면(판독 0회 포함) 장치 수치가 없어도 여기다 — `VB_NONE` 은 항목조차 없을 때만 |
 
 ---
 
@@ -806,7 +808,7 @@ push 되는 값: 요약 화면이 그려질 때 `fig[0].severity >= 2 ? fig[0].i
 1. `cs_figures_ranked(lo->count, dt, fig)`.
 2. `view.hist_known` 이면 `history_import(view.seq, view.hist_n, view.hist_back, view.hist_top)`.
 3. `history_push(view.seq, fig[0].severity >= 2 ? fig[0].ix : -1)`.
-4. `fig[0].severity >= 2` 이면 `print_verdict(out, &fig[0], lo->count > 1 ? &fig[1] : NULL)` (§7.4).
+4. `fig[0].severity >= 2` 이면 `print_verdict(out, &fig[0], lo->count > 1 ? &fig[1] : NULL, hz)` (§7.4; `hz` 는 근거 칸의 "구간이 짧음" 판단에 쓴다).
 5. 아니면 HEAD `[verdict] no critical section contention` / `[판정] 크리티컬 섹션 경합 없음` OFF `\n`. 이어서 `view.wait_avail` 이고 `lk = wait_cnt[17]`, `pg = wait_cnt[3]`, `fb = wait_cnt[21]` 의 합이 0 보다 크면: `"  "` + OWNER + `outside the CS layer: lock waits %d (cubrid lockdb), page latch %d, free buffer %d` / `CS 밖에서 대기: 락 %d (cubrid lockdb), 페이지 래치 %d, 빈 버퍼 %d` (200 B 버퍼) 를 `wrap_out(t, 2, 4)` 로 + OFF + `\n`.
 
 ### 7.4 판정 표 (`print_verdict`)
@@ -844,7 +846,7 @@ push 되는 값: 요약 화면이 그려질 때 `fig[0].severity >= 2 ? fig[0].i
 | 〃 | holder == -2 | `reduce the entry rate` / `진입 빈도를 줄일 것` | `no writer holds it; contention is by volume` / `writer 없음; 횟수에 의한 경합` |
 | `check` / `확인할 것` | 항상 | `cs_hint(name)` | `""` (한 칸 행) |
 | `not shown` / `화면 밖` | bound == VB_NONE (여기서 표 종료) | `disk vs daemon CPU (needs disk await); SQL text; service impact (SLA)` / `디스크 vs 데몬 CPU 구분(디스크 await 필요); SQL 문장; 서비스 영향(SLA)` | `""` |
-| `disk/cpu` / `디스크/CPU` | bound != VB_NONE | DISK: `disk write latency` / `디스크 쓰기 지연`; CPU: `holder thread CPU-bound` / `쥔 스레드 CPU 포화`; SHORT: `neither disk nor CPU saturated -> short holds, high rate` / `디스크·CPU 모두 여유 -> 짧은 보유가 잦음`; UNKNOWN: `holder thread state unknown` / `쥔 스레드 상태 미확보` | `ev[0] = 0`. os 있으면 `snprintf(ev, 200, "%s: D %.0f%% R %.0f%% cpu %.0f%%", os->comm[0] ? os->comm : "thr", dsk_pct, run_pct, cpu_pct)` — comm 이 비면 **리터럴 3글자 `thr`**(번호 없음). `view.disk_avail` 이면 `o = strlen(ev)` 뒤에 `snprintf(ev+o, 200-o, "%s%s await %.1f ms util %.0f%%", o ? "; " : "", disk_dev, disk_await_ms, disk_util_pct)`. 언어 공통(EN·KO 서식이 같음) |
+| `disk/cpu` / `디스크/CPU` | bound != VB_NONE | DISK: `disk write latency` / `디스크 쓰기 지연`; CPU: `holder thread CPU-bound` / `쥔 스레드 CPU 포화`; SHORT: `neither disk nor CPU saturated -> short holds, high rate` / `디스크·CPU 모두 여유 -> 짧은 보유가 잦음`; UNKNOWN: `holder thread state unknown` / `쥔 스레드 상태 미확보` | `ev[0] = 0`. os 가 있고 `os_few` 면 `"%s: %d reads (under %d): D %d R %d other %d"` / `"%s: 판독 %d회(%d회 미만): D %d R %d 그 외 %d"` (comm, `os->samples`, `OS_MIN_READS`, `os->dsk`, `os->run`, `os->oth` — 비율이 아닌 판독 개수), 그리고 `view.st.samples < os_min_samples(hz)`(§11.1a: 이 구간에는 `OS_MIN_READS` 회가 들어갈 수 없다)이면 그 뒤에 `"; window too short for %d reads (%d samples, %d needed)"` / `"; 구간이 짧아 %d회 불가(표본 %d개, %d개부터 가능)"` (`OS_MIN_READS`, `view.st.samples`, `os_min_samples(hz)`), 아니고 os 가 있으면 `"%s: %d reads D %.0f%% R %.0f%% cpu %.0f%%"` / `"%s: 판독 %d회 D %.0f%% R %.0f%% cpu %.0f%%"` (comm, `os->samples`, dsk_pct, run_pct, cpu_pct) — comm 이 비면 **리터럴 3글자 `thr`**(번호 없음). `view.disk_avail` 이면 `o = strlen(ev)` 뒤에 `snprintf(ev+o, 200-o, "%s%s await %.1f ms util %.0f%%", o ? "; " : "", disk_dev, disk_await_ms, disk_util_pct)` (이 부분은 언어 공통) |
 | `not shown` / `화면 밖` | bound != VB_NONE | `SQL text; service impact (SLA)` / `SQL 문장; 서비스 영향(SLA)` | `""` |
 
 ### 7.5 CS 순위 표
@@ -1193,13 +1195,26 @@ fflush (stdout);
 
 | 함수 | 동작 |
 |---|---|
-| `live_win_new(count, stride)` | `LIVE_WIN` calloc, `blob = malloc(stride * count)`. 실패 시 die `out of memory` / `메모리 부족` |
+| `live_win_new(count, stride, hz, seed)` | `LIVE_WIN` calloc, `blob = malloc(stride * count)`. 실패 시 die `out of memory` / `메모리 부족`. 끝으로 `live_os_pace(w, hz, seed)` — 판독 블록은 만들 때 정해진다(정하지 않은 창이 모든 표본을 읽는 일이 없게) |
+| `os_block_samples(hz)` | 판독 블록의 표본 수: `(int)(OS_SAMPLE_MIN_S * hz + 0.999)`, 1 미만이면 1 (100 Hz → 5, 50 Hz → 3, 20 Hz 이하 → 1) |
+| `os_min_samples(hz)` | `OS_MIN_READS` 회의 판독이 들어갈 수 있는 가장 짧은 구간의 표본 수: `(OS_MIN_READS - 2) * os_block_samples(hz) + 2` (한 블록의 마지막 표본, 온전한 블록 `OS_MIN_READS − 2` 개, 다음 블록의 첫 표본; 100 Hz → 27, 50 Hz → 17, 20 Hz 이하 → 7). 이보다 표본이 적은 구간은 어떤 뽑기에서도 `OS_MIN_READS` 회에 못 미친다. 구간 내내 쥔 스레드가 어떤 뽑기에서도 `OS_MIN_READS` 회 이상 읽히는 것은 표본 `(OS_MIN_READS + 1) * os_block_samples(hz) − 1` 개부터다(100 Hz → 39; 양 끝에 걸친 두 블록의 뽑힌 표본이 모두 구간 밖일 수 있으므로). 그 사이 길이에 대한 알림은 없다 |
+| `live_os_pace(w, hz, seed)` | 판독 블록(§11.1a): `os_every = os_block_samples(hz)`, `os_in = 0`, `os_rng = seed`(0 이면 1) |
 | `live_win_free` | blob, w 해제 |
 | `live_win_reset(w, count)` | `win_stats_clear(&w->st)` (occ/wai/seen_* 0, `seen_tran = -1`, `seen_cpid = -1`, `seen_n = -1`, `nact = act_dropped = 0`); CS 마다 `wq_last = 0`, `ch_n = 0`, `own_last = 0`, `own_slot = -1`; `act_ix` 전부 0; `nos = 0`; `nrd = 0`(스레드별 판독 캐시도 비움: 지난 구간의 표본 번호·판독값이 새 구간에 쓰이지 않게); `!no_disk` 이면 `view_disk_begin(w)`. `ch_walked[]` 는 리셋하지 않는다(윈도우를 넘어 유지) |
 
+### 11.1a 판독 블록 (`os_block_step(w)`)
+
+procfs 상태를 읽을 표본을 정한다. 표본은 `os_every` 개씩 블록을 이루고(구간을 넘어 이어진다), 블록마다 한 표본만 판독 표본이다.
+
+1. `os_in == 0`(블록의 첫 표본)이면 순번을 뽑는다: xorshift32 `x = os_rng; x ^= x << 13; x ^= x >> 17; x ^= x << 5; os_rng = x`(32비트 부호 없는 산술), `os_at = (int)(((uint64_t) x * (uint32_t) os_every) >> 32)` (0..`os_every`−1).
+2. `os_pick = (os_in == os_at)`.
+3. `os_in = (os_in + 1) % os_every`.
+
+판독 표본은 시계가 아니라 표본 순번으로 정한다: 표본마다 뽑힐 확률이 정확히 1/`os_every` 이고, 어느 스레드가 무엇을 쥐고 있는지와 무관하다. 그래서 판독의 상태 분포는 "그 CS 를 쥐고 있던 표본" 의 상태 분포를 따른다(보유 주기가 50 ms 의 배수여도 한 위상에 고정되지 않는다). 샘플러는 hz 보다 빨리 돌지 않으므로(§12) 스레드당 판독은 평균 20 Hz 이하다(블록당 1회; 이웃 블록의 두 판독은 표본 1개 간격까지 붙을 수 있다). 샘플 루프가 밀리면 블록도 그만큼 길어져 판독이 준다. 라이브 실행의 씨앗은 `getpid() ^ (unsigned)(uint64_t)(mono_s() * 1e6)`(§12; double 을 먼저 64비트로 바꾼다 — 32비트 범위를 넘는 double 의 직접 변환은 정의되지 않은 동작), 테스트는 고정값. 씨앗은 기록하지 않으므로 라이브 실행의 판독 위치는 재현되지 않는다(판독 결과 `O` 줄만 남는다).
+
 ### 11.2 샘플 1회 (`live_accumulate(w, lo)`)
 
-blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. CS i 마다:
+blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_block_step(w)`(§11.1a). CS i 마다:
 
 1. `cs_decode_raw` 로 rwlock, wr, ww, tran. `owner = rd_u64(blob, off + off_owner)`, `held = cs_held(rwlock, owner)` (§8.1 `row_held`: writer, 또는 강등된 owner).
 2. `rwlock != 0` → `st.occ[i]++`.
@@ -1246,12 +1261,12 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. CS i 마다:
 
 ### 11.4 OS 샘플 (`os_sample(w, k, cs)`)
 
-스레드 칸 k 가 CS `cs` 를 쥐고 있는 표본마다 불린다. procfs 판독은 스레드당 20 Hz 상한이고, 읽은 상태는 (k, cs) 항목에 센다.
+스레드 칸 k 가 CS `cs` 를 쥐고 있는 표본마다 불린다. procfs 는 판독 표본(§11.1a, `w->os_pick`)에서만 읽고, 읽은 상태는 (k, cs) 항목에 센다.
 
 1. `tid = thr_tid_of(k)`; ≤ 0 이면 무시.
 2. `w->os[]` 에서 `slot == k && cs == cs` 인 항목을 찾고, 없으면 `nos < OS_MAX`(128) 일 때 새로 만들어 slot, cs, tid, `os_task_comm` 으로 comm(16B) 을 채움(`os_task_comm` 은 tid 별 5초 캐시라 같은 스레드의 둘째 항목은 procfs 를 다시 읽지 않는다, 01 §7.6). 가득 차면 무시.
-3. 스레드별 판독 캐시 `w->rd[]` 에서 `slot == k` 를 찾고, 없으면 `nrd < OS_RD_MAX`(64) 일 때 새로 만든다(`t = 0`, `seq = -1`). 가득 차면 무시.
-4. 판독 여부는 **스레드당 표본당 한 번** 정한다. `rd->seq != w->st.samples`(이 표본에서 이 스레드를 처음 봄)이면: `rd->seq = w->st.samples`, `now = mono_s()`; `rd->t > 0 && now - rd->t < 0.05`(스레드당 20 Hz 상한)이면 `rd->ok = 0`, 아니면 `rd->t = now`, `rd->ok = os_task_state(target_pid, tid, &rd->st, &rd->ticks) == 0` (`/proc/<pid>/task/<tid>/stat` 의 상태 문자와 utime+stime; 판독 실패도 `rd->t` 를 갱신해 스로틀 적용). `rd->seq == w->st.samples` 이면(같은 스레드가 한 표본에 CS 를 둘 이상 쥠) 그 결정과 판독값을 그대로 쓴다 — 시계를 다시 보지 않으므로 한 표본은 그 스레드가 쥔 CS 항목 **전부에 세거나 전부에 세지 않는다**.
+3. `!w->os_pick` 이면 여기서 끝(항목은 이름만 가진 채 남는다; 판독 0개 항목도 판정에 `판독 0회` 로 보인다, §6.7). 판독 표본이면 스레드별 판독 캐시 `w->rd[]` 에서 `slot == k` 를 찾고, 없으면 `nrd < OS_RD_MAX`(64) 일 때 새로 만든다(`t = 0`, `seq = -1`). 가득 차면 무시.
+4. 판독은 **스레드당 표본당 한 번**이다. `rd->seq != w->st.samples`(이 표본에서 이 스레드를 처음 봄)이면: `rd->seq = w->st.samples`, `rd->t = mono_s()`, `rd->ok = os_task_state(target_pid, tid, &rd->st, &rd->ticks) == 0` (`/proc/<pid>/task/<tid>/stat` 의 상태 문자와 utime+stime). `rd->seq == w->st.samples` 이면(같은 스레드가 한 표본에 CS 를 둘 이상 쥠) 그 판독값을 그대로 쓴다 — 다시 읽지 않으므로 한 표본은 그 스레드가 쥔 CS 항목 **전부에 세거나(성공) 전부에 세지 않는다(실패)**.
 5. `!rd->ok` → 무시.
 6. 항목의 첫 성공이면 `ticks0 = rd->ticks`, `t_first = rd->t`. 매번 `t_last = rd->t`, `ticks1 = rd->ticks`, `span_ms = (int)((rd->t - t_first) * 1000 + 0.5)`, `samples++`, 상태 `R` → run++, `D` → dsk++, 그 밖 oth++.
 
@@ -1282,7 +1297,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. CS i 마다:
 ### 12.2 시작 (`live_mode` → `run_start`)
 
 1. `r` 를 0 으로, `sampled = !table_only`, `screen = !json && !trans && isatty(STDOUT_FILENO)`, `period = 1.0 / hz`, `interval = h->interval`.
-2. `w = live_win_new(count, stride)`, `w->cs_base = cs_base`, `w->no_disk = !sampled`, `live_win_reset`.
+2. `w = live_win_new(count, stride, h->hz, (unsigned) getpid() ^ (unsigned)(uint64_t)(mono_s() * 1e6))`(§11.1a; 씨앗은 실행마다 다른 아무 값이면 되고 기록하지 않는다), `w->cs_base = cs_base`, `w->no_disk = !sampled`, `live_win_reset`.
 3. `run_start`:
    1. screen 이면 `keys = keys_enter() == 0`.
       - keys: `layout_detail` 이면 경고 `the terminal shows the summary screen; --detail applies to the scrolling (pipe) live output` / `터미널은 요약 화면을 보입니다; --detail 은 스크롤(파이프) 라이브 출력에 적용`. 그리고 `screen_enter()`.

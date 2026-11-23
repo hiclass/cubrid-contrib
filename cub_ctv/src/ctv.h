@@ -174,9 +174,11 @@
 					 * after the queue sample may already be resumed */
 #define VERDICT_HISTORY    10	/* windows behind the persistence line */
 #define CHAIN_REWALK_S   0.25	/* re-walk of a queue under the same head */
-#define OS_SAMPLE_MIN_S  0.05	/* procfs state sampling cap (20 Hz per thread) */
+#define OS_SAMPLE_MIN_S  0.05	/* 50 ms: the block of samples one procfs state read is drawn from; the least
+				 * gap of client pid reads and of walks of a new queue head */
 #define OS_MAX             128	/* OS state entries per frame: (thread, CS) pairs */
 #define OS_RD_MAX          64	/* threads whose procfs state a window reads */
+#define OS_MIN_READS        7	/* readings of a holder a disk/CPU judgement needs */
 #define OS_COMM_LEN        16
 #define LAYOUT_AUTO        0	/* split owner block when the row overflows */
 #define LAYOUT_WIDE        1	/* always one line */
@@ -344,7 +346,7 @@ typedef struct
   char comm[OS_COMM_LEN];
 } OS_THR;
 
-/* one thread's procfs reading: at most one per OS_SAMPLE_MIN_S, shared by
+/* one thread's procfs reading in a sample drawn for reading, shared by
  * every CS the thread holds in that sample */
 typedef struct
 {
@@ -390,6 +392,10 @@ typedef struct
   int nos;
   OS_RD rd[OS_RD_MAX];		/* their procfs readings */
   int nrd;
+  int os_every;			/* samples in a reading block (live_os_pace) */
+  int os_in, os_at;		/* this sample's place in its block; the place drawn */
+  int os_pick;			/* this sample is the one drawn: holders are read */
+  uint32_t os_rng;		/* draws the place (xorshift32, never 0) */
   uint64_t dk0[3];		/* diskstats at window start: wr_ios, wr_ms, io_ms */
   int dk_ok;
   int no_disk;			/* nothing shows or records disk figures */
@@ -470,6 +476,7 @@ typedef struct
 #define REC_MAGIC          "CTVREC 5"
 #define INTERVAL_MIN       0.1	/* shortest --interval (s): one capture each */
 #define INTERVAL_MAX       3600.0	/* longest --interval (s) */
+#define HZ_MAX          10000	/* --hz, and the hz of a live record */
 #define REC_SAMPLES_MAX    36010000	/* samples of a window: --hz max x
 					 * (--interval max + 1 s) */
 #define REC_KEYFRAME       60	/* every Nth frame carries every identity */
@@ -577,7 +584,7 @@ typedef struct
 #define VB_DISK 1
 #define VB_CPU 2
 #define VB_SHORT 3		/* neither saturated: short holds, high rate */
-#define VB_UNKNOWN 4		/* the device known, the thread not */
+#define VB_UNKNOWN 4		/* the thread's state not known (no or too few readings) */
 typedef struct
 {
   CS_FIG top, second;
@@ -594,6 +601,7 @@ typedef struct
   int wtran[VERDICT_WAITERS_LISTED], wsamples[VERDICT_WAITERS_LISTED];
   int nlisted, more_waiters;
   const OS_THR *os;		/* the named holder's thread under the top CS, or NULL */
+  int os_few;			/* its readings are fewer than OS_MIN_READS: shown, not judged */
   double dsk_pct, run_pct, cpu_pct;
   int bound;			/* VB_* */
 } VERDICT;
@@ -821,9 +829,12 @@ void json_trans (void);
 void json_doc (int pid, const char *db, const CS_LAYOUT * lo, int window, int rows, int trans);
 
 /* ctv_sampler.c: live sampler - the per-sample counts of a window (LIVE_WIN): occupancy, waits, activity, queue walks, OS states */
-LIVE_WIN *live_win_new (int count, int stride);
+LIVE_WIN *live_win_new (int count, int stride, int hz, unsigned seed);
 void live_win_free (LIVE_WIN * w);
 void live_win_reset (LIVE_WIN * w, int count);
+void live_os_pace (LIVE_WIN * w, int hz, unsigned seed);
+int os_block_samples (int hz);
+int os_min_samples (int hz);
 void live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo);
 
 /* ctv_present.c: frame output - one frame in the chosen mode: summary screen, scrolling rows, transaction table or JSON */

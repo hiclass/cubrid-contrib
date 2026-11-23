@@ -592,7 +592,8 @@ view_replay_open (const char *path, VIEW_HDR * h)
   rec_unescape (tok[11], h->lib, sizeof (h->lib));
   rec_unescape (tok[12], h->tran_refused, sizeof (h->tran_refused));
   if (h->lo.count < 1 || h->lo.count > MAX_CS
-      || (h->live && !(h->interval >= INTERVAL_MIN && h->interval <= INTERVAL_MAX)))
+      || (h->live && !(h->interval >= INTERVAL_MIN && h->interval <= INTERVAL_MAX))
+      || (h->live && (h->hz < 1 || h->hz > HZ_MAX)))
     {
       rec_bad ();
     }
@@ -892,7 +893,18 @@ rd_O (char **tok, int n, REC_RD * rd)
   o->ticks0 = atol (tok[8]);
   o->ticks1 = atol (tok[9]);
   rec_unescape (tok[10], o->comm, sizeof (o->comm));
-  if (o->cs < -1 || o->cs >= view.count)
+  /* a reading is one sample of the window in one of the three states:
+   * counts past the window or that do not add up are shown nowhere (each
+   * is bounded before they are summed) */
+  if (o->cs < -1 || o->cs >= view.count
+      || o->run < 0 || o->run > view.st.samples
+      || o->dsk < 0 || o->dsk > view.st.samples
+      || o->oth < 0 || o->oth > view.st.samples
+      || o->samples > view.st.samples || o->samples != o->run + o->dsk + o->oth)
+    {
+      rec_bad ();
+    }
+  if (o->span_ms < 0)
     {
       rec_bad ();
     }

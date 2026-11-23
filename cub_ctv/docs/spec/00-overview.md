@@ -94,7 +94,8 @@
 | `tests/t19_readers_most.sh` | writer 전체의 보유가 점유의 절반 미만이면 보유자 미지목(reader 다수) | 불필요 |
 | `tests/t20_utf8_ranges.sh` | UTF-8 둘째 바이트 범위(RFC 3629), 정화·JSON 유효 | 불필요 |
 | `tests/t21_clock_use.sh` | 시계 사용 규약(00 '시계') 소스 검사 | 불필요 |
-| `tests/t22_os_per_cs.sh` | OS 상태의 (스레드, CS) 귀속, 스레드당 판독 상한, 판정 디스크/CPU = 보유자 스레드 | 불필요 |
+| `tests/t22_os_per_cs.sh` | OS 상태의 (스레드, CS) 귀속, 스레드당 판독 상한, 판정 디스크/CPU = 보유자 스레드, 최소 판독 수와 짧은 구간 표시, 손상된 `O` 줄·헤더 hz 거부 | 불필요 |
+| `tests/t23_read_timing.sh` | 상태 판독이 보유의 어느 시점에든 같은 확률로 떨어지는가(블록당 무작위 1표본), 판독 수의 하한·상한 | 불필요 |
 | `tests/t24_replay_inputs.sh` | 픽스처가 지나지 않는 정상 기록(유휴 서버, 신원 변화분이 빈 프레임)의 재생 | 불필요 |
 | `tests/sanitize.sh` | 서버가 필요 없는 시험 전부를 ASan + UBSan 빌드로 재실행 | 불필요 |
 | `tests/t2_show_compare.py` | 엔진 `SHOW CRITICAL SECTIONS` 값이 전후 판독 사이 + 자기영향 0 | 필요 |

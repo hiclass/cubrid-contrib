@@ -24,7 +24,7 @@
 
 /* a live window: fixed per-CS arrays, the raw array image sized by stride */
 LIVE_WIN *
-live_win_new (int count, int stride)
+live_win_new (int count, int stride, int hz, unsigned seed)
 {
   LIVE_WIN *w = calloc (1, sizeof (LIVE_WIN));
 
@@ -32,7 +32,53 @@ live_win_new (int count, int stride)
     {
       die ("out of memory", "메모리 부족", NULL);
     }
+  live_os_pace (w, hz, seed);
   return w;
+}
+
+/* procfs states are read on one sample of every block of os_every (50 ms
+ * worth at hz), its place drawn anew for each block: every sample is as
+ * likely to be read as any other, wherever in a hold it falls */
+int
+os_block_samples (int hz)
+{
+  int n = (int) (OS_SAMPLE_MIN_S * hz + 0.999);
+
+  return n < 1 ? 1 : n;
+}
+
+/* the fewest samples of a window OS_MIN_READS readings can fall in: the
+ * last sample of a block, whole blocks between, the first of another */
+int
+os_min_samples (int hz)
+{
+  return (OS_MIN_READS - 2) * os_block_samples (hz) + 2;
+}
+
+void
+live_os_pace (LIVE_WIN * w, int hz, unsigned seed)
+{
+  w->os_every = os_block_samples (hz);
+  w->os_in = 0;
+  w->os_rng = seed != 0 ? seed : 1;
+}
+
+/* this sample's turn in its reading block (blocks run on across windows) */
+static void
+os_block_step (LIVE_WIN * w)
+{
+  if (w->os_in == 0)
+    {
+      uint32_t x = w->os_rng;
+
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      w->os_rng = x;
+      w->os_at = (int) (((uint64_t) x * (uint32_t) w->os_every) >> 32);
+    }
+  w->os_pick = w->os_in == w->os_at;
+  w->os_in = (w->os_in + 1) % w->os_every;
 }
 
 void
@@ -63,10 +109,10 @@ live_win_reset (LIVE_WIN * w, int count)
     }
 }
 
-/* one scheduler-state sample of the thread in slot k while it holds CS cs:
- * procfs is read once per thread (20 Hz at most) and the state counted on
- * the (thread, CS) entry, so a CS's figures never mix in what its holder
- * did under another CS */
+/* the thread in slot k holds CS cs in this sample: if the sample is the one
+ * drawn in its block, procfs is read once for the thread and the state
+ * counted on the (thread, CS) entry, so a CS's figures never mix in what
+ * its holder did under another CS */
 static void
 os_sample (LIVE_WIN * w, int k, int cs)
 {
@@ -99,6 +145,10 @@ os_sample (LIVE_WIN * w, int k, int cs)
       o->tid = tid;
       (void) os_task_comm (target_pid, tid, o->comm, sizeof (o->comm));
     }
+  if (!w->os_pick)
+    {
+      return;			/* the entry keeps the name */
+    }
   for (j = 0; j < w->nrd; j++)
     {
       if (w->rd[j].slot == k)
@@ -118,22 +168,13 @@ os_sample (LIVE_WIN * w, int k, int cs)
       rd->slot = k;
       rd->seq = -1;
     }
-  /* decided once a sample for the thread: every CS it holds in this sample
-   * shares the reading, or none of them counts */
+  /* read once a sample for the thread: every CS it holds in this sample
+   * shares the reading, or (a failing read) none of them counts */
   if (rd->seq != w->st.samples)
     {
-      double now = mono_s ();
-
       rd->seq = w->st.samples;
-      if (rd->t > 0 && now - rd->t < OS_SAMPLE_MIN_S)
-	{
-	  rd->ok = 0;
-	}
-      else
-	{
-	  rd->t = now;		/* a failing read is throttled too */
-	  rd->ok = os_task_state (target_pid, tid, &rd->st, &rd->ticks) == 0;
-	}
+      rd->t = mono_s ();
+      rd->ok = os_task_state (target_pid, tid, &rd->st, &rd->ticks) == 0;
     }
   if (!rd->ok)
     {
@@ -260,6 +301,7 @@ live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo)
 {
   int i;
 
+  os_block_step (w);
   for (i = 0; i < lo->count; i++)
     {
       int32_t rwlock, tran;

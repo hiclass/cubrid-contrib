@@ -492,7 +492,8 @@ view_os_of (int slot)
   return NULL;
 }
 
-/* the sampled state of a thread slot while it held CS cs, or NULL */
+/* the entry of a thread slot seen holding CS cs - its readings may be none
+ * (never on a sample drawn for reading) - or NULL */
 const OS_THR *
 view_os_at (int slot, int cs)
 {
@@ -500,7 +501,7 @@ view_os_at (int slot, int cs)
 
   for (k = 0; k < view.nos; k++)
     {
-      if (view.os[k].slot == slot && view.os[k].cs == cs && view.os[k].samples > 0)
+      if (view.os[k].slot == slot && view.os[k].cs == cs)
 	{
 	  return &view.os[k];
 	}

@@ -349,7 +349,9 @@ live_mode (uint64_t cs_base, const VIEW_HDR * h, int json, int trans,
   r.screen = !json && !trans && isatty (STDOUT_FILENO);
   r.period = 1.0 / h->hz;
   r.interval = h->interval;
-  r.w = live_win_new (r.lo->count, r.lo->stride);
+  /* the seed of the reading draws: any value will do, so one of this run */
+  r.w = live_win_new (r.lo->count, r.lo->stride, h->hz,
+		      (unsigned) getpid () ^ (unsigned) (uint64_t) (mono_s () * 1e6));
   r.w->cs_base = cs_base;	/* the sampler checks queue heads against it */
   r.w->no_disk = !r.sampled;
   live_win_reset (r.w, r.lo->count);

@@ -40,7 +40,7 @@
 | `OS_MAX` | 128 | 프레임·구간당 OS 상태 항목 수: (스레드 칸, CS) 쌍마다 하나, 그리고 이름만 있는 항목 |
 | `OS_RD_MAX` | 64 | 구간당 procfs 상태를 읽는 스레드 수(스레드별 판독 캐시 `rd[]`) |
 | `OS_COMM_LEN` | 16 | 스레드 이름(`comm`) 버퍼 |
-| `OS_SAMPLE_MIN_S` | 0.05 s | 스레드당 procfs 상태 샘플 최소 간격, 새 대기 큐 머리 걷기 최소 간격, 프레임의 체인 재사용 신선도 |
+| `OS_SAMPLE_MIN_S` | 0.05 s | procfs 상태 판독 블록의 길이(표본 ⌈0.05 × hz⌉ 개 중 1개 판독), 새 대기 큐 머리 걷기 최소 간격, 프레임의 체인 재사용 신선도 |
 | `CHAIN_REWALK_S` | 0.25 s | 같은 큐 머리 재걷기 간격 |
 | `POOL_MAX_GROUPS` | 1024 | 프레임의 풀 그룹 수 |
 | `VERDICT_HISTORY` | 10 | 판정 지속성 창(이번 구간 + 이전 9 구간). `V` 줄 거리 1..9 |
@@ -143,16 +143,16 @@
 | 필드 | 형 | 의미 |
 |---|---|---|
 | `slot` | `int` | 스레드 칸 |
-| `cs` | `int` | 이 상태를 본 CS 인덱스. 항목의 키는 (`slot`, `cs`): 한 스레드가 여러 CS 를 쥐었으면 CS 마다 항목이 따로 있고, 각 항목은 **그 CS 를 쥐고 있던 표본만** 센다. −1 = 이름만 있는 항목(샘플 0) |
+| `cs` | `int` | 이 상태를 본 CS 인덱스. 항목의 키는 (`slot`, `cs`): 한 스레드가 여러 CS 를 쥐었으면 CS 마다 항목이 따로 있고, 각 항목은 **그 CS 를 쥐고 있던 표본 가운데 판독 표본만** 센다(그 CS 를 쥔 것은 봤지만 판독 표본에 한 번도 걸리지 않은 항목은 `samples = 0` 이고 이름만 가진다 — 흔하다). −1 = 어느 CS 에도 속하지 않는, 이름만 있는 항목 |
 | `tid` | `int` | OS tid(LWP) |
 | `samples` | `int` | 그 CS 를 쥔 동안 procfs 상태를 읽은 횟수 |
 | `run` / `dsk` / `oth` | `int` | 상태 `R` / `D` / 그 외 샘플 수 |
-| `ticks0` / `ticks1` | `long` | 첫/마지막 샘플의 CPU 틱(utime+stime) |
-| `t_first` / `t_last` | `double` | 첫/마지막 샘플 단조 시각(s). **기록되지 않음**(재생 시 0) |
+| `ticks0` / `ticks1` | `long` | 첫/마지막 판독의 CPU 틱(utime+stime) |
+| `t_first` / `t_last` | `double` | 첫/마지막 판독의 단조 시각(s). **기록되지 않음**(재생 시 0) |
 | `span_ms` | `int` | `t_last − t_first` 를 ms 로 반올림(`(now − t_first)*1000 + 0.5`). 틱 차이가 덮는 시간 |
 | `comm[16]` | `char` | `/proc/<pid>/task/<tid>/comm` |
 
-샘플러는 보유 스레드(쥐고 있는 CS 의 owner 칸)만 샘플한다. procfs 판독은 **스레드당** `OS_SAMPLE_MIN_S` 에 한 번이고(CS 마다 따로 읽지 않는다), 한 표본에서 읽은 상태를 그 스레드가 그 표본에 쥐고 있던 CS 항목마다 하나씩 센다. 간격 안에 다시 오면 어느 항목에도 세지 않으며(판독 여부는 스레드당 표본당 한 번만 정한다), 읽기에 실패해도 판독 시각은 갱신된다(실패도 간격 제한). 상태를 CS 별로 나누는 이유: 판정의 디스크/CPU 는 top CS 를 쥔 동안의 상태여야 하고, 같은 스레드가 다른 CS 를 쥐고 있던 표본이 섞이면 안 된다(06 §6.7).
+샘플러는 보유 스레드(쥐고 있는 CS 의 owner 칸)만 샘플한다. procfs 는 **판독 표본**에서만 읽는다: 표본을 `os_every` = ⌈`OS_SAMPLE_MIN_S` × hz⌉ 개(100 Hz 에서 5개 = 50 ms 분량)씩 블록으로 묶고, 블록마다 무작위로 고른 1개가 판독 표본이다(06 §11.1a). 판독 표본에서는 그 순간 CS 를 쥐고 있는 스레드를 **스레드당 한 번** 읽어(CS 마다 따로 읽지 않는다) 그 스레드가 그 표본에 쥐고 있던 CS 항목마다 하나씩 세고, 다른 표본에서는 읽지 않는다. 모든 표본이 같은 확률(1/`os_every`)로 뽑히므로 판독은 보유의 어느 시점에든 고르게 떨어진다(보유가 시작된 표본에 몰리지 않는다). 스레드당 판독은 블록당 1회, 평균 20 Hz 이하다(이웃한 두 블록의 판독은 표본 1개 간격까지 붙을 수 있어 아무 1초에는 21회까지 든다; hz 가 20 의 배수가 아니면 평균은 hz ÷ ⌈hz/20⌉ 로 더 낮다: 21 Hz → 10.5, 50 Hz → 16.7). 블록은 시간이 아니라 표본 수로 세므로 샘플 루프가 밀려 실제 표본 속도가 hz 에 못 미치면 판독도 같은 비율로 준다. 읽기에 실패한 판독 표본은 어느 항목에도 세지 않는다. 상태를 CS 별로 나누는 이유: 판정의 디스크/CPU 는 top CS 를 쥔 동안의 상태여야 하고, 같은 스레드가 다른 CS 를 쥐고 있던 표본이 섞이면 안 된다(06 §6.7).
 
 ### 3.5 `VIEW_IDENT`, `TRAN_IDENT`, `VIEW_CHAIN`, `POOL_GROUP`
 
@@ -210,7 +210,7 @@
 
 ### 3.8 `LIVE_WIN` (샘플러 구간 상태)
 
-라이브 샘플러(06 §11) 전용. 렌더러는 이것을 읽지 않고 `view_capture` 가 필요한 것만 프레임으로 옮긴다. `live_win_new` 가 `calloc` 하므로 모든 필드의 초기값은 0 이다.
+라이브 샘플러(06 §11) 전용. 렌더러는 이것을 읽지 않고 `view_capture` 가 필요한 것만 프레임으로 옮긴다. `live_win_new` 가 `calloc` 하므로 필드의 초기값은 0 이다(예외: `os_every`, `os_rng` — `live_os_pace(w, hz, seed)`).
 
 | 필드 | 형 | 의미 | 리셋(`live_win_reset`) |
 |---|---|---|---|
@@ -226,7 +226,11 @@
 | `blob` | `unsigned char *` | 최신 샘플의 CS 배열 원시 이미지(`stride*count` 바이트, `malloc`) | 안 함 |
 | `act_ix[ACT_HASH]` | `unsigned short` | 활동 해시: `st.act` 인덱스 + 1, 0 = 빈칸 | 전부 0 |
 | `os[OS_MAX]`, `nos` | `OS_THR`, `int` | 구간에 샘플한 (보유 스레드, CS) 쌍의 OS 상태 | `nos = 0` |
-| `rd[OS_RD_MAX]`, `nrd` | `OS_RD`, `int` | 스레드별 procfs 판독 캐시. `OS_RD` = `{ int slot, seq, ok; double t; char st; long ticks; }`: 칸, 마지막으로 판독 여부를 정한 표본 번호 `seq`(= 그때의 `st.samples`, 새 항목은 −1), 그 표본에 셀 판독이 있는지 `ok`(스로틀·판독 실패면 0), 마지막 판독 시각 `t`(단조 초, 0 = 아직 없음), 상태 문자 `st`, 틱 `ticks`. 스레드당 20 Hz 상한과 "한 표본의 판독을 그 스레드가 쥔 모든 CS 항목이 함께 씀" 을 맡는다 | `nrd = 0` |
+| `rd[OS_RD_MAX]`, `nrd` | `OS_RD`, `int` | 스레드별 procfs 판독 캐시(판독 표본에서 읽은 스레드만 들어간다). `OS_RD` = `{ int slot, seq, ok; double t; char st; long ticks; }`: 칸, 마지막으로 읽은 표본 번호 `seq`(= 그때의 `st.samples`, 새 항목은 −1), 그 표본에 셀 판독이 있는지 `ok`(판독 실패면 0), 판독 시각 `t`(단조 초), 상태 문자 `st`, 틱 `ticks`. "한 표본의 판독을 그 스레드가 쥔 모든 CS 항목이 함께 씀" 을 맡는다 | `nrd = 0` |
+| `os_every` | `int` | 판독 블록의 표본 수(`live_os_pace`: ⌈0.05 × hz⌉, 20 Hz 이하면 1 = 모든 표본 판독) | 안 함 |
+| `os_in`, `os_at` | `int` | 이번 표본의 블록 안 순번(0..`os_every`−1), 이 블록에서 뽑힌 순번 | 안 함(블록은 구간을 넘어 이어진다) |
+| `os_pick` | `int` | 이번 표본이 판독 표본인가(`os_in == os_at`) | 안 함(표본마다 정함) |
+| `os_rng` | `uint32_t` | 순번을 뽑는 xorshift32 상태(0 아님) | 안 함 |
 | `dk0[3]` | `uint64_t` | 구간 시작 diskstats(`wr_ios`, `wr_ms`, `io_ms`) | `view_disk_begin` 이 채움 |
 | `dk_ok` | `int` | `dk0` 유효 | 같음 |
 | `no_disk` | `int` | 디스크 수치를 쓰지 않는 실행(`!sampled`). 1 이면 `view_disk_begin` 을 부르지 않음 | 안 함(생성 직후 1회 설정) |
@@ -353,7 +357,7 @@
 | 함수 | 계약 |
 |---|---|
 | `view_os_of(slot)` | `view.os[0..nos)` 에서 `slot` 이 같은 첫 항목 포인터, 없으면 `NULL`. **이름(`comm`)·tid 조회용**(어느 CS 항목이든 같은 값) |
-| `view_os_at(slot, cs)` | `slot`·`cs` 가 모두 같고 `samples > 0` 인 항목 포인터, 없으면 `NULL`. **상태 조회용**(그 CS 를 쥔 동안의 D/R/틱) |
+| `view_os_at(slot, cs)` | `slot`·`cs` 가 모두 같은 항목 포인터, 없으면 `NULL`. **상태 조회용**(그 CS 를 쥔 동안의 D/R/틱). 판독이 0 개인 항목(`samples == 0`)도 돌려준다 — 판독 수를 보이는 것은 부르는 쪽 몫 |
 | `resume_name(v)` | 코드 → 대기 사유 이름(언어 `use_ko` 반영): 3 page latch/페이지 래치, 5 job queue/작업 큐, 7·9·11 critical section/크리티컬 섹션, 13 connection queue/접속 큐, 15 class repr/클래스 표현, 17 lock/락, 19 log writer/로그 writer, 21 free buffer/빈 버퍼, 23 DWB queue/DWB 큐, 25 sleep/sleep, 26 concurrency slot/동시성 슬롯, 그 외 `""` |
 | `view_identity(tran, &id, &trid)` | `nident == 0` 이면 −1. `view.ident` 를 `idx` 로 이진 탐색(비교는 뺄셈 없이 `<`/`>`: 재생 값은 임의 int). 찾으면 `*id` 복사, `trid != NULL` 이면 `*trid`, 0 반환. 없으면 −1. **전제: `ident` 는 `idx` 오름차순** |
 | `view_identity_seen(tran, cpid, &id, &trid)` | (tran, cpid) 로 목격된 클라이언트에 보일 신원. `view_identity(tran)` 가 있고 `cpid < 0 \|\| id.cpid == cpid` 면 0(현재 클라이언트, 또는 pid 모름). 아니면 `tran < 1 \|\| cpid < 0` 이면 −1(없음). `gone` 에서 `idx == tran && id.cpid == cpid` 를 찾으면 그 신원·trid 로 1(떠난 클라이언트). 없으면 `*id` 를 0 으로 채우고 `id->cpid = cpid` 로 2(떠났고 신원 없음, pid 만). 2 일 때 `trid` 는 쓰지 않는다 |
@@ -447,7 +451,7 @@ F … (프레임 2) …
 
 실제 쓰기는 매직과 헤더를 한 번에 낸다: `fprintf(rec_out, "%s\nH %d %d %d %.17g %d %u %d %d %d", REC_MAGIC, pid, live, hz, interval, thr_count, degraded, stride, count, off_stats)` → `rec_str(db)`, `rec_str(lib)`, `rec_str(tran_refused)` → `fputc('\n')` → `fflush`.
 
-검증(위반 시 `rec_bad`, `rec_line = 2`): 줄이 없음, 토큰 수 ≠ 13(16개까지만 세므로 그 이상도 ≠ 13), tok0 ≠ `H`, `lo.count < 1` 또는 `> 64`, `live` 가 참인데 `interval` 이 `[0.1, 3600]` 밖(NaN 포함). 헤더 앞에 빈 줄을 둘 수 없다(2번째 줄이 곧 헤더). 이후 `rec_count = lo.count`, `rec_live = live` 가 프레임 검증에 쓰인다.
+검증(위반 시 `rec_bad`, `rec_line = 2`): 줄이 없음, 토큰 수 ≠ 13(16개까지만 세므로 그 이상도 ≠ 13), tok0 ≠ `H`, `lo.count < 1` 또는 `> 64`, `live` 가 참인데 `interval` 이 `[0.1, 3600]` 밖(NaN 포함), `live` 가 참인데 `hz` 가 `[1, HZ_MAX]`(10000) 밖 — 요약 화면이 판독 블록을 이 hz 로 계산한다. 헤더 앞에 빈 줄을 둘 수 없다(2번째 줄이 곧 헤더). 이후 `rec_count = lo.count`, `rec_live = live` 가 프레임 검증에 쓰인다.
 
 재생 시작 시 `replay_main`(06 §2.13)은 전역 강등 비트를 헤더 값으로 바꾸고(`deg_set(~0,0)` 후 `deg_set(h.degraded,1)`), `tran_refused` 가 비어 있지 않으면 그것을 강등 사유로 쓴다. 스냅샷 기록(`live == 0`)은 첫 프레임 하나만 읽어 그린다.
 
@@ -559,7 +563,7 @@ F … (프레임 2) …
 쓰기 `fprintf(f, "W %d %d %d %d %d %d\n", cs, kind, tran, thr, samples, cpid)` (`st.act[0..nact)` 순). 읽기 `W cs kind tran thr samples cpid`(모두 `atoi`, cpid −1 = 모름). 검증(이 순서, 둘 다 bad): `0 <= samples <= F 의 samples`, `0 <= cs < count`, `kind ∈ {0, 1}`. `nact < 4096` 일 때만 저장. 스냅샷(samples 0)은 `nact == 0` 이므로 `W` 가 없다.
 
 #### `O` — 스레드 OS 상태 (12/12)
-쓰기: `"O %d %d %d %d %d %d %d %ld %ld"` (slot, cs, tid, samples, run, dsk, oth, ticks0, ticks1) + `rec_str(comm)` + `" %d\n"` (span_ms). 한 줄 = (칸, CS) 한 쌍의 상태, `cs = −1` 은 이름만 있는 항목. 읽기: 0 으로 채운 뒤 넣고(`t_first`/`t_last` = 0; ticks 는 `atol`, 나머지 `atoi`), `comm` 은 16 B, `nos < OS_MAX` 일 때만 저장. 검증: `cs < −1 \|\| cs >= view.count` 이면 `rec_bad`. 그 밖의 값 검증 없음.
+쓰기: `"O %d %d %d %d %d %d %d %ld %ld"` (slot, cs, tid, samples, run, dsk, oth, ticks0, ticks1) + `rec_str(comm)` + `" %d\n"` (span_ms). 한 줄 = (칸, CS) 한 쌍의 상태, `cs = −1` 은 이름만 있는 항목. 읽기: 0 으로 채운 뒤 넣고(`t_first`/`t_last` = 0; ticks 는 `atol`, 나머지 `atoi`), `comm` 은 16 B, `nos < OS_MAX` 일 때만 저장. 검증: `cs < −1 \|\| cs >= view.count`, `run`·`dsk`·`oth` 가 각각 `[0, view.st.samples]` 밖(`F` 줄이 먼저 읽혀 구간 표본 수가 정해져 있다), `samples > view.st.samples`, `samples != run + dsk + oth` 이면 `rec_bad` — 판독 하나는 구간의 표본 하나이고 세 상태 중 하나다. 세 값을 각각 표본 수로 묶은 뒤에 더하므로(표본 수 ≤ `REC_SAMPLES_MAX`) 합이 넘치지 않는다. `span_ms < 0` 이면 `rec_bad`. 틱 토큰(`ticks0`, `ticks1`)은 검증하지 않는다: 스레드 칸의 tid 가 구간 중 바뀌면(워커 교체) 한 항목에 두 스레드의 틱이 들어가 `ticks1 < ticks0` 인 줄이 정상적으로 기록되기 때문이다. 판정은 두 값을 실수로 바꿔 빼므로 어떤 값에도 넘치지 않는다. 숫자 토큰은 `atoi`·`atol` 로 읽는다(문법 검증 아님). 그 밖의 값 검증 없음.
 
 #### `D` — 로그 장치 (4/4)
 쓰기 `fprintf(f, "D %.17g %.17g", await_ms, util_pct)` + `rec_str(dev)` + `fputc('\n')` — `disk_avail` 일 때만. 읽으면 `disk_avail = 1`, 두 값 `rec_real`, dev 는 32 B.

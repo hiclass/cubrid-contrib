@@ -405,7 +405,7 @@ parse_args (int argc, char **argv, OPTS * o)
       exit (0);
     }
   if (o->replay == NULL	/* a replay takes both from the record */
-      && (o->hz < 1 || o->hz > 10000 || !(o->interval >= INTERVAL_MIN)
+      && (o->hz < 1 || o->hz > HZ_MAX || !(o->interval >= INTERVAL_MIN)
 	  || !(o->interval <= INTERVAL_MAX) || o->interval * o->hz < 1.0))
     {
       die ("bad --hz/--interval", "--hz/--interval 값 오류", NULL);
