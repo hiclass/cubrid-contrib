@@ -56,9 +56,20 @@ replay_interactive (const VIEW_HDR * h, int n, double speed)
       live_footer = footer;
       replay_frame_out (h, 1, 0, 0);
       key = key_read (paused ? -1.0 : replay_pace (h) / speed);
+      if (key == 'q' || term_stop_requested ())
+	{
+	  /* q or Ctrl-C: this frame stays on the main screen */
+	  screen_leave_kept ();
+	  replay_frame_out (h, 1, 0, 0);
+	  live_footer = NULL;	/* footer lives on this stack */
+	  if (term_stop_requested ())
+	    {
+	      exit (128 + term_stop_signal ());	/* as before the frame was kept */
+	    }
+	  return;
+	}
       switch (key)
 	{
-	case 'q':
 	case KEY_EOF:		/* stdin is gone: nothing can resume a pause */
 	  live_footer = NULL;	/* footer lives on this stack */
 	  return;
@@ -133,6 +144,7 @@ live_replay (const VIEW_HDR * h, double speed, int json, int trans)
 		    "보입니다; --detail 은 스크롤(파이프) 재생에 적용");
 	    }
 	  screen_enter ();
+	  live_stop_on_signals ();	/* Ctrl-C ends at the key wait: the frame is kept */
 	  replay_interactive (h, n, speed);
 	  return 0;
 	}

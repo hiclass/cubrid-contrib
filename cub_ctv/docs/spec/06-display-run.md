@@ -458,9 +458,10 @@ usage: cub_ctv [options] [<db-name> | <pid> | --pid N]
 
 | 코드 | 경우 |
 |---|---|
-| 0 | 도움말, 서버 목록, 정상 스냅샷, 라이브 정상 종료(q, Ctrl-C/TERM/HUP 로 루프 탈출), 재생 정상 종료, 대화형 재생 `q`/stdin EOF |
+| 0 | 도움말, 서버 목록, 정상 스냅샷, 라이브 정상 종료(q, Ctrl-C/Ctrl-\/TERM/HUP 로 루프 탈출), 재생 정상 종료, 대화형 재생 `q`/stdin EOF |
+| 128 + sig (대화형 재생) | 대화형 재생이 SIGINT/SIGTERM/SIGHUP/SIGQUIT 를 `on_stop` 으로 받아 키 대기에서 끝난 경우: 마지막 프레임을 주 화면에 남긴 뒤 `exit(128 + term_stop_signal())` |
 | 1 | 모든 `die` (`exit(1)`), `--trans` 인데 트랜잭션 표를 읽을 수 없음(스냅샷·라이브·재생 모두), 스냅샷 `--trans` 텍스트에서 `print_trans` 가 -1 |
-| 128 + sig | `restore_on_exit` 가 설치된 상태(전체 화면, 대화형 재생, 표 단독 키 모드)에서 SIGINT/SIGTERM/SIGHUP/SIGPIPE 를 `on_signal` 이 받은 경우(`_exit`). 단 라이브 루프는 이후 INT/TERM/HUP 를 `on_stop` 으로 덮으므로 SIGPIPE 만 해당 |
+| 128 + sig | `restore_on_exit` 가 설치된 상태(전체 화면, 대화형 재생, 표 단독 키 모드)에서 SIGINT/SIGTERM/SIGHUP/SIGPIPE/SIGQUIT 를 `on_signal` 이 받은 경우(`_exit`). 단 라이브 루프와 대화형 재생은 이후 INT/TERM/HUP/QUIT 를 `on_stop` 으로 덮으므로 SIGPIPE 만 해당(표 단독 키 모드도 `live_stop_on_signals()` 를 탄다) |
 | 시그널 기본 동작 | 핸들러가 없는 경로(파이프 스크롤 재생, 스냅샷)에서의 시그널 |
 
 ---
@@ -556,9 +557,16 @@ usage: cub_ctv [options] [<db-name> | <pid> | --pid N]
 | `tty_raw_on()` | stdin `tcgetattr` 저장 → `c_lflag &= ~(ICANON\|ECHO)`, `VMIN = 0`, `VTIME = 0` 로 `TCSANOW` 적용. 성공 시 `tty_raw = 1`, 0 반환. ISIG 는 유지(Ctrl-C 는 시그널) |
 | `keys_enter()` | `isatty(STDIN_FILENO) && tty_raw_on() == 0` 이면 0, 아니면 -1 |
 | `screen_enter()` | `write(1, "\033[?1049h\033[?25l", 14)` (대체 화면 + 커서 숨김), `screen_active = 1`, `restore_on_exit()`, `SIGWINCH → on_winch` |
-| `screen_restore()` | `tty_raw` 면 저장된 termios 복원·플래그 해제; `screen_active` 면 `write(1, "\033[?25h\033[?1049l", 14)`·플래그 해제. 재진입 안전(플래그 기반) |
-| `restore_on_exit()` | 최초 1회만: `atexit(screen_restore)`; SIGINT/SIGTERM/SIGHUP/SIGPIPE → `on_signal`; SIGTSTP → `on_tstp`; SIGCONT → `on_cont` |
-| `live_stop_on_signals()` | SIGINT/SIGTERM/SIGHUP → `on_stop` (덮어씀) |
+| `screen_restore()` | 이 파일이 다루는 시그널(`term_sigset`: INT, TERM, HUP, QUIT, PIPE, TSTP, CONT, WINCH)을 `sigprocmask` 로 막고: `tty_raw` 면 저장된 termios 복원·플래그 해제; `screen_active` 면 `write(1, "\033[?25h\033[?1049l", 14)`·플래그 해제; 마스크를 되돌린다. 복원과 플래그 사이에 핸들러가 끼지 못하므로, 종료 직후의 Ctrl-Z 가 "아직 켜짐"으로 기억했다가 fg 때 raw·대체 화면으로 되돌리는 일이 없다 |
+| `restore_on_exit()` | 최초 1회만: `atexit(screen_restore)`; SIGINT/SIGTERM/SIGHUP/SIGPIPE/SIGQUIT → `on_signal`(raw 모드가 ISIG 를 남겨 두므로 Ctrl-\ 가 SIGQUIT 로 온다: 기본 동작이면 터미널을 못 되돌리고 코어를 남긴다); SIGTSTP → `on_tstp`; SIGCONT → `on_cont` |
+| `live_stop_on_signals()` | SIGINT/SIGTERM/SIGHUP/SIGQUIT → `on_stop` (덮어씀) |
+
+시그널 핸들러의 설치:
+
+| 함수 | 동작 |
+|---|---|
+| `set_handler(sig, fn)` | `sigaction` 으로 설치. `sa_mask` = `term_sigset`(이 파일이 다루는 시그널 전부: INT, TERM, HUP, QUIT, PIPE, TSTP, CONT, WINCH)이라 핸들러가 도는 동안 다른 핸들러가 끼어들지 않는다. `sa_flags = SA_RESTART`(`signal()` 과 같은 의미: 끊기는 것은 `pselect` 대기뿐) |
+| `catch_signal(sig, fn)` | 그 시그널의 현재 처리가 `SIG_IGN` 이면 아무것도 하지 않고 0(nohup, 작업 제어 없는 셸이 무시로 넘겨준 시그널은 무시된 채로 둔다). 아니면 `set_handler` 후 1. INT/TERM/HUP/QUIT/PIPE/TSTP 의 설치는 모두 이 함수로 한다. TSTP 의 반환값은 `tstp_ours` 에 두고, `on_cont` 는 `tstp_ours` 일 때만 TSTP 를 다시 설치한다(무시로 넘어온 TSTP 가 SIGCONT 뒤에 되살아나지 않는다). CONT·WINCH 는 `set_handler` |
 
 시그널 핸들러:
 
@@ -566,9 +574,10 @@ usage: cub_ctv [options] [<db-name> | <pid> | --pid N]
 |---|---|
 | `on_winch` | `winch_cols = winch_rows = winch_key = 1` |
 | `on_signal(sig)` | `screen_restore()` → `_exit(128 + sig)` |
-| `on_stop` | `live_stop = 1` (라이브 루프가 다음 틱 판단에서 종료) |
+| `on_stop(sig)` | `live_stop = sig` (라이브 루프가 다음 틱 판단에서, 대화형 재생이 키 대기에서 종료). `term_stop_requested()` = `live_stop != 0`, `term_stop_signal()` = 그 시그널 번호 |
+| `screen_leave_kept()` | `screen_restore()` 뒤 `screen_kept = 1`. 이후 그리는 요약 화면은 `screen_is_kept()` 가 참이라 맨 앞의 홈·지우기를 내지 않고 끝에 `\033[0m` 을 붙인다(§7.1). q·정지 시그널로 끝날 때 마지막 프레임을 주 화면에 남기는 데 쓴다 |
 | `on_tstp` (Ctrl-Z) | 현재 `screen_active`·`tty_raw` 를 `screen_wanted`·`keys_wanted` 에 기억 → `screen_restore()` → SIGTSTP 기본 동작으로 되돌리고 `raise(SIGTSTP)` |
-| `on_cont` (fg) | SIGTSTP 를 다시 `on_tstp` 로; `keys_wanted && !tty_raw` 면 `tty_raw_on()`; `screen_wanted && !screen_active` 면 `\033[?1049h\033[?25l` 쓰고 `screen_active = 1`; 두 wanted 를 0 으로(이후 단독 SIGCONT 는 무효과); `winch_key = winch_cols = winch_rows = 1` (다음 키 대기에서 KEY_RESIZE → 재그리기) |
+| `on_cont` (fg) | `tstp_ours` 면 SIGTSTP 를 다시 `on_tstp` 로; `keys_wanted && !tty_raw` 면 `tty_raw_on()`; `screen_wanted && !screen_active` 면 `\033[?1049h\033[?25l` 쓰고 `screen_active = 1`; 두 wanted 를 0 으로(이후 단독 SIGCONT 는 무효과); `winch_key = winch_cols = winch_rows = 1` (다음 키 대기에서 KEY_RESIZE → 재그리기) |
 
 `term_stop_requested()` = `live_stop != 0`.
 
@@ -577,7 +586,7 @@ usage: cub_ctv [options] [<db-name> | <pid> | --pid N]
 반환: 바이트 값, `KEY_*`, 또는 0(시간 초과/정지).
 
 1. `wait >= 0` 이면 그 초를 timespec 으로, 음수면 무한 대기.
-2. SIGWINCH, SIGINT, SIGTERM, SIGHUP 을 `sigprocmask(SIG_BLOCK)`.
+2. SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT 을 `sigprocmask(SIG_BLOCK)`.
 3. 이미 `winch_key` 또는 `live_stop` 이 켜져 있으면: `winch_key = 0`, 마스크 복원, `live_stop` 이면 0, 아니면 `KEY_RESIZE`.
 4. `pselect(stdin, 원래 마스크)` 로 대기(대기 중에만 시그널 허용) 후 마스크 복원.
 5. `rc < 0 && errno == EINTR && winch_key` → `winch_key = 0`, `KEY_RESIZE`.
@@ -609,7 +618,7 @@ usage: cub_ctv [options] [<db-name> | <pid> | --pid N]
 | 함수 | 규칙 |
 |---|---|
 | `mono_s()` | `CLOCK_MONOTONIC` 초(double) |
-| `sleep_until(t)` | SIGINT/TERM/HUP 차단 → `rest = t - mono_s() > 0 && !live_stop` 이면 `pselect(0, …, rest, 원래 마스크)` → 마스크 복원 |
+| `sleep_until(t)` | SIGINT/TERM/HUP/QUIT 차단 → `rest = t - mono_s() > 0 && !live_stop` 이면 `pselect(0, …, rest, 원래 마스크)` → 마스크 복원 |
 | `clock_hms(ts)` | `localtime_r` 후 `"%H:%M:%S"` |
 
 ---
@@ -807,7 +816,7 @@ push 되는 값: 요약 화면이 그려질 때 `fig[0].severity >= 2 ? fig[0].i
 [REC 표시] HEAD "cub_ctv - %s (pid %d)  %s  window %.1fs  (%dHz, samples=%d)" OFF "\n\n"
 ```
 
-- 첫 출력은 `\033[H\033[2J` (커서 홈 + 지우기, 개행 없음).
+- 첫 출력은 `\033[H\033[2J` (커서 홈 + 지우기, 개행 없음). `screen_is_kept()` 이면 내지 않는다(종료 때 주 화면에 남기는 마지막 프레임: 아무것도 지우지 않고 커서 자리에서 이어 쓴다). 그 프레임은 끝에 `\033[0m` 을 한 번 더 내어 글자 속성을 터미널에 남기지 않는다.
 - `view_record_active()` 이면(=`[r]` 녹화 또는 `--record` 로 기록 중) `clr(CLR_WAIT)` + `[REC]`/`[녹화중]` + `clr(CLR_OFF)` + 공백 1.
 - 제목: EN `cub_ctv - %s (pid %d)  %s  window %.1fs  (%dHz, samples=%d)`, KO `cub_ctv - %s (pid %d)  %s  구간 %.1fs  (%dHz, samples=%d)`. 인자: db, pid, hhmmss, `view.dt > 0 ? view.dt : interval`, hz, `view.st.samples`.
 - 그 뒤 `clr(CLR_OFF)` + `"\n\n"`.
@@ -1320,7 +1329,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
    3. sampled 이면 `cs_read_rows(cs_base, lo, w->prev)` 실패 시 `die_target_gone`.
    4. `t_prev = mono_s()`.
    5. `!sampled && !json && isatty(STDOUT_FILENO) && keys_enter() == 0` 이면 `restore_on_exit()`, `keys = 1` (전체 화면 없이 키만).
-   6. `live_stop_on_signals()` (INT/TERM/HUP → 정지 플래그).
+   6. `live_stop_on_signals()` (INT/TERM/HUP/QUIT → 정지 플래그).
 4. `trans` 이면 즉시 `view_capture_trans(0.0)`; `!view.tran_avail` 이면 `trans_window_out(...)` 후 `rc = 1` (루프 진입 안 함).
 
 ### 12.3 틱 루프
@@ -1332,7 +1341,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 3. `now = mono_s()`. `now - t_prev >= interval` 이면 `run_close_window(now)`; 1 이면 `rc = 1` 후 탈출.
 4. keys 이면 `run_keys(tick_end)` 가 1 이면 탈출(`q`). 아니면 `sleep_until(tick_end)`.
 
-루프 후 `run_finish`, `rc` 반환. 정지 시그널은 진행 중 틱을 마친 뒤 루프 조건에서 끝나며, 닫히지 않은 구간은 표시·기록되지 않는다.
+루프 후 `rc == 0 && screen && keys && have_frame` 이면 `screen_leave_kept()` 뒤 `replay_frame_out` 으로 마지막 구간을 주 화면에 한 번 더 그린다(q·Ctrl-C 로 끝내도 화면이 지워지지 않는다). 이어서 `run_finish`, `rc` 반환. 정지 시그널은 진행 중 틱을 마친 뒤 루프 조건에서 끝나며, 닫히지 않은 구간은 표시·기록되지 않는다.
 
 ### 12.4 구간 닫기 (`run_close_window(now)`)
 
@@ -1404,7 +1413,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 
 1. `screen = !json && !trans && isatty(STDOUT_FILENO)`.
 2. screen 이고 `!view_replay_seekable()` 이면 경고 `the record is not seekable (pipe): scrolling replay without keys` / `기록을 되감을 수 없습니다(파이프): 키 없이 스크롤 재생`, `screen = 0`.
-3. screen 이면 `n = view_replay_index()` (전체 프레임 색인, 화면 전환 전 경고 가능). `keys_enter() == 0` 이면 `layout_detail` 경고 `the terminal shows the summary screen; --detail applies to the scrolling (pipe) replay` / `터미널은 요약 화면을 보입니다; --detail 은 스크롤(파이프) 재생에 적용`, `screen_enter()`, `replay_interactive(h, n, speed)`, 0 반환. 아니면 `screen = 0`.
+3. screen 이면 `n = view_replay_index()` (전체 프레임 색인, 화면 전환 전 경고 가능). `keys_enter() == 0` 이면 `layout_detail` 경고 `the terminal shows the summary screen; --detail applies to the scrolling (pipe) replay` / `터미널은 요약 화면을 보입니다; --detail 은 스크롤(파이프) 재생에 적용`, `screen_enter()`, `live_stop_on_signals()`(Ctrl-C 가 키 대기에서 끝나 프레임을 남긴다), `replay_interactive(h, n, speed)`, 0 반환. 아니면 `screen = 0`.
 4. 스크롤 재생: `!json` 이면 `live_banner(h->hz, h->interval)`.
 5. `pace = -1`. `view_replay_next() == 0` 인 동안:
    1. `speed > 0 && pace >= 0` 이면 `sleep_until(mono_s() + pace / speed)` (첫 프레임은 대기 없음; 각 프레임은 자기 길이만큼 머문 뒤 다음).
@@ -1428,7 +1437,8 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 
 | 키 | 동작 |
 |---|---|
-| `q`, `KEY_EOF` | `live_footer = NULL`, 반환(→ 0) |
+| `q`, 또는 `term_stop_requested()` (키와 무관하게 먼저 본다) | `screen_leave_kept()` → `replay_frame_out(h, 1, 0, 0)` (지금 프레임을 주 화면에 남김) → `live_footer = NULL`; 정지 시그널이면 `exit(128 + term_stop_signal())`, `q` 면 반환(→ 0) |
+| `KEY_EOF` | `live_footer = NULL`, 반환(→ 0) |
 | ` ` (space) | `paused = !paused` |
 | `KEY_BACK` | `i = max(i-1, 0)`, `paused = 1` |
 | `KEY_FWD` | `i < n-1` 이면 `i+1`, `paused = 1` |
@@ -1438,7 +1448,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 | `KEY_RESIZE`, `KEY_IGNORED`, 그 밖 | 재그리기만 |
 | 0 (시간 초과) | 일시정지가 아니면: `i < n-1` → `i++`, 마지막이면 `paused = 1` |
 
-대화형 재생에는 `on_stop` 이 설치되지 않으므로 Ctrl-C 는 `on_signal` 로 화면 복원 후 `_exit(130)`.
+대화형 재생도 `live_stop_on_signals()` 로 `on_stop` 을 설치하므로 Ctrl-C(와 TERM/HUP/QUIT)는 키 대기를 끝내고, 위 표의 첫 행대로 지금 프레임을 주 화면에 남긴 뒤 `exit(128 + sig)` 로 끝난다(Ctrl-C 는 130).
 
 ---
 

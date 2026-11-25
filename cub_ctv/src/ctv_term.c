@@ -117,19 +117,40 @@ static struct termios tty_saved;
 
 static volatile sig_atomic_t tty_raw = 0;
 
+/* the signals this file handles */
+static void
+term_sigset (sigset_t * set)
+{
+  static const int all[] = { SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE, SIGTSTP, SIGCONT, SIGWINCH };
+  size_t i;
+
+  sigemptyset (set);
+  for (i = 0; i < sizeof (all) / sizeof (all[0]); i++)
+    {
+      sigaddset (set, all[i]);
+    }
+}
+
 void
 screen_restore (void)
 {
+  sigset_t block, orig;
+
+  /* no handler of this file between the restore and its mark: one that
+   * stops (Ctrl-Z) or ends here would act on a half-restored terminal */
+  term_sigset (&block);
+  sigprocmask (SIG_BLOCK, &block, &orig);
   if (tty_raw)
     {
-      tty_raw = 0;
       tcsetattr (STDIN_FILENO, TCSANOW, &tty_saved);
+      tty_raw = 0;
     }
   if (screen_active)
     {
-      screen_active = 0;
       (void) !write (STDOUT_FILENO, "\033[?25h\033[?1049l", 14);
+      screen_active = 0;
     }
+  sigprocmask (SIG_SETMASK, &orig, NULL);
 }
 
 /* stdin to single keys without echo (the current mode saved); 0 on success */
@@ -164,7 +185,7 @@ keys_enter (void)
  * hold the same windows */
 static volatile sig_atomic_t live_stop = 0;
 
-/* a stop signal (INT/TERM/HUP) arrived: the live run ends at the next
+/* a stop signal (INT/TERM/HUP/QUIT) arrived: the live run ends at the next
  * window boundary */
 int
 term_stop_requested (void)
@@ -200,6 +221,7 @@ key_read (double wait)
   sigaddset (&block, SIGINT);
   sigaddset (&block, SIGTERM);
   sigaddset (&block, SIGHUP);
+  sigaddset (&block, SIGQUIT);
   sigprocmask (SIG_BLOCK, &block, &orig);
   if (winch_key || live_stop)
     {
@@ -275,6 +297,34 @@ key_read (double wait)
     }
 }
 
+/* a handler that no other handler of this file cuts into */
+static void
+set_handler (int sig, void (*fn) (int))
+{
+  struct sigaction sa;
+
+  memset (&sa, 0, sizeof (sa));
+  sa.sa_handler = fn;
+  sa.sa_flags = SA_RESTART;	/* as signal() did: only the waits are cut */
+  term_sigset (&sa.sa_mask);
+  sigaction (sig, &sa, NULL);
+}
+
+/* a handler for a signal, unless it came ignored (nohup, a shell with no
+ * job control): what the caller asked to ignore stays ignored; 1 if set */
+static int
+catch_signal (int sig, void (*fn) (int))
+{
+  struct sigaction old;
+
+  if (sigaction (sig, NULL, &old) == 0 && old.sa_handler == SIG_IGN)
+    {
+      return 0;
+    }
+  set_handler (sig, fn);
+  return 1;
+}
+
 static void
 on_signal (int sig)
 {
@@ -285,19 +335,44 @@ on_signal (int sig)
 static void
 on_stop (int sig)
 {
-  (void) sig;
-  live_stop = 1;
+  live_stop = sig;
+}
+
+/* the signal that asked to stop, 0 if none */
+int
+term_stop_signal (void)
+{
+  return (int) live_stop;
+}
+
+/* q or a stop signal: the main screen and the terminal modes back, and the
+ * frame drawn next is left on it, attributes off (nothing is cleared) */
+static int screen_kept = 0;
+
+void
+screen_leave_kept (void)
+{
+  screen_restore ();
+  screen_kept = 1;
+}
+
+int
+screen_is_kept (void)
+{
+  return screen_kept;
 }
 
 void
 live_stop_on_signals (void)
 {
-  signal (SIGINT, on_stop);
-  signal (SIGTERM, on_stop);
-  signal (SIGHUP, on_stop);
+  catch_signal (SIGINT, on_stop);
+  catch_signal (SIGTERM, on_stop);
+  catch_signal (SIGHUP, on_stop);
+  catch_signal (SIGQUIT, on_stop);
 }
 
 static int screen_wanted = 0, keys_wanted = 0;	/* restored after fg */
+static int tstp_ours = 0;	/* SIGTSTP did not come ignored: ours to handle */
 
 /* Ctrl-Z: give the terminal back, then stop for real */
 static void
@@ -316,7 +391,10 @@ static void
 on_cont (int sig)
 {
   (void) sig;
-  signal (SIGTSTP, on_tstp);
+  if (tstp_ours)
+    {
+      set_handler (SIGTSTP, on_tstp);
+    }
   if (keys_wanted && !tty_raw)
     {
       (void) tty_raw_on ();
@@ -341,12 +419,13 @@ restore_on_exit (void)
     {
       done = 1;
       atexit (screen_restore);
-      signal (SIGINT, on_signal);
-      signal (SIGTERM, on_signal);
-      signal (SIGHUP, on_signal);
-      signal (SIGPIPE, on_signal);
-      signal (SIGTSTP, on_tstp);
-      signal (SIGCONT, on_cont);
+      catch_signal (SIGINT, on_signal);
+      catch_signal (SIGTERM, on_signal);
+      catch_signal (SIGHUP, on_signal);
+      catch_signal (SIGPIPE, on_signal);
+      catch_signal (SIGQUIT, on_signal);	/* Ctrl-\: the raw mode keeps ISIG; no core */
+      tstp_ours = catch_signal (SIGTSTP, on_tstp);
+      set_handler (SIGCONT, on_cont);
     }
 }
 
@@ -356,7 +435,7 @@ screen_enter (void)
   (void) !write (STDOUT_FILENO, "\033[?1049h\033[?25l", 14);
   screen_active = 1;
   restore_on_exit ();
-  signal (SIGWINCH, on_winch);
+  set_handler (SIGWINCH, on_winch);
 }
 
 double
@@ -380,6 +459,7 @@ sleep_until (double t)
   sigaddset (&block, SIGINT);
   sigaddset (&block, SIGTERM);
   sigaddset (&block, SIGHUP);
+  sigaddset (&block, SIGQUIT);
   sigprocmask (SIG_BLOCK, &block, &orig);
   if (rest > 0 && !live_stop)
     {

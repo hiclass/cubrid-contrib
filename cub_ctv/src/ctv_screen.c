@@ -723,7 +723,10 @@ screen_summary (const CS_LAYOUT * lo, double dt, int hz,
 
   /* laid out for the terminal of each frame (a resize, a replay elsewhere) */
   scr_cols = term_columns ();
-  fprintf (out, "\033[H\033[2J");
+  if (!screen_is_kept ())
+    {
+      fprintf (out, "\033[H\033[2J");
+    }
   if (view_record_active ())
     {
       /* top-left recording mark */
@@ -918,5 +921,9 @@ screen_summary (const CS_LAYOUT * lo, double dt, int hz,
   printf ("%s\n", clr (CLR_MUTED));
   wrap_out (stdout, footer, 0, 0);
   printf ("%s\n", clr (CLR_OFF));
+  if (screen_is_kept ())
+    {
+      printf ("\033[0m");	/* the last frame: no attribute stays on the tty */
+    }
   fflush (stdout);
 }

@@ -248,7 +248,7 @@ total / max wait : 214479.0 ms / 502.005 ms
 | 경로 | 줄수 | 설명 |
 |---|---|---|
 | `src/cub_ctv.c` | 862 | 인자 처리, 대상 선택, 초기화, 모드 분기 |
-| `src/ctv.h` | 864 | 공용 타입·상수·모듈별 프로토타입 |
+| `src/ctv.h` | 867 | 공용 타입·상수·모듈별 프로토타입 |
 | `src/ctv_text.c` `ctv_mem.c` `ctv_field.c` `ctv_sched.c` `ctv_msg.c` | 262 / 294 / 124 / 90 / 159 | 텍스트, 메모리 판독, 필드 상태기계, 재시도 일정, 메시지 |
 | `src/ctv_os.c` `ctv_proc.c` `ctv_elf.c` | 289 / 77 / 271 | procfs, cub_server 찾기, ELF 심볼 조회 (I-13) |
 | `src/ctv_cs.c` | 435 | 크리티컬 섹션 배열 탐색·해석 (I-0~I-5) |
@@ -256,10 +256,10 @@ total / max wait : 214479.0 ms / 502.005 ms
 | `src/ctv_thr_probe.c` `ctv_thr.c` | 628 / 1,001 | 스레드 엔트리 탐색, 필드 수명·대기 체인·대기 사유 (I-14~I-20) |
 | `src/ctv_pool.c` | 311 | 동기화 통계 풀 (I-12) |
 | `src/ctv_frame.c` `ctv_rec.c` | 691 / 1,269 | 프레임 캡처·질의, 기록·재생 형식 |
-| `src/ctv_verdict.c` `ctv_screen.c` | 566 / 922 | 판정 계산, 요약 화면 |
-| `src/ctv_term.c` `ctv_rows.c` `ctv_json.c` `ctv_present.c` `ctv_dump.c` | 405 / 627 / 266 / 136 / 115 | 터미널, 표 행, JSON, 모드별 출력, 디테일 덤프 |
-| `src/ctv_sampler.c` `ctv_live.c` `ctv_replay.c` | 430 / 397 / 169 | 라이브 표본, 라이브 루프, 재생 루프 |
-| `tests/` | — | SHOW 대조(t2), 트랜잭션(t4), 재생 골든(t5), 기록 왕복(t6), 라이브=재생(t7), 재생 키(t8), 빠른 확인(t9), OS 매핑(t10), 신원 변화분(t11), 필드·일정 규칙(t12), 판정 수치(t13), 슬롯 재사용(t14), 요약 화면 크기 맞춤(t15), 활동 샘플 수 상한(t16), 대상 선택(t17), 강등 보유(t18), reader 위주 판정(t19), UTF-8 범위(t20), 시계 사용(t21), CS별 OS 상태(t22), 상태 판독 시점(t23), 메시지 형식 검사, 최소 기록 입력 재생(t24), 손상 기록 퍼저(t25, 전체 실행 fuzz_full.sh), 찢긴 누적 시간 재판독(t26), 이름 모르는 엔진 보유자(t27), ASan+UBSan 재실행(sanitize.sh), 경합 유발 스크립트(CS 0–17 지정), 기록 픽스처 |
+| `src/ctv_verdict.c` `ctv_screen.c` | 566 / 929 | 판정 계산, 요약 화면 |
+| `src/ctv_term.c` `ctv_rows.c` `ctv_json.c` `ctv_present.c` `ctv_dump.c` | 485 / 627 / 266 / 136 / 115 | 터미널, 표 행, JSON, 모드별 출력, 디테일 덤프 |
+| `src/ctv_sampler.c` `ctv_live.c` `ctv_replay.c` | 430 / 403 / 181 | 라이브 표본, 라이브 루프, 재생 루프 |
+| `tests/` | — | SHOW 대조(t2), 트랜잭션(t4), 재생 골든(t5), 기록 왕복(t6), 라이브=재생(t7), 재생 키(t8), 빠른 확인(t9), OS 매핑(t10), 신원 변화분(t11), 필드·일정 규칙(t12), 판정 수치(t13), 슬롯 재사용(t14), 요약 화면 크기 맞춤(t15), 활동 샘플 수 상한(t16), 대상 선택(t17), 강등 보유(t18), reader 위주 판정(t19), UTF-8 범위(t20), 시계 사용(t21), CS별 OS 상태(t22), 상태 판독 시점(t23), 메시지 형식 검사, 최소 기록 입력 재생(t24), 손상 기록 퍼저(t25, 전체 실행 fuzz_full.sh), 찢긴 누적 시간 재판독(t26), 이름 모르는 엔진 보유자(t27), Ctrl-\ 뒤 터미널 복원(t28), 종료 때 마지막 화면 유지(t29), ASan+UBSan 재실행(sanitize.sh), 경합 유발 스크립트(CS 0–17 지정), 기록 픽스처 |
 | `docs/*.md` | — | usage / critical-sections(신입 엔지니어용 동작 설명) / architecture / limitations / build |
 | `docs/spec/00~06` | — | 재구현 명세: 모듈별 자료 구조·불변식·규칙·출력/기록 형식·수용 시험 |
 | `README.md` | — | 사용법·해석 가이드 |

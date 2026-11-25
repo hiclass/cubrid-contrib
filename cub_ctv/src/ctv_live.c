@@ -392,6 +392,12 @@ live_mode (uint64_t cs_base, const VIEW_HDR * h, int json, int trans,
 	  sleep_until (tick_end);
 	}
     }
+  if (rc == 0 && r.screen && r.keys && r.have_frame)
+    {
+      /* q or Ctrl-C: the last window stays on the main screen */
+      screen_leave_kept ();
+      replay_frame_out (r.h, r.screen, r.json, r.trans);
+    }
   run_finish (&r);
   return rc;
 }
