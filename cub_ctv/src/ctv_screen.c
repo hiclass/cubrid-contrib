@@ -205,9 +205,9 @@ print_verdict (FILE * out, const CS_FIG * top, const CS_FIG * second, int hz)
 	}
       else
 	{
-	  snprintf (judge, sizeof (judge), "%s", strcmp (c->name, "LOG") == 0
-		    ? M ("engine log flush daemon", "엔진 로그 플러시 데몬")
-		    : M ("engine daemon (system tran)", "엔진 데몬 (system tran)"));
+	  /* every daemon runs as tran 0: without a name, none is named */
+	  snprintf (judge, sizeof (judge), "%s",
+		    M ("engine daemon (system tran)", "엔진 데몬 (system tran)"));
 	}
     }
   else if (v.holder > 0)
@@ -270,9 +270,9 @@ print_verdict (FILE * out, const CS_FIG * top, const CS_FIG * second, int hz)
     }
   verdict_row (out, M ("how bad", "얼마나"), judge, ev);
 
-  /* capacity, when a daemon holds it: one thread saturates, not several
-   * sharing the work */
-  if (v.holder == 0 && !v.readers_most)
+  /* capacity, when one engine thread holds it: one thread saturates, not
+   * several sharing the work */
+  if (v.one_thr && !v.readers_most)
     {
       snprintf (judge, sizeof (judge), "%s", v.thr_pct >= 60
 		? M ("near the daemon's capacity", "데몬 처리 상한 근접")

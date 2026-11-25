@@ -99,6 +99,7 @@
 | `tests/t24_replay_inputs.sh` | 픽스처가 지나지 않는 판독 경로의 최소 기록(유휴 서버, 신원 변화분이 빈 프레임, 05 §10.2 예시 기록)의 재생 | 불필요 |
 | `tests/t25_fuzz_replay.sh` | 손상된 기록의 재생: 고정 입력과 씨앗 고정 변형 기록에서 크래시·멈춤·목록에 없는 sanitizer 지적 없음 | 불필요 |
 | `tests/t26_torn_time.sh` | 찢겨 읽힌 누적 시간의 재판독 | 불필요 |
+| `tests/t27_engine_holder.py` | 이름·스레드를 모르는 엔진 보유자의 판정 문구 | 불필요 |
 | `tests/fuzz_full.sh` | 퍼저 전체 실행(회귀 밖: 푸시 전, 기록 판독부 변경 시) | 불필요 |
 | `tests/sanitize.sh` | 서버가 필요 없는 시험 전부를 ASan + UBSan 빌드로 재실행 | 불필요 |
 | `tests/t2_show_compare.py` | 엔진 `SHOW CRITICAL SECTIONS` 값이 전후 판독 사이 + 자기영향 0 | 필요 |
