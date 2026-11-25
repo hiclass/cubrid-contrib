@@ -31,6 +31,15 @@ tv_to_ms (const unsigned char *b, size_t off)
     + (double) rd_i64 (b, off + 8) / 1000.0;
 }
 
+/* total_elapsed caught between the engine's stores: it adds the
+ * microseconds, carries the whole seconds into tv_sec and cuts tv_usec
+ * last, so tv_usec >= 1e6 may already hold the carry (1 s too much) */
+static int
+stats_torn (const unsigned char *s)
+{
+  return rd_i64 (s, ST_OFF_TOTAL_TV + 8) >= 1000000;
+}
+
 /* I-5: decode one SYNC_STATS image; -1 when the type does not validate */
 int
 stats_decode (const unsigned char *s, STATS_VIEW * v)
@@ -356,15 +365,35 @@ cs_rows_from_blob (const unsigned char *blob, const CS_LAYOUT * lo, CS_ROW * row
   for (i = 0; i < count; i++)
     {
       size_t off = (size_t) i * lo->stride;
+      unsigned char *sb = sblk + (size_t) i * STATS_SIZE;
       CS_ROW *r = &rows[i];
       STATS_VIEW v;
+      int k;
 
       (void) name_of (rd_u64 (blob, off + CS_OFF_NAME), r->name,
 		      sizeof (r->name));
       cs_decode_raw (blob, lo, i, &r->rwlock, &r->wr, &r->ww, &r->tran);
       r->owner = rd_u64 (blob, off + lo->off_owner);
       r->wq = cs_wait_queues (blob, lo, i, &r->wq2, NULL);
-      if (saddr[i] != 0 && stats_decode (sblk + (size_t) i * STATS_SIZE, &v) == 0)
+      /* a torn time sum: read the block again (the stores are a few
+       * instructions apart).  Of readings that stay torn the smallest sum
+       * is kept: the one without the carry is the right one */
+      for (k = 0; saddr[i] != 0 && k < STATS_REREAD && stats_torn (sb); k++)
+	{
+	  unsigned char again[STATS_SIZE];
+
+	  if (mem_read (saddr[i], again, sizeof (again)) != 0)
+	    {
+	      break;
+	    }
+	  if (stats_torn (again)
+	      && tv_to_ms (again, ST_OFF_TOTAL_TV) >= tv_to_ms (sb, ST_OFF_TOTAL_TV))
+	    {
+	      continue;
+	    }
+	  memcpy (sb, again, sizeof (again));
+	}
+      if (saddr[i] != 0 && stats_decode (sb, &v) == 0)
 	{
 	  r->has_stats = 1;
 	  r->nenter = v.nenter;

@@ -88,6 +88,7 @@
 #define LIVE_TRANS_ROWS    24	/* session rows on the summary screen (fewer on a short terminal) */
 
 #define STATS_SIZE         64
+#define STATS_REREAD       3	/* re-reads of a block whose time sum is torn */
 
 #define ST_OFF_TYPE        0
 

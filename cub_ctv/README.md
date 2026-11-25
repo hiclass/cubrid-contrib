@@ -292,6 +292,7 @@ MVCC 이전 버전을 읽는 경우는 LOG 를 reader 로 지난다).
 | `tests/t9_quick_trace.sh` | **빠른 확인**: 짧은 부하 중 라이브 요약 화면 1구간 캡처 + 기록 → 판독·판정·대기 세션 식별 PASS/FAIL, 화면 출력(docs/usage.md §3) | 필요 |
 | `tests/t24_replay_inputs.sh` | 픽스처가 지나지 않는 판독 경로의 최소 기록(유휴 서버, 신원 변화분이 빈 프레임, 명세의 예시 기록; 손으로 만든 것)의 재생 — 재생 경로 | **불필요** |
 | `tests/t25_fuzz_replay.sh` | 손상된 기록의 재생: 고정 입력(`tests/inputs/damaged/`)과 씨앗 고정 변형 기록 12,000개에서 크래시·멈춤·목록에 없는 sanitizer 지적 없음 — 기록 판독부 | **불필요** |
+| `tests/t26_torn_time.sh` | 누적 시간이 찢겨 읽힌 통계 블록(`tv_usec ≥ 1,000,000`)은 최대 3회 다시 읽고 온전한 블록은 다시 읽지 않음 | **불필요** |
 | `tests/fuzz_full.sh` | 퍼저 전체 실행(ASan + UBSan, 씨앗 3개 × 60,000개, 약 20분). 푸시 전과 기록 판독부를 바꿀 때 | **불필요** |
 | `tests/check_msg_pairs.py` | 한/영 메시지 쌍의 printf 지시자 동일성(정적) | 불필요 |
 | `tests/sanitize.sh` | 서버가 필요 없는 테스트 전부를 ASan + UBSan 빌드(실행 파일과 테스트 프로그램 모두)로 다시 실행. 종료 코드 2 = 런타임 미설치로 실행 못 함 | **불필요** |
@@ -309,7 +310,8 @@ MVCC 이전 버전을 읽는 경우는 LOG 를 reader 로 지난다).
   4,096 넘게 준 구간은 모든 CS 의 진입/초·대기/초·손실을 0 으로 두고 새 값을 다음 구간의 기준으로 삼는다.
   4,096 이하로 준 값은 엔진의 갱신 유실로 보아 그 값의 증가만 0 으로 둔다. 스냅샷의
   누적값(nenter·nwait·max_ms 등)은 리셋 이후 값이다.
-- 무락 판독: 카운터 ±1, total/max 대기시간은 찢긴 판독에서 일시적으로 최대 +1,000ms. occ%는 100Hz 격자라 µs
+- 무락 판독: 카운터 ±1. 누적 대기시간은 찢겨 읽히면(`tv_usec ≥ 1,000,000`) 다시 읽으며, 드물게 남는 경우
+  한 구간에서 ±1,000ms, max 는 1,000ms 미만 어긋날 수 있다(`docs/limitations.md` 의 표). occ%는 100Hz 격자라 µs
   점유에선 잡음(장기 점유 판정에만 사용). 개별 enter 이벤트는 미포착.
 - 유도식: CS 의 rwlock·owner·promoter 큐·writer 큐 위치(stats −96/−16/−24/−32B, I-4 로 교차검증), CS 의 tran
   (stats −8B, 별도 검사 없음), SYNC_STATS 카운터 오프셋(nenter@16·nwait@20·nreenter@24·total@32·max@48 고정, type·name 만

@@ -313,6 +313,7 @@ type 이름표 (`pool_type_names`, 인덱스 = type): `{"?", "CSECT", "RWLOCK", 
    - `cs_decode_raw` 로 `rwlock, wr, ww, tran`.
    - `owner = rd_u64(off+off_owner)`.
    - `wq = cs_wait_queues(blob, lo, i, &wq2, NULL)`.
+   - 찢긴 누적 시간: `saddr[i] != 0` 이고 가진 블록의 `total_elapsed.tv_usec`(`rd_i64(블록 + 40)`) `>= 1000000` 인 동안, 최대 `STATS_REREAD`(3) 회 `mem_read(saddr[i], 64B)` 로 블록을 다시 읽는다. 읽기가 실패하면 그만두고 가진 블록을 쓴다. 다시 읽은 블록이 온전하면(`tv_usec < 1000000`) 그것으로 바꾸고 끝난다. 그것도 찢겼으면 누적 시간(`tv_sec * 1000 + tv_usec / 1000`)이 가진 블록보다 작을 때만 바꾼다(블록 64B 통째). 엔진은 `tv_sec += e.sec`, `tv_usec += e.usec`, `tv_sec += tv_usec / 1000000`, `tv_usec %= 1000000` 순으로 쓰므로 이 값은 쓰는 도중에만 보이고, 셋째 저장 뒤에는 합이 1초 크다. 그래서 찢긴 것 가운데는 작은 합이 맞는 값이다.
    - `saddr[i] != 0` 이고 `stats_decode(sblk + i*64) == 0` 이면 `has_stats = 1` 과 `nenter, nwait, nreenter, total_ms, max_ms` 복사. 아니면 `has_stats = 0` 이고 통계 필드는 0. (행 해독에서는 type 이 CSECT 인지, 이름 포인터가 같은지는 다시 보지 않는다 — I-5 는 type 1..4 만.)
 5. 0 반환.
 
