@@ -78,4 +78,63 @@ top "enters fell by 1" "$(row $LOG '$10 = $20 - 1') $(row $HEAP '$13 = 1400.0')"
 # a rebased frame: no time lost on any row; what the samples saw still ranks
 top "rebased frame" "$(row $LOG '$10 = 1200; $11 = 300; $13 = 500.0')" "LOG sev=2 lost=0.000"
 top "rebased by another row" "$(row $HEAP '$10 = 40')" "LOG sev=2 lost=0.000"
-echo "t13 PASS: verdict figures of $(wc -l < "$G") frames match the golden; rebased frame (reset, wrap), lost updates, torn time"
+# the engine adds an enter's time when it is acquired: time above dt x the
+# enters of the window is of waits begun before it (a stall that ended)
+carried () {
+  awk "\$1 == \"F\" { f++ } $2 { print }" "$HERE/fixtures/demodb-live.rec" > "$T/c.rec"
+  LANG=C "$T/t13" "$T/c.rec" | grep -q "^1 top=$3 .* carried=$4\$" \
+    || { echo "t13 FAIL: carried ($1)"; exit 1; }
+}
+carried "as recorded" "" "LOG sev=3 lost=0.604" 0
+carried "a stall ended: no enter, 300 s" "$(row $LOG '$10 = $20; $11 = $21; $13 = $23 + 300180.0')" \
+  "LOG sev=4 lost=599.962" 1
+# dt 0.5003 s, 100 enters: up to 50.03 s is theirs
+carried "time of the window's enters" "$(row $LOG '$10 = $20 + 100; $13 = $23 + 50000.0')" "LOG sev=4 lost=99.934" 0
+carried "more than the window's enters" "$(row $LOG '$10 = $20 + 100; $13 = $23 + 50100.0')" "LOG sev=4 lost=100.133" 1
+# under 0.05 s/s the time does not rank: not marked
+carried "little time, no enter" "$(row $LOG '$10 = $20; $13 = $23 + 20.0') $(row $CLS '$13 = $23')" \
+  "LOG sev=2 lost=0.040" 0
+# from 0.05 s/s the time ranks (severity 2): marked from there
+carried "0.052 s/s, no enter" "$(row $LOG '$10 = $20; $13 = $23 + 26.0') $(row $CLS '$13 = $23')" \
+  "LOG sev=2 lost=0.052" 1
+carried "0.1 s/s, no enter" "$(row $LOG '$10 = $20; $13 = $23 + 50.0')" "LOG sev=2 lost=0.100" 1
+carried "rebased frame" "$(row $LOG '$10 = 1200; $11 = 300; $13 = 500.0')" "LOG sev=2 lost=0.000" 0
+# the mark is on the lost time of the summary screen, with and without a
+# second CS waiting
+STALL="$(row $LOG '$10 = $20; $11 = $21; $13 = $23 + 300180.0')"
+awk "\$1 == \"F\" { f++ } $STALL { print }" "$HERE/fixtures/demodb-live.rec" > "$T/c.rec"
+awk "\$1 == \"F\" { f++ } $STALL f == 1 && \$1 == \"C\" && \$2 != $LOG { \$11 = \$21; \$13 = \$23; \$16 = 0 } { print }" \
+  "$HERE/fixtures/demodb-live.rec" > "$T/d.rec"
+python3 - "${CUB_CTV_TOOL:-$HERE/../cub_ctv}" "$T/c.rec" "$T/d.rec" <<'PY' || { echo "t13 FAIL: carried mark on the screen"; exit 1; }
+import os, pty, fcntl, termios, struct, time, select, re, sys
+WANT = ((1, "en", "lost 599.96 s/s (incl. waits begun earlier); next"),
+        (1, "ko", "손실 599.96 s/s (앞 구간에서 시작된 대기 포함); 2위"),
+        (2, "en", "lost 599.96 s/s (incl. waits begun earlier); no other CS waiting"),
+        (2, "ko", "손실 599.96 s/s (앞 구간에서 시작된 대기 포함); 다른 CS는 대기 없음"))
+for rec, lang, want in WANT:
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ.pop("COLUMNS", None)
+        os.environ.update(LANG="en_US.UTF-8", TERM="xterm")
+        os.execv(sys.argv[1], ["cub_ctv", "--replay", sys.argv[1 + rec], "--replay-speed", "4", "--" + lang])
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
+    buf, t = b"", time.time()
+    while time.time() - t < 2.5:
+        if select.select([fd], [], [], 0.05)[0]:
+            try:
+                d = os.read(fd, 1 << 16)
+            except OSError:
+                break
+            if not d:
+                break
+            buf += d
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+    txt = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", buf.decode("utf-8", "replace"))
+    if want not in txt or txt.count("599.96 s/s") != txt.count(want):
+        sys.exit("%s %d: %r not on every drawing of that frame" % (lang, rec, want))
+PY
+echo "t13 PASS: verdict figures of $(wc -l < "$G") frames match the golden; rebased frame (reset, wrap), lost updates, torn time, carried waits"

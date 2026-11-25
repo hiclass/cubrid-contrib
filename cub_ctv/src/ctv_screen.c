@@ -144,6 +144,7 @@ print_verdict (FILE * out, const CS_FIG * top, const CS_FIG * second, int hz)
   VERDICT v;
   const CS_ROW *c = &view.rows[top->ix];
   char hb[96], judge[160], ev[200], dots[8];
+  const char *carried;
   int k;
   const char *sev = top->severity >= 4 ? M ("high", "높음")
     : top->severity == 3 ? M ("moderate", "중간") : M ("low", "낮음");
@@ -173,19 +174,21 @@ print_verdict (FILE * out, const CS_FIG * top, const CS_FIG * second, int hz)
 	    clr (CLR_OFF));
   }
 
-  /* where */
+  /* where; the time of an enter is added when it is acquired, so a stall
+   * that ended shows here at once */
+  carried = top->carried ? M (" (incl. waits begun earlier)", " (앞 구간에서 시작된 대기 포함)") : "";
   snprintf (judge, sizeof (judge), "%s (%s)", cs_desc (c->name), c->name);
   if (v.has_second)
     {
-      snprintf (ev, sizeof (ev), M ("lost %.2f s/s; next %s %.2f s/s",
-				    "손실 %.2f s/s; 2위 %s %.2f s/s"),
-		top->lost_s, view.rows[v.second.ix].name, v.second.lost_s);
+      snprintf (ev, sizeof (ev), M ("lost %.2f s/s%s; next %s %.2f s/s",
+				    "손실 %.2f s/s%s; 2위 %s %.2f s/s"),
+		top->lost_s, carried, view.rows[v.second.ix].name, v.second.lost_s);
     }
   else
     {
-      snprintf (ev, sizeof (ev), M ("lost %.2f s/s; no other CS waiting",
-				    "손실 %.2f s/s; 다른 CS는 대기 없음"),
-		top->lost_s);
+      snprintf (ev, sizeof (ev), M ("lost %.2f s/s%s; no other CS waiting",
+				    "손실 %.2f s/s%s; 다른 CS는 대기 없음"),
+		top->lost_s, carried);
     }
   verdict_row (out, M ("where", "어디서"), judge, ev);
 

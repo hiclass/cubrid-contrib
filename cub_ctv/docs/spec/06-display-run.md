@@ -111,8 +111,9 @@
 | `avg_ms` | `double` | 진입당 획득 ms |
 | `lost_s` | `double` | 초당 잃은 초(s/s) |
 | `severity` | `int` | 0 유휴 .. 4 |
+| `carried` | `int` | 1 = `lost_s` 에 구간 전에 시작된 대기가 들어 있음 |
 
-선언 순서는 `ix, occ_pct, wait_pct, enter_s, wait_s, avg_ms, lost_s, severity`.
+선언 순서는 `ix, occ_pct, wait_pct, enter_s, wait_s, avg_ms, lost_s, severity, carried`.
 
 **`VERDICT`** (`verdict_compute` 결과, `memset` 0 에서 시작):
 
@@ -678,6 +679,7 @@ usage: cub_ctv [options] [<db-name> | <pid> | --pid N]
 | `occ_pct`, `wait_pct`, `enter_s`, `wait_s` | 위 `cs_rates` 결과 |
 | `avg_ms` | `de > 0 && dms > 0 ? dms / de : 0.0` (진입당 획득 ms, double ÷ u32) |
 | `lost_s` | `dms > 0 ? dms / 1000.0 / dt : 0.0` (dt = 0 이면 무한대) |
+| `carried` | `lost_s >= 0.05 ∧ dms / 1000.0 > dt * de`. 엔진은 진입 수를 시도할 때, 획득 시간을 획득한 뒤에 더하므로 구간 안에 시작된 진입 하나가 더하는 시간은 통계를 읽은 간격 이하이고, 그 간격을 `dt` 로 본다(`dt` 는 구간 끝마다 통계를 읽기 직전에 잰 시각의 차라(첫 구간의 시작 시각만 기준 통계를 읽은 직후에 잰다) 실제 간격이 조금 더 길 수 있다: limitations "손실의 계상 시점"). 그 합(`dt × de`)을 넘는 시간은 구간 전에 시작된 대기의 것이다. 0.05 는 손실이 심각도에 쓰이기 시작하는 값 |
 
 심각도(위에서부터 첫 일치):
 
@@ -841,7 +843,7 @@ push 되는 값: 요약 화면이 그려질 때 `fig[0].severity >= 2 ? fig[0].i
 
 | 항목 EN/KO | 조건 | judge | evidence |
 |---|---|---|---|
-| `where` / `어디서` | 항상 | `"%s (%s)"` = cs_desc, name | `has_second`: `lost %.2f s/s; next %s %.2f s/s` / `손실 %.2f s/s; 2위 %s %.2f s/s` (top lost, 2위 name, 2위 lost). 아니면 `lost %.2f s/s; no other CS waiting` / `손실 %.2f s/s; 다른 CS는 대기 없음` |
+| `where` / `어디서` | 항상 | `"%s (%s)"` = cs_desc, name | `has_second`: `lost %.2f s/s%s; next %s %.2f s/s` / `손실 %.2f s/s%s; 2위 %s %.2f s/s` (top lost, 표식, 2위 name, 2위 lost). 아니면 `lost %.2f s/s%s; no other CS waiting` / `손실 %.2f s/s%s; 다른 CS는 대기 없음`. 표식은 `top->carried` 이면 ` (incl. waits begun earlier)` / ` (앞 구간에서 시작된 대기 포함)`, 아니면 빈 문자열 |
 | `who` / `누가` | 항상 | readers_most: `readers (no single owner)` / `reader 다수 (단일 소유자 없음)`, 근거 `writer %s held %.0f%% of the window (occupied %.0f%%)` / `writer %s 구간의 %.0f%% 보유 (점유 %.0f%%)` (%s = holder==0 이면 `daemon_name` 또는 `engine` / `엔진`, 아니면 `tran_text(holder, holder_cpid, LABEL)`; held_pct, occ_pct) — 아래 규칙은 readers_most 가 아닐 때. holder==0: `daemon_name` 이 있으면 `engine thread %s` / `엔진 스레드 %s`; 없으면 `engine daemon (system tran)` / `엔진 데몬 (system tran)`(엔진 데몬은 모두 tran 0 으로 돌므로 이름을 읽지 못하면 어느 데몬인지 적지 않는다). holder>0: `client session %s` / `클라이언트 세션 %s` (`tran_text(holder, holder_cpid, LABEL)`, 96B). holder==-2: `view.st.occ[ix] > 0` 이면 `readers (no single owner)` / `reader 다수 (단일 소유자 없음)`, 아니면 `not observed` / `관측 안 됨` | `one_thr && thr_pct < held_pct - 0.5`: `held %.0f%% of the window (engine threads together %.0f%%)` / `구간의 %.0f%% 보유 (엔진 스레드 합계 %.0f%%)` (thr_pct, held_pct). 아니면 `held %.0f%% of the window (occupied %.0f%%)` / `구간의 %.0f%% 보유 (점유 %.0f%%)` (held_pct, occ_pct) |
 | `how bad` / `얼마나` | 항상 | `"%s (%d/4)"` = sev, severity | `avg_ms > 0`: `%.0f of %.0f entries/s waited (%.0f%%), acquire %.3f ms/entry` (wait_s, enter_s, 비율, avg_ms) / KO `대기 %.0f건/s (진입 %.0f건/s 의 %.0f%%), 진입당 획득 %.3f ms` (같은 순서). 비율 = `enter_s > 0 ? 100*wait_s/enter_s : 0`. 아니면 `%.0f of %.0f entries/s waited; waiters seen %.0f%% of samples` / `대기 %.0f건/s (진입 %.0f건/s); 대기자 목격 %.0f%% 샘플` (wait_s, enter_s, wait_pct) |
 | `capacity` / `처리량` | one_thr && !readers_most 일 때만(엔진 스레드 하나가 특정될 때; 특정되지 않으면 `thr_pct` 가 엔진 스레드 합계라 한 스레드의 여유를 말할 수 없다) | `thr_pct >= 60` → `near the daemon's capacity` / `데몬 처리 상한 근접`, 아니면 `headroom remains` / `여유 있음` | `daemon holds %.0f%% -> %.0f%% headroom at %.0f entries/s` / `데몬 보유 %.0f%% -> 여유 %.0f%%, 진입 %.0f건/s` (thr_pct, 100-thr_pct, enter_s) |

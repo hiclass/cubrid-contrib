@@ -269,6 +269,7 @@ typedef struct
   int ix;
   double occ_pct, wait_pct, enter_s, wait_s, avg_ms, lost_s;
   int severity;			/* 0 idle .. 4 */
+  int carried;			/* lost_s holds waits begun before the window */
 } CS_FIG;
 
 typedef struct

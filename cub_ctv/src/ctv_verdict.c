@@ -160,6 +160,8 @@ cs_figures (int i, double dt, CS_FIG * f)
    * total_elapsed: lost = that time per second, avg = per enter */
   f->avg_ms = de > 0 && dms > 0 ? dms / de : 0.0;
   f->lost_s = dms > 0 ? dms / 1000.0 / dt : 0.0;
+  /* an enter begun in the window adds at most dt: more is older waits */
+  f->carried = f->lost_s >= 0.05 && dms / 1000.0 > dt * de;
   if (f->lost_s >= 1.0 || f->wait_pct >= 75.0)
     {
       f->severity = 4;
