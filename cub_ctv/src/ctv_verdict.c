@@ -96,32 +96,42 @@ cs_hint (const char *name)
 							    cs_info[i].hint_ko);
 }
 
-/* the statistics were reset (;info csstat clears them) between two rows:
- * nenter falls on a reset and on a u32 wrap, total_elapsed (a time sum that
- * does not wrap) only on a reset; both falling also rules out a torn read
- * of total_elapsed alone */
+/* A u32 engine counter falls when ;info csstat resets the statistics (of
+ * every CS), when it wraps, and (nenter, added to without a lock) by a few
+ * when updates are lost.  A fall past CS_SLIP_MAX is not lost updates: */
 static int
-stats_reset (const CS_ROW * c, const CS_ROW * p)
+fell_far (uint32_t now, uint32_t before)
 {
-  return c->total_ms < p->total_ms && c->nenter < p->nenter;
+  return now < before && before - now > CS_SLIP_MAX;
 }
 
-/* growth of a u32 engine counter: the new value after a reset, else the
- * difference modulo 2^32 (a wrap counts) */
-static uint32_t
-counter_delta (uint32_t now, uint32_t before, int reset)
+/* the frame took a new base: a counter of some row read fell far, so the
+ * growth of the window is not known, of any row */
+int
+cs_frame_rebased (const CS_ROW * rows, const CS_ROW * prev, int n)
 {
-  return reset ? now : now - before;
+  int i;
+
+  for (i = 0; prev != NULL && i < n; i++)
+    {
+      if (rows[i].has_stats && (fell_far (rows[i].nenter, prev[i].nenter)
+				|| fell_far (rows[i].nwait, prev[i].nwait)))
+	{
+	  return 1;
+	}
+    }
+  return 0;
 }
 
+/* growth of the window: none in a rebased frame; a counter that fell (lost
+ * updates) grew by none; a time sum that fell stays negative (no loss) */
 void
 cs_rates (const CS_ROW * c, const CS_ROW * p, int occ, int wai, int samples,
-	  double dt, CS_RATES * r)
+	  double dt, int rebased, CS_RATES * r)
 {
-  int reset = stats_reset (c, p);
-
-  r->de = counter_delta (c->nenter, p->nenter, reset);
-  r->dw = counter_delta (c->nwait, p->nwait, reset);
+  r->de = rebased || c->nenter < p->nenter ? 0 : c->nenter - p->nenter;
+  r->dw = rebased || c->nwait < p->nwait ? 0 : c->nwait - p->nwait;
+  r->dms = rebased ? 0.0 : c->total_ms - p->total_ms;
   r->enter_s = dt > 0 ? r->de / dt : 0.0;
   r->wait_s = dt > 0 ? r->dw / dt : 0.0;
   r->occ_pct = samples > 0 ? 100.0 * occ / samples : 0.0;
@@ -134,11 +144,13 @@ cs_figures (int i, double dt, CS_FIG * f)
   const CS_ROW *c = &view.rows[i], *p = &view.prev[i];
   CS_RATES rt;
   uint32_t de, dwt;
-  double dms = stats_reset (c, p) ? c->total_ms : c->total_ms - p->total_ms;
+  double dms;
 
-  cs_rates (c, p, view.st.occ[i], view.st.wai[i], view.st.samples, dt, &rt);
+  cs_rates (c, p, view.st.occ[i], view.st.wai[i], view.st.samples, dt,
+	    cs_frame_rebased (view.rows, view.prev, view.count), &rt);
   de = rt.de;
   dwt = rt.dw;
+  dms = rt.dms;
   f->ix = i;
   f->occ_pct = rt.occ_pct;
   f->wait_pct = rt.wait_pct;

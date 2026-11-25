@@ -86,7 +86,7 @@ json_cs_rows (FILE * f, const CS_LAYOUT * lo, const CS_ROW * rows,
 	      const int *occ, const int *wai, int samples, const CS_ROW * prev,
 	      double dt, int raw)
 {
-  int i;
+  int i, fr = samples > 0 ? cs_frame_rebased (rows, prev, lo->count) : 0;
 
   fprintf (f, "\"cs\":[");
   for (i = 0; i < lo->count; i++)
@@ -150,7 +150,7 @@ json_cs_rows (FILE * f, const CS_LAYOUT * lo, const CS_ROW * rows,
 	{
 	  CS_RATES rt;
 
-	  cs_rates (r, &prev[i], occ[i], wai[i], samples, dt, &rt);
+	  cs_rates (r, &prev[i], occ[i], wai[i], samples, dt, fr, &rt);
 	  fprintf (f, ",\"occ_pct\":%.2f,\"wait_pct\":%.2f,\"enter_s\":%.2f,"
 		   "\"wait_s\":%.2f", rt.occ_pct, rt.wait_pct, rt.enter_s,
 		   rt.wait_s);

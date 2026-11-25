@@ -503,11 +503,16 @@ extern int layout_mode;
 extern int layout_detail;
 extern const char *detail_filter;
 
-/* per-window rates of one CS (u32 wrap-safe counter deltas) */
+/* a counter that fell by no more than this lost updates (the engine's
+ * nenter++ takes no lock); a larger fall is a reset or a wrap */
+#define CS_SLIP_MAX        4096
+
+/* per-window rates of one CS */
 typedef struct
 {
   double enter_s, wait_s, occ_pct, wait_pct;
-  uint32_t de, dw;		/* raw deltas */
+  uint32_t de, dw;		/* growth of nenter, nwait */
+  double dms;			/* growth of total_elapsed (ms) */
 } CS_RATES;
 extern int color_on;		/* ANSI colors: tty only, off with --plain */
 extern const char *live_footer;	/* screen footer; NULL = "[q] quit" */
@@ -709,7 +714,8 @@ void screen_summary (const CS_LAYOUT * lo, double dt, int hz, double interval, i
 /* ctv_verdict.c: verdict - the figures behind a summary screen: per-CS rates, losses and severity, the holder (session or engine thread) of each CS, the persistence history, the verdict itself (VERDICT), and the CS descriptions and hints */
 const char *cs_desc (const char *name);
 const char *cs_hint (const char *name);
-void cs_rates (const CS_ROW * c, const CS_ROW * p, int occ, int wai, int samples, double dt, CS_RATES * r);
+int cs_frame_rebased (const CS_ROW * rows, const CS_ROW * prev, int n);
+void cs_rates (const CS_ROW * c, const CS_ROW * p, int occ, int wai, int samples, double dt, int rebased, CS_RATES * r);
 void cs_figures (int i, double dt, CS_FIG * f);
 const char *daemon_name (int i);
 int holder_thread_of (int i, int *samples);

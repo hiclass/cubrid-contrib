@@ -8,7 +8,7 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOOL=${CUB_CTV_TOOL:-$HERE/../cub_ctv}
-out=$(timeout --foreground 540 python3 "$HERE/fuzz_replay.py" --tool "$TOOL" \
+out=$(timeout --foreground -k 20 540 python3 "$HERE/fuzz_replay.py" --tool "$TOOL" \
   --seeds "$HERE/fixtures" "$HERE/inputs" --fixed "$HERE/inputs/damaged" \
   --n 12000 --seed 20261123 2>&1); rc=$?
 if [ $rc -ne 0 ]; then

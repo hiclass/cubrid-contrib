@@ -184,6 +184,7 @@
 | `HZ_MAX` | 10000 | `--hz` 상한(하한 1). 라이브 기록 헤더의 hz 도 같은 범위로 검증한다 |
 | `REC_SAMPLES_MAX` | 36010000 | 윈도 샘플 수 상한 |
 | `REC_KEYFRAME` | 60 | 매 N 번째 프레임이 모든 identity 포함 |
+| `CS_SLIP_MAX` | 4096 | 카운터가 이만큼 이하로 줄면 갱신 유실(증가 0), 넘게 줄면 기준값 재설정 프레임(06 §6.2) |
 | `REC_DT_MAX` | 1e7 | 녹화가 주장할 수 있는 최장 윈도(초) |
 | `REC_TOKENS_MAX` | 68 (`4+THR_WAITERS_MAX`) | 녹화 한 줄 최대 토큰 |
 | `POOL_GROUPS_CAPPED` / `POOL_NO_MEMORY` / `POOL_CHAIN_LOOP` | −2 / −3 / −4 | `pool_truncated` 사유 |

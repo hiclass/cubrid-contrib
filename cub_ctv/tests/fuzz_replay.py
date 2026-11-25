@@ -483,6 +483,10 @@ def main():
     work = tempfile.mkdtemp(prefix="work.", dir=keep)
 
     def stopped(sig, frame):
+        # one stop: a second signal must not cut the clean-up short
+        for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(s, signal.SIG_IGN)
+        signal.alarm(60)    # a clean-up that hangs still ends
         raise KeyboardInterrupt
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, stopped)

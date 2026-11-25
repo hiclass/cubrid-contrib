@@ -159,12 +159,13 @@ writer 가 reader 로 내려가거나(demote), reader 가 writer 로 올라가�
 | max_elapsed | 그중 최대 | 누적 최대라 지난 사건이 남아 있음 (`;info csstat` 실행 시 리셋) |
 | (구조체) owner / tran_index | writer 가 쥘 때 기록, 강등 중에도 남음 | **reader 가 누구인지는 어디에도 없다** |
 
-카운터는 부호 없는 32비트라 수십억 번이면 돌아간다(cub_ctv 는 구간 차이를 wrap 안전하게 계산한다).
+카운터는 부호 없는 32비트라 수십억 번이면 돌아간다(cub_ctv 는 그 구간의 증가량을 0 으로 두고 다음 구간부터 다시 계산한다).
 
 csql 의 `;info csstat` 은 통계를 출력한 직후 **누적 통계를 0으로 리셋**한다(CS·RWLOCK·RMUTEX 전부). 그 뒤로는
 `SHOW CRITICAL SECTIONS` 와 cub_ctv 의 누적값도 0부터 다시 쌓인다. 카운터(`unsigned int`)는 오래 가동한 서버에서 32bit 를 넘어 0부터 다시 세기도 하는데, 이때도 값이 줄어든다.
-cub_ctv 는 두 번 읽은 사이에 진입 수와 누적 획득 시간(total_elapsed, 넘치지 않음)이 함께 줄었으면 리셋으로 보고
-새 값을 그 구간의 증가분으로 쓰며, 진입 수만 줄었으면 32bit 넘침으로 계산한다. 또한 `;info csstat` 출력은 헤더가 `Total Wait|Total Reenter` 순인데
+cub_ctv 는 줄어든 카운터가 리셋인지 넘침인지 가리지 않는다. 두 번 읽은 사이에 어느 CS 의 진입 수나 대기 수가 4,096 넘게
+줄었으면 그 구간은 모든 CS 의 증가량을 0 으로 두고(실제 값은 알 수 없다) 새 값을 다음 구간의 기준으로 삼는다. 4,096 이하로
+준 것은 엔진이 진입 수를 잠금 없이 더하다 갱신이 유실된 것으로 보아 그 값의 증가만 0 으로 둔다. 또한 `;info csstat` 출력은 헤더가 `Total Wait|Total Reenter` 순인데
 값은 nreenter, nwait 순으로 찍혀 두 열이 뒤바뀌어 있다(엔진 출력 버그).
 
 ## 4. 예시로 보는 흐름

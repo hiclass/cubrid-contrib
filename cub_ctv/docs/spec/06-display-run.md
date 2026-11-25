@@ -97,9 +97,10 @@
 |---|---|---|
 | `enter_s`, `wait_s` | `double` | 구간 초당 진입·대기 건수 |
 | `occ_pct`, `wait_pct` | `double` | 점유·대기 샘플 비율(%) |
-| `de`, `dw` | `uint32_t` | `nenter`·`nwait` 의 구간 차(u32 랩 안전) |
+| `de`, `dw` | `uint32_t` | `nenter`·`nwait` 의 구간 증가량(§6.2) |
+| `dms` | `double` | 누적 획득 시간의 구간 증가량(ms, §6.2) |
 
-선언 순서는 `enter_s, wait_s, occ_pct, wait_pct, de, dw`.
+선언 순서는 `enter_s, wait_s, occ_pct, wait_pct, de, dw, dms`.
 
 **`CS_FIG`** (`cs_figures` 결과, 순위 표 1행):
 
@@ -646,29 +647,35 @@ usage: cub_ctv [options] [<db-name> | <pid> | --pid N]
 
 ### 6.2 구간 비율 (`cs_rates`)
 
-입력: 현재 행 c, 구간 시작 행 p, 점유 샘플 occ, 대기 샘플 wai, 샘플 수, dt.
+입력: 현재 행 c, 구간 시작 행 p, 점유 샘플 occ, 대기 샘플 wai, 샘플 수, dt, rebased.
 
 | 필드 | 식 |
 |---|---|
-| `de` | `counter_delta(c->nenter, p->nenter, reset)` |
-| `dw` | `counter_delta(c->nwait, p->nwait, reset)` |
+| `de`, `dw`, `dms` | 진입 수·대기 수·누적 획득 시간(ms)의 구간 증가량 (아래 "구간 증가량") |
 | `enter_s` | `dt > 0 ? r->de / dt : 0.0` (u32 ÷ double → 실수 나눗셈) |
 | `wait_s` | `dt > 0 ? r->dw / dt : 0.0` |
 | `occ_pct` | `samples > 0 ? 100.0 * occ / samples : 0.0` |
 | `wait_pct` | `samples > 0 ? 100.0 * wai / samples : 0.0` |
 
-`reset = stats_reset(c, p)` = `c->total_ms < p->total_ms ∧ c->nenter < p->nenter`. 진입 수는 리셋과 32bit 넘침 모두에서 줄고, 누적 획득 시간(넘침 없음)은 리셋에서만 준다. 둘 다 줄어야 리셋으로 보므로 누적 시간만 찢겨 작게 읽힌 경우는 리셋이 아니다. `counter_delta(now, before, reset)`(static): `reset` 이면 `now`, 아니면 `(uint32_t)(now - before)`(32bit 넘침 포함). 리셋 직전 값이 2^31 을 넘었어도 리셋으로 판정한다.
+**구간 증가량.** 엔진의 u32 카운터(진입 수·대기 수)는 세 경우에 줄어든다: `;info csstat` 의 통계 리셋(한 번의 명령으로 모든 CS 를 차례로 0으로 만든다), 32bit 넘침, 그리고 진입 수에 한해 갱신 유실(엔진이 잠금 없이 `nenter++` 한다)로 조금. 리셋과 넘침은 가리지 않는다.
+
+- `fell_far(now, before)`(static) = `now < before ∧ before - now > CS_SLIP_MAX`(4096).
+- `cs_frame_rebased(rows, prev, n)`: `has_stats` 인 행 가운데 `fell_far(nenter)` 이거나 `fell_far(nwait)` 인 행이 하나라도 있으면 1(기준값 재설정 프레임). `prev == NULL` 이면 0. 통계를 못 읽은 행(`has_stats` 0, 값이 모두 0)은 세지 않는다.
+- 기준값 재설정 프레임(`rebased`)에서는 모든 행이 `de = dw = 0`, `dms = 0.0` 이다. 그 구간의 증가량은 알 수 없고(리셋이면 리셋 전 증가분이 사라졌고, 넘침과 리셋을 가릴 수 없다), 기록에는 0 으로 남는다. 다음 구간은 이 프레임의 값을 구간 시작값으로 쓴다(라이브는 구간을 닫을 때 `w->prev = w->cur`, §12.4).
+- 그 밖의 프레임: `de` = `c->nenter < p->nenter` 이면 0(갱신 유실: 4,096 이하 감소), 아니면 `c->nenter - p->nenter`. `dw` 도 같은 식(`nwait`). `dms = c->total_ms - p->total_ms` (double; 누적 시간이 줄었으면 음수로 남고 §6.3 에서 손실 0 이 된다).
+
+호출자는 `rebased = cs_frame_rebased(view.rows, view.prev, view.count)` 를 넘긴다(JSON 은 자기 행 배열로 한 번 계산).
 
 **나눗셈 규칙(이 절과 §6.3·§6.7 전체)**: 백분율·비율은 모두 `100.0`(double) 리터럴로 시작하므로 C 의 왼쪽 결합에 따라 첫 곱셈부터 double 로 승격되어 **실수 나눗셈**이다. 정수 나눗셈은 판정 수치 어디에도 없다. 예: occ 2, samples 3 → 66.666…(`%5.1f` 로 ` 66.7`, JSON `%.2f` 로 `66.67`).
 
 ### 6.3 CS 수치 (`cs_figures(i, dt)`) 와 심각도
 
-`c = view.rows[i]`, `p = view.prev[i]`, `dms = stats_reset(c, p) ? c->total_ms : c->total_ms - p->total_ms` (double).
+`c = view.rows[i]`, `p = view.prev[i]`. `cs_rates(c, p, view.st.occ[i], view.st.wai[i], view.st.samples, dt, cs_frame_rebased(view.rows, view.prev, view.count))` 를 한 번 불러 `de`·`dw`·`dms` 와 비율을 모두 거기서 얻는다(§6.2).
 
 | 필드 | 식 |
 |---|---|
 | `ix` | i |
-| `occ_pct`, `wait_pct`, `enter_s`, `wait_s` | `cs_rates(c, p, view.st.occ[i], view.st.wai[i], view.st.samples, dt)` |
+| `occ_pct`, `wait_pct`, `enter_s`, `wait_s` | 위 `cs_rates` 결과 |
 | `avg_ms` | `de > 0 && dms > 0 ? dms / de : 0.0` (진입당 획득 ms, double ÷ u32) |
 | `lost_s` | `dms > 0 ? dms / 1000.0 / dt : 0.0` (dt = 0 이면 무한대) |
 
@@ -1018,7 +1025,7 @@ transactions (from memory, no SQL connection):
 ### 8.5 라이브 스크롤 CS 행 (`live_print_row(i, dt)`)
 
 - `tg = row_held(c) ? c->tran : view.st.seen_tran[i]`, `tg_cpid = row_held(c) ? -1 : view.st.seen_cpid[i]`, `owner = row_held(c) ? c->owner : view.st.seen_owner[i]`, `wq = c->wq`, `seen_cs = (c->wq == 0 && view.st.seen_wq[i] != 0) ? i : -1`.
-- `cs_rates(c, prev, occ, wai, samples, dt)` → de = enter_s, dw = wait_s, occ_pct.
+- `cs_rates(c, prev, occ, wai, samples, dt, cs_frame_rebased(view.rows, view.prev, view.count))` → de = enter_s, dw = wait_s, occ_pct.
 - 막대: `fill = (int)(occ_pct / 10 + 0.5)`, 10칸, 앞 fill 칸 `#`, 나머지 `.`.
 - `waiting = wai[i] > 0 || dw > 0`; `idle = !waiting && occ[i] == 0 && de == 0 && rwlock == 0`.
 - 막대 색: occ_pct ≥ 80 → BAR_HIGH, ≥ 50 → BAR_MID, 그 밖 BAR_LOW.

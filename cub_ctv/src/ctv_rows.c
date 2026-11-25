@@ -564,7 +564,8 @@ live_print_row (int i, double dt)
   char bar[12], sb[32], row[320];
   char one[TAG_LEN], l1[TAG_LEN], l2[TAG_LEN];
 
-  cs_rates (c, p, view.st.occ[i], view.st.wai[i], view.st.samples, dt, &rt);
+  cs_rates (c, p, view.st.occ[i], view.st.wai[i], view.st.samples, dt,
+	    cs_frame_rebased (view.rows, view.prev, view.count), &rt);
   de = rt.enter_s;
   dw = rt.wait_s;
   occ_pct = rt.occ_pct;
