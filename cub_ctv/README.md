@@ -208,7 +208,7 @@ layout: stride=160B count=18 stats_off=152 (runtime-probed)  threads=4314
 
 | CS | 올리는 활동 | 실측 패턴 |
 |---|---|---|
-| LOG | 로그 플러시(디스크 쓰기), 더티 페이지 쓰기 전 WAL 보장, 체크포인트, 아카이브, 롤백·postpone·세이브포인트·CDC·HA 전송의 로그 페이지 읽기(reader) — 일반 로그 기록은 별도 뮤텍스(prior list)라 여기 안 잡힘 | DML 시 최상위. `[system]` 장기 점유 = 로그 플러시(정상). 클라이언트가 writer면 대개 롤백·postpone 등의 로그 읽기(prior list 내리기)나 명시적 페이지 flush 의 WAL 보장 |
+| LOG | 로그 플러시(디스크 쓰기), 더티 페이지 쓰기 전 WAL 보장, 체크포인트, 아카이브, 롤백·postpone·세이브포인트·CDC·HA 전송의 로그 페이지 읽기(reader) — 일반 로그 기록은 별도 뮤텍스(prior list)라 여기 안 잡힘 | DML 시 최상위. `[system]` 장기 점유 = 대개 로그 플러시, 체크포인트·아카이브 삭제·페이지 플러시 데몬일 수도 있음(스레드 이름으로 가림; 정상). 클라이언트가 writer면 대개 롤백·postpone 등의 로그 읽기(prior list 내리기)나 명시적 페이지 flush 의 WAL 보장 |
 | LOG_ARCHIVE | 아카이브 로그 접근 | CDC/log 소비자·백업이 대기 유발 |
 | LOCATOR_CLASSNAME_TABLE | 클래스명→OID 조회 | 접속 폭주·autocommit DML·DDL churn에서 급증 |
 | TRAN_TABLE / ACCESS_STATUS | 트랜잭션 슬롯 할당·반납(접속·종료), 체크포인트 / 로그인 | 접속률 지표 (트랜잭션마다 진입하지 않음) |
