@@ -388,6 +388,7 @@ typedef struct
   double ch_walked[MAX_CS];	/* when it was last walked (mono s) */
   uint64_t own_last[MAX_CS];	/* owner tid of the last sample */
   int own_slot[MAX_CS];		/* its resolved entry slot */
+  unsigned own_gen;		/* thr_cache_gen() of those lookups */
   unsigned char *blob;		/* raw array image of the latest sample */
   unsigned short act_ix[ACT_HASH];	/* (cs, kind, tran) -> st.act index + 1 */
   OS_THR os[OS_MAX];		/* holder threads sampled in the window, per CS */
@@ -753,6 +754,7 @@ int thr_wait_counts (int *cnt, int *live, int reader_cap);
 void thr_probe (uint64_t manager_sym, int pid);
 void thr_cache_refresh (void);
 int thr_index_of_tid_mem (uint64_t tid);
+unsigned thr_cache_gen (void);
 int thr_waiters_mem (uint64_t head, int *idx, int *tran, int max, uint64_t anchor_at);
 int thr_waiters_mem2 (uint64_t head, uint64_t head2, int *idx, int *tran, int max, uint64_t anchor_at);
 void thr_dump (FILE * f);

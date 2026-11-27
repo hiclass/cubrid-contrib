@@ -149,6 +149,12 @@ os_sample (LIVE_WIN * w, const CS_LAYOUT * lo, int k, int cs, uint64_t owner)
       o->tid = tid;
       (void) os_task_comm (target_pid, tid, o->comm, sizeof (o->comm));
     }
+  if (o->tid != tid)
+    {
+      /* the slot went to another thread within the window (a worker that
+       * ended, its entry taken again): its state is not this entry's */
+      return;
+    }
   if (!w->os_pick)
     {
       return;			/* the entry keeps the name */
@@ -309,6 +315,16 @@ live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo)
 {
   int i;
 
+  if (w->own_gen != thr_cache_gen ())
+    {
+      /* the thread tables were rebuilt: an owner not found before may be
+       * known now, and a thread id used again may be in another slot */
+      w->own_gen = thr_cache_gen ();
+      for (i = 0; i < lo->count; i++)
+	{
+	  w->own_last[i] = 0;
+	}
+    }
   os_block_step (w);
   for (i = 0; i < lo->count; i++)
     {

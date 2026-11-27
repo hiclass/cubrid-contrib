@@ -102,6 +102,7 @@
 | `tests/t27_engine_holder.py` | 이름·스레드를 모르는 엔진 보유자의 판정 문구 | 불필요 |
 | `tests/t28_quit_restore.py` | Ctrl-\(SIGQUIT) 뒤 터미널 복원 | 불필요 |
 | `tests/t29_exit_keeps_frame.py` | q·Ctrl-C·Ctrl-\ 뒤 마지막 프레임 유지, 속성 해제 | 불필요 |
+| `tests/t30_thr_lookup.sh` | 구간 중 스레드 표가 바뀐 경우의 owner·OS 상태 항목 | 불필요 |
 | `tests/fuzz_full.sh` | 퍼저 전체 실행(회귀 밖: 푸시 전, 기록 판독부 변경 시) | 불필요 |
 | `tests/sanitize.sh` | 서버가 필요 없는 시험 전부를 ASan + UBSan 빌드로 재실행 | 불필요 |
 | `tests/t2_show_compare.py` | 엔진 `SHOW CRITICAL SECTIONS` 값이 전후 판독 사이 + 자기영향 0 | 필요 |

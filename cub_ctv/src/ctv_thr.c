@@ -77,11 +77,22 @@ cmp_sorted (const void *a, const void *b)
   return x < y ? -1 : x > y;
 }
 
+static unsigned thr_gen = 0;	/* the tables were rebuilt this many times */
+
+/* changes when the thread tables (pthread id -> slot, slot -> tid) were
+ * rebuilt: what was looked up before may name another thread now */
+unsigned
+thr_cache_gen (void)
+{
+  return thr_gen;
+}
+
 static void
 thr_sorted_rebuild (void)
 {
   int k;
 
+  thr_gen++;
   thr_nsorted = 0;
   if (thr_sorted == NULL)
     {

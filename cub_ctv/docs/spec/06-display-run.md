@@ -1232,6 +1232,8 @@ procfs 상태를 읽을 표본을 정한다. 표본은 `os_every` 개씩 블록�
 
 ### 11.2 샘플 1회 (`live_accumulate(w, lo)`)
 
+맨 먼저 `w->own_gen != thr_cache_gen()` 이면 `own_gen` 을 맞추고 모든 CS 의 `own_last = 0` 으로 둔다(스레드 표가 다시 만들어졌다: 전에 못 찾은 owner 를 이제 찾을 수 있고, 다시 쓰인 pthread id 는 다른 칸일 수 있다. 표는 1초마다 태스크 목록을 확인해 바뀌었거나 재프로브 차례일 때 다시 만들어지고, 구간은 그보다 길 수 있다).
+
 blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_block_step(w)`(§11.1a). CS i 마다:
 
 1. `cs_decode_raw` 로 rwlock, wr, ww, tran. `owner = rd_u64(blob, off + off_owner)`, `held = cs_held(rwlock, owner)` (§8.1 `row_held`: writer, 또는 강등된 owner).
@@ -1283,6 +1285,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 
 1. `tid = thr_tid_of(k)`; ≤ 0 이면 무시.
 2. `w->os[]` 에서 `slot == k && cs == cs` 인 항목을 찾고, 없으면 `nos < OS_MAX`(128) 일 때 새로 만들어 slot, cs, tid, `os_task_comm` 으로 comm(16B) 을 채움(`os_task_comm` 은 tid 별 5초 캐시라 같은 스레드의 둘째 항목은 procfs 를 다시 읽지 않는다, 01 §7.6). 가득 차면 무시.
+2a. 찾은 항목의 `tid` 가 지금의 `tid` 와 다르면 무시한다(구간 중에 그 칸이 다른 스레드로 넘어갔다: 유휴 타임아웃으로 끝난 워커의 엔트리를 새 스레드가 받은 경우. 한 항목에 두 스레드의 CPU 틱·상태를 섞지 않는다. 뒤 스레드의 상태는 그 구간에 세지 않는다).
 3. `!w->os_pick` 이면 여기서 끝(항목은 이름만 가진 채 남는다; 판독 0개 항목도 판정에 `판독 0회` 로 보인다, §6.7). 판독 표본이면 스레드별 판독 캐시 `w->rd[]` 에서 `slot == k` 를 찾고, 없으면 `nrd < OS_RD_MAX`(64) 일 때 새로 만든다(`t = 0`, `seq = -1`). 가득 차면 무시.
 4. 판독은 **스레드당 표본당 한 번**이다. `rd->seq != w->st.samples`(이 표본에서 이 스레드를 처음 봄)이면: `rd->seq = w->st.samples`, `rd->t = mono_s()`, `rd->ok = os_task_state(target_pid, tid, &rd->st, &rd->ticks) == 0` (`/proc/<pid>/task/<tid>/stat` 의 상태 문자와 utime+stime). `rd->seq == w->st.samples` 이면(같은 스레드가 한 표본에 CS 를 둘 이상 쥠) 그 판독값을 그대로 쓴다 — 다시 읽지 않으므로 한 표본은 그 스레드가 쥔 CS 항목 **전부에 세거나(성공) 전부에 세지 않는다(실패)**.
 5. `!rd->ok` → 무시.

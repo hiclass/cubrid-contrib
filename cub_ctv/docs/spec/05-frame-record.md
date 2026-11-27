@@ -223,6 +223,7 @@
 | `ch_walked[MAX_CS]` | `double` | 마지막 걷기 시각(mono s). `every()` 스로틀 기준 | **안 함**(구간을 넘어 유지) |
 | `own_last[MAX_CS]` | `uint64_t` | 직전 샘플의 owner tid(칸 해석 캐시 키) | 0 |
 | `own_slot[MAX_CS]` | `int` | 그 tid 의 칸(−1 = 모름) | −1 |
+| `own_gen` | `unsigned` | 위 두 칸을 채울 때의 `thr_cache_gen()`. 값이 달라지면 `own_last` 를 0 으로 되돌려 다시 찾는다(06 §11.2) | (리셋하지 않음) |
 | `blob` | `unsigned char *` | 최신 샘플의 CS 배열 원시 이미지(`stride*count` 바이트, `malloc`) | 안 함 |
 | `act_ix[ACT_HASH]` | `unsigned short` | 활동 해시: `st.act` 인덱스 + 1, 0 = 빈칸 | 전부 0 |
 | `os[OS_MAX]`, `nos` | `OS_THR`, `int` | 구간에 샘플한 (보유 스레드, CS) 쌍의 OS 상태 | `nos = 0` |

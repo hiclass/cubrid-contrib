@@ -683,7 +683,7 @@ SET/WEAK --field_reject(fields_drop)-------------> NONE (+ off 를 기각 목록
 
 ### 15.3 `static void thr_sorted_rebuild(void)`
 
-`thr_nsorted = 0` 으로 시작. `thr_sorted` 를 (없으면) count 칸 malloc(실패 시 `thr_nsorted = 0` 인 채 반환, 다음 호출에서 재시도). k 오름차순으로 `thr_ids[k] != 0` 인 (m_id, k) 를 채우고 `qsort(thr_sorted, thr_nsorted, sizeof(THR_SORTED), cmp_sorted)`. `cmp_sorted` 는 m_id 만 비교(`x < y ? -1 : x > y`)하며 slot 은 비교하지 않는다.
+`thr_gen++` (`unsigned thr_cache_gen(void)` 가 돌려주는 값: 스레드 표가 다시 만들어진 횟수. 샘플러가 owner→칸 캐시를 버리는 신호다). `thr_nsorted = 0` 으로 시작. `thr_sorted` 를 (없으면) count 칸 malloc(실패 시 `thr_nsorted = 0` 인 채 반환, 다음 호출에서 재시도). k 오름차순으로 `thr_ids[k] != 0` 인 (m_id, k) 를 채우고 `qsort(thr_sorted, thr_nsorted, sizeof(THR_SORTED), cmp_sorted)`. `cmp_sorted` 는 m_id 만 비교(`x < y ? -1 : x > y`)하며 slot 은 비교하지 않는다.
 
 중복 m_id(동률) 규칙: **없음.** 중복 제거도, 동률 시 slot 순 정렬도 하지 않는다. I-16 프로브는 후보 오프셋의 비0 값이 모두 다를 것을 요구하지만(§6.1), 이후 재구성(`thr_ids_load`, 특히 gather 판독 `img == NULL`)은 중복을 검사하지 않으므로 찢긴 판독·pthread_t 재사용 시 같은 m_id 가 두 슬롯에 있을 수 있다. 그때 같은 키들의 상대 순서는 libc `qsort` 의 구현에, `thr_index_of_tid_mem` 이 그중 어느 원소를 돌려주는지는 libc `bsearch` 의 구현에 달려 있다. 바이트 동일 재구현이 필요하면 원본과 같은 libc(정적 링크된 것)의 `qsort`/`bsearch` 를 같은 인자(원소 크기 16, 위 비교 함수)로 호출해야 한다. 중복이 없으면 결과는 유일하다.
 
