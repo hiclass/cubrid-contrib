@@ -474,10 +474,15 @@ main (int argc, char **argv)
     CHECK (v.os != NULL && v.os->samples == 4 && v.os_few && view.st.samples < os_min_samples (100),
 	   "short window: %d readings in %d samples (want 4 in 20, fewer than the %d a judgement needs %d samples for)",
 	   v.os != NULL ? v.os->samples : -1, view.st.samples, OS_MIN_READS, os_min_samples (100));
-    if (view_record_close () != 0 || view_record_open (argv[4], &h, 0) != 0)
-      {
-	return 1;
-      }
+    {
+      VIEW_HDR hs = h;
+
+      hs.interval = 0.2;	/* a 0.2 s window: a run with --interval 0.2 */
+      if (view_record_close () != 0 || view_record_open (argv[4], &hs, 0) != 0)
+	{
+	  return 1;
+	}
+    }
     view_record_frame ();
     /* 26 and 27 samples at 100 Hz, held in the first 10; 16 samples at
      * 50 Hz, held throughout; 20 samples at 50 Hz, held in the first 10 */
@@ -487,6 +492,7 @@ main (int argc, char **argv)
 	int hz = r0 >= 2 ? 50 : 100, len = r0 == 0 ? 26 : r0 == 1 ? 27 : r0 == 2 ? 16 : 20;
 
 	h2.hz = hz;
+	h2.interval = (double) len / hz;	/* the run that makes such a window */
 	live_os_pace (w, hz, 20261120);
 	live_win_reset (w, lo.count);
 	g_now += 1.0;

@@ -468,6 +468,7 @@ rec_tail_warn (void)
 
 static long rec_seq = 0;	/* ordinal of the next frame read */
 static int rec_live = 0;	/* header: live record (windows) or snapshot */
+static double rec_interval = 0.0;	/* header: --interval of a live record */
 
 static void
 rec_bad (void)
@@ -599,6 +600,7 @@ view_replay_open (const char *path, VIEW_HDR * h)
     }
   rec_count = h->lo.count;
   rec_live = h->live;
+  rec_interval = h->interval;
 }
 
 static unsigned long long
@@ -663,11 +665,12 @@ rd_F (char **tok, int n, REC_RD * rd)
   view.ntran = atoi (tok[8]);
   view.pool_state = atoi (tok[9]);
   view.pool_truncated = atoi (tok[10]);
-  /* a live window must carry samples and a positive, finite length
-   * (the figures divide by both, the replay sleeps for it) */
+  /* a live window must carry samples and a finite length no shorter than
+   * --interval: the run closes a window only after that long, and the
+   * figures divide by both (a tiny length would make them inf) */
   if (view.count != rec_count
       || view.st.samples < 0 || view.st.samples > REC_SAMPLES_MAX
-      || (rec_live && (view.st.samples < 1 || !(view.dt > 0.0)
+      || (rec_live && (view.st.samples < 1 || !(view.dt >= rec_interval)
 		       || !(view.dt <= REC_DT_MAX))))
     {
       rec_bad ();

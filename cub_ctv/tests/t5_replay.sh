@@ -57,7 +57,11 @@ nonfinite "$l" '$1=="C"&&!d{$23="-inf";d=1}{print}' "C prev total_ms -inf"
 nonfinite "$l" '$1=="B"&&!d{$0="D nan 1.0 sda";d=1}{print}' "D await nan"
 nonfinite "$l" '$1=="B"&&!d{$0="D 1.0 inf sda";d=1}{print}' "D util inf"
 nonfinite "$s" '$1=="G"&&!d{$5="nan";d=1}{print}' "G max_ms nan"
-[ $rc -eq 0 ] && echo "t5 PASS: nan / inf real tokens refused with their line"
+# a live window shorter than the header's --interval: a damaged length (a
+# denormal one would make every rate inf and the JSON invalid)
+nonfinite "$l" '$1=="F"&&!d{$5="4.9e-324";d=1}{print}' "F dt denormal"
+nonfinite "$l" '$1=="F"&&!d{$5="0.49";d=1}{print}' "F dt below the header interval 0.5"
+[ $rc -eq 0 ] && echo "t5 PASS: nan / inf real tokens and live windows shorter than --interval refused with their line"
 # Korean only on a UTF-8 locale: otherwise English (ASCII only) and one warning
 lbad=0
 locale_case () {                # expect (ko|en), env assignments..., [-- args]

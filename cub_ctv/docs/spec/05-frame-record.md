@@ -469,7 +469,7 @@ F … (프레임 2) …
 | 1 | `ts` | `%ld` |
 | 2 | `count` | 헤더 `count` 와 같아야 함 |
 | 3 | `st.samples` | 0 ≤ samples ≤ `REC_SAMPLES_MAX`; 라이브 헤더면 ≥ 1 |
-| 4 | `dt` | 쓰기 시 `min(dt, REC_DT_MAX)`. 라이브 헤더면 `0 < dt <= 1e7`(NaN·inf 거부) |
+| 4 | `dt` | 쓰기 시 `min(dt, REC_DT_MAX)`. 라이브 헤더면 `interval <= dt <= 1e7`(헤더의 `interval` 이상: 라이브 런은 `now − t_prev >= interval` 일 때만 구간을 닫는다. NaN·inf·비정규 값 거부 — 아주 작은 값이면 비율이 inf 가 되어 JSON 이 깨진다) |
 | 5 | `tran_avail` | |
 | 6 | `cid_locked` | |
 | 7 | `has_trid` | |
@@ -484,7 +484,7 @@ F … (프레임 2) …
    ```c
    if (view.count != rec_count
        || view.st.samples < 0 || view.st.samples > REC_SAMPLES_MAX
-       || (rec_live && (view.st.samples < 1 || !(view.dt > 0.0)
+       || (rec_live && (view.st.samples < 1 || !(view.dt >= rec_interval)
                         || !(view.dt <= REC_DT_MAX))))
      rec_bad ();
    ```
