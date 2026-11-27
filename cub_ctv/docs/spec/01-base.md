@@ -147,6 +147,8 @@
 | `THR_STRIDE_MIN` / `THR_STRIDE_MAX` | 256 / 65536 | `sizeof (entry)` 탐색 범위 |
 | `THR_INDEX_SCAN` | 2048 | `index` 탐색 바이트 |
 | `THR_MAX` | 65536 | 엔트리 수 상한 |
+| `THR_RETRY_S` | 5.0 | 시작 때 스레드 엔트리를 못 찾았으면(엔진이 만들기 전에 붙음) 프로브를 다시 하는 최소 간격(초). 재시도 1회 판독 약 1.3MB(실측) → 5초면 그동안 약 0.27MB/s 로 평시 라이브 판독량(약 0.3MB/s) 안 |
+| `TRAN_RETRY_S` | 1.0 | 트랜잭션 표를 못 찾았을 때 재시도 최소 간격(초). 재시도 1회 약 72KB(실측) |
 | `THR_TRAN_REL_MAX` | 28 | `tran_index` = index+28(신) 또는 +20(구) |
 | `THR_NEXT_SPAN` | 64 | resume_status 뒤 next_wait_thrd 탐색 폭(I-19) |
 | `THR_NEXT_CANDS` | 8 | next 후보 수 |

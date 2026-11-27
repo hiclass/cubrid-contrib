@@ -622,11 +622,17 @@ thr_wait_counts (int *cnt, int *live, int reader_cap)
   return thr_geom.has_resume ? 0 : -1;
 }
 
+static uint64_t thr_manager_sym = 0;	/* the probe's inputs, for a retry */
+static int thr_pid = 0;
+static double thr_retry_at = 0.0;
+
 void
 thr_probe (uint64_t manager_sym, int pid)
 {
   uint64_t mobj;
 
+  thr_manager_sym = manager_sym;
+  thr_pid = pid;
   thr_geom.off_tran = THR_TRAN_REL_MAX;
   if (manager_sym == 0 || mem_read_ptr (manager_sym, &mobj) != 0
       || thr_probe_entries (mobj) != NULL)
@@ -737,6 +743,20 @@ thr_tables_reload (void)
     {
       thr_tids_fill_all ();
     }
+}
+
+/* the entries not found at the start (attached before the engine built
+ * them): the probe again, at most once per THR_RETRY_S */
+void
+thr_probe_retry (void)
+{
+
+  if (thr_geom.base != 0 || thr_manager_sym == 0 || !every (&thr_retry_at, mono_s (), THR_RETRY_S))
+    {
+      return;
+    }
+  deg_set (DEG_THREAD, 0);
+  thr_probe (thr_manager_sym, thr_pid);
 }
 
 /* once a second: m_id / tid tables rebuilt by two gathers when the task

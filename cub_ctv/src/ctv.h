@@ -180,6 +180,8 @@
 #define OS_MAX             128	/* OS state entries per frame: (thread, CS) pairs */
 #define OS_RD_MAX          64	/* threads whose procfs state a window reads */
 #define OS_MIN_READS        7	/* readings of a holder a disk/CPU judgement needs */
+#define THR_RETRY_S         5.0	/* thread entries not found: probe again at most this often (one try reads ~1.3MB) */
+#define TRAN_RETRY_S        1.0	/* transaction table not found: at most this often (one try reads ~72KB) */
 #define OS_COMM_LEN        16
 #define LAYOUT_AUTO        0	/* split owner block when the row overflows */
 #define LAYOUT_WIDE        1	/* always one line */
@@ -283,6 +285,7 @@ typedef struct
   int has_trid;			/* I-8 held: trid@off_ti+4 is trusted */
   int ntran;			/* descriptor count */
   uint64_t at;			/* where log_Gl keeps all_tdes (read again a window) */
+  uint64_t log_gl;		/* log_Gl: the probe is tried again while the table is not found */
 } TRAN_GEOM;
 
 typedef struct
@@ -756,6 +759,7 @@ void thr_probe (uint64_t manager_sym, int pid);
 void thr_cache_refresh (void);
 int thr_index_of_tid_mem (uint64_t tid);
 unsigned thr_cache_gen (void);
+void thr_probe_retry (void);
 int thr_waiters_mem (uint64_t head, int *idx, int *tran, int max, uint64_t anchor_at);
 int thr_waiters_mem2 (uint64_t head, uint64_t head2, int *idx, int *tran, int max, uint64_t anchor_at);
 void thr_dump (FILE * f);

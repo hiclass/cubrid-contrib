@@ -104,6 +104,7 @@
 | `tests/t29_exit_keeps_frame.py` | q·Ctrl-C·Ctrl-\ 뒤 마지막 프레임 유지, 속성 해제 | 불필요 |
 | `tests/t30_thr_lookup.sh` | 구간 중 스레드 표가 바뀐 경우의 owner·OS 상태 항목 | 불필요 |
 | `tests/t31_tran_table_moves.sh` | 옮겨지거나 커지거나 사라진 트랜잭션 표 | 불필요 |
+| `tests/t32_trans_away.sh` | `--trans -i` 의 표 일시 부재와 서버 종료 구분 | 불필요 |
 | `tests/fuzz_full.sh` | 퍼저 전체 실행(회귀 밖: 푸시 전, 기록 판독부 변경 시) | 불필요 |
 | `tests/sanitize.sh` | 서버가 필요 없는 시험 전부를 ASan + UBSan 빌드로 재실행 | 불필요 |
 | `tests/t2_show_compare.py` | 엔진 `SHOW CRITICAL SECTIONS` 값이 전후 판독 사이 + 자기영향 0 | 필요 |

@@ -473,6 +473,29 @@ tdes_array_ok (uint64_t p)
  * transactions in the log than slots) and frees it when it shuts down, so
  * the array and its count are those of now, not of the probe.  Reads the
  * pointer (8 bytes) and the slot past the count; 1 when the table changed */
+static double tran_retry_at = 0.0;	/* last probe retry (TRAN_RETRY_S apart) */
+
+/* never found (attached before the engine built it: early in a boot or a
+ * restart): the probe again, as at the start; 1 when found */
+static int
+tran_probe_retry (void)
+{
+  const char *why;
+
+  why = tran_probe (tran_geom.log_gl);
+  if (why != NULL)
+    {
+      tran_refused = why;
+      return 0;
+    }
+  ptrs_n = 0;
+  prefetch_n = 0;
+  (void) tran_lock_clientids (tran_geom.ntran, 0);
+  deg_set (DEG_TRAN, 0);
+  tran_refused = NULL;
+  return 1;
+}
+
 int
 tran_table_recheck (void)
 {
@@ -480,9 +503,13 @@ tran_table_recheck (void)
   int32_t ti;
   int n = tran_geom.ntran;
 
-  if (tran_geom.at == 0 || mem_read (tran_geom.at, &p, 8) != 0)
+  if (tran_geom.at == 0)
     {
-      return 0;			/* never found, or not readable now: as it was */
+      return tran_geom.log_gl != 0 && every (&tran_retry_at, mono_s (), TRAN_RETRY_S) ? tran_probe_retry () : 0;
+    }
+  if (mem_read (tran_geom.at, &p, 8) != 0)
+    {
+      return 0;			/* not readable now: as it was */
     }
   if (p == tran_geom.all_tdes)
     {
@@ -500,10 +527,12 @@ tran_table_recheck (void)
     {
       tran_geom.all_tdes = 0;	/* gone (shutdown) or not built yet: no table */
       tran_geom.ntran = 0;
+      tran_refused = "I-6 all_tdes not present now";
       return 1;
     }
   tran_geom.all_tdes = p;
   tran_geom.ntran = tran_count ();
+  tran_refused = NULL;
   return 1;
 }
 
@@ -514,6 +543,7 @@ tran_probe (uint64_t log_gl)
 {
   const char *why;
 
+  tran_geom.log_gl = log_gl;
   if ((why = tran_probe_all_tdes (log_gl)) != NULL
       || (why = tran_probe_spacing ()) != NULL)
     {

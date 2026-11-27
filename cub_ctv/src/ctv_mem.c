@@ -43,6 +43,7 @@ mem_open (int pid)
   return mem_fd < 0 ? -1 : 0;
 }
 
+
 static ssize_t
 mem_pread (uint64_t addr, void *buf, size_t n)
 {
@@ -111,6 +112,7 @@ mem_gather_ok (const uint64_t * addrs, size_t n, size_t each, void *buf,
       if (gather_ok)
 	{
 	  ssize_t got = process_vm_readv (mem_pid, lv, cnt, rv, cnt, 0);
+
 
 	  if (got < 0 && (errno == ENOSYS || errno == EPERM))
 	    {

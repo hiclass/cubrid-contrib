@@ -9,6 +9,7 @@
  *   4 the array grew in place (same address): the new count
  *   5 the array is gone (shutdown: pointer cleared): no table
  *   6 it is back: the table again
+ *   0 (first) attached before the table was built: found on a later window
  * After each change the CLIENTIDS lock scan runs over the new count (its
  * arrays follow it: the sanitizer run of this test checks their bounds). */
 #include "../src/ctv.h"
@@ -57,7 +58,22 @@ main (void)
     }
   CHECK (mem_open (getpid ()) == 0, "cannot read this process");
   a1 = array_of (100);
+
+  /* 0: attached before the engine built the table (pointer not set): the
+   * probe refuses; the next window tries it again and finds it */
+  *slot = NULL;
+  CHECK (tran_probe ((uint64_t) (uintptr_t) log_gl) != NULL && tran_geom.all_tdes == 0, "a table found where there is none");
+  deg_set (DEG_TRAN, 1);
+  CHECK (tran_table_recheck () == 0 && tran_geom.all_tdes == 0, "still none: reported as found");
   *slot = a1;
+  CHECK (tran_table_recheck () == 0, "tried again sooner than TRAN_RETRY_S");
+  tran_retry_at -= TRAN_RETRY_S;	/* the next window, TRAN_RETRY_S later */
+  CHECK (tran_table_recheck () == 1 && tran_geom.all_tdes == (uint64_t) (uintptr_t) a1 && tran_geom.ntran == 100,
+	 "the table built after the attach is not found (array %llx, count %d)",
+	 (unsigned long long) tran_geom.all_tdes, tran_geom.ntran);
+  CHECK (!(degraded & DEG_TRAN) && tran_refused == NULL, "found, yet still degraded");
+  tran_geom.all_tdes = 0;	/* the probe of step 1 starts from scratch */
+  tran_geom.at = 0;
 
   /* 1 */
   CHECK (tran_probe ((uint64_t) (uintptr_t) log_gl) == NULL, "the probe refused the table");
@@ -101,6 +117,6 @@ main (void)
   *slot = a2;
   CHECK (tran_table_recheck () == 1 && tran_geom.all_tdes == (uint64_t) (uintptr_t) a2 && tran_geom.ntran == 450,
 	 "the table back: count %d", tran_geom.ntran);
-  printf ("t31 PASS: the transaction table moved, grown in place, gone and back is followed every window\n");
+  printf ("t31 PASS: the transaction table built after the attach, moved, grown in place, gone and back is followed every window\n");
   return 0;
 }

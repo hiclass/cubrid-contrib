@@ -1333,7 +1333,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
    4. `t_prev = mono_s()`.
    5. `!sampled && !json && isatty(STDOUT_FILENO) && keys_enter() == 0` 이면 `restore_on_exit()`, `keys = 1` (전체 화면 없이 키만).
    6. `live_stop_on_signals()` (INT/TERM/HUP/QUIT → 정지 플래그).
-4. `trans` 이면 즉시 `view_capture_trans(0.0)`; `!view.tran_avail` 이면 `trans_window_out(...)` 후 `rc = 1` (루프 진입 안 함).
+4. `trans` 이면 즉시 `view_capture_trans(0.0)`; `!view.tran_avail` 이면 `trans_window_out(...)` 로 "표 없음"을 바로 보이고 루프에 들어간다(기동 중에 붙은 경우 다음 구간들에서 03 "표 재확인"의 재시도로 찾는다).
 
 ### 12.3 틱 루프
 
@@ -1353,7 +1353,7 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 3. `view_record_frame()`. `view_record_ok() != 0` 이면: `--record` 면 die `cannot write record %s` / `기록 파일 %s 쓰기 실패`; 아니면 `view_record_close()`, `recname = ""`, `rec_fail = 1`.
 4. keys 이면 `live_footer_text(...)`, `live_footer = footer`, `rec_fail = 0`.
 5. `have_frame = 1`.
-6. trans 이면 `trans_window_out(pid, db, lo, json)`; `!view.tran_avail` 이면 1 반환. 아니면 `live_render(lo, screen, json, now - t_prev, hz, interval, pid, db)`.
+6. trans 이면 `trans_window_out(pid, db, lo, json)`(표가 없는 구간은 `(transaction table unavailable: <사유>)` 를 보이고 계속한다: 재기동 중 엔진이 표를 내렸다 다시 만드는 동안 등). 런은 서버가 끝날 때(`/proc/<pid>` 없음 → `die_target_gone`, 종료 코드 1)와 q·정지 시그널에서만 끝난다. 아니면 `live_render(lo, screen, json, now - t_prev, hz, interval, pid, db)`.
 7. `w->prev = w->cur` (count 행), `live_win_reset`, `t_prev = now`, 0 반환.
 
 ### 12.5 키 (`run_keys(tick_end)`)
@@ -1420,9 +1420,8 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 4. 스크롤 재생: `!json` 이면 `live_banner(h->hz, h->interval)`.
 5. `pace = -1`. `view_replay_next() == 0` 인 동안:
    1. `speed > 0 && pace >= 0` 이면 `sleep_until(mono_s() + pace / speed)` (첫 프레임은 대기 없음; 각 프레임은 자기 길이만큼 머문 뒤 다음).
-   2. `replay_frame_out(h, 0, json, trans)`.
-   3. `trans && !view.tran_avail` 이면 1 반환.
-   4. `pace = replay_pace(h)`.
+   2. `replay_frame_out(h, 0, json, trans)`(표가 없는 프레임은 라이브처럼 "표 없음"을 보이고 계속한다).
+   3. `pace = replay_pace(h)`.
 6. 끝까지 프레임이 없었으면(pace < 0) die `record holds no complete frame` / `기록에 완성된 프레임이 없습니다`. 아니면 0.
 
 `speed == 0` 은 대기 없음.
@@ -1463,4 +1462,4 @@ blob 은 직전 `mem_read` 로 읽은 CS 배열 전체 이미지. 먼저 `os_blo
 4. 요약 화면은 상단 블록을 메모리에 먼저 써서 개행 수로 자르고, 남은 행으로 세션 패널 크기를 정한다(§7.1).
 5. 판정 이력은 프레임 번호(seq) 기준이며 재그리기는 새 항목이 아니다. 재생은 프레임에 실린 이력을 import 한다.
 6. 보유자·대기 세션·OS 스레드의 동점 규칙은 모두 "구간에서 먼저 목격된 쪽"(act 배열 순서).
-7. 종료 코드: die 1, `--trans` 표 없음 1, 신호 처리 경로 128+sig, 그 밖 0.
+7. 종료 코드: die 1(라이브에서 서버가 끝나면 "target read failed (server gone?)"), `--trans` 스냅샷의 표 없음 1(라이브 `--trans -i` 는 표가 없어도 끝나지 않음), 신호 처리 경로 128+sig, 그 밖 0.

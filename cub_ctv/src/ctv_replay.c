@@ -165,10 +165,6 @@ live_replay (const VIEW_HDR * h, double speed, int json, int trans)
 	    sleep_until (mono_s () + pace / speed);
 	  }
 	replay_frame_out (h, screen, json, trans);
-	if (trans && !view.tran_avail)
-	  {
-	    return 1;		/* as the live run that made it */
-	  }
 	pace = replay_pace (h);
       }
     if (pace < 0)

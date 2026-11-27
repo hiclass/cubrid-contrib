@@ -185,11 +185,11 @@ run_sample (LIVE_RUN * r)
       die_target_gone ();
     }
   live_accumulate (r->w, r->lo);
+  thr_probe_retry ();		/* entries not found yet (attached during a boot) */
   thr_cache_refresh ();		/* owner lookups follow thread changes: once a second */
 }
 
-/* the window ends now: capture, record, show; 1 when the run must stop
- * (--trans and no table) */
+/* the window ends now: capture, record, show; 1 when the run must stop */
 static int
 run_close_window (LIVE_RUN * r, double now)
 {
@@ -232,11 +232,9 @@ run_close_window (LIVE_RUN * r, double now)
   r->have_frame = 1;
   if (r->trans)
     {
+      /* no table in this window (a boot or restart rebuilding it): said, and
+       * the run goes on; a server that ends ends the run (target gone) */
       trans_window_out (r->h->pid, r->h->db, r->lo, r->json);
-      if (!view.tran_avail)
-	{
-	  return 1;		/* no table to show: like a --trans snapshot */
-	}
     }
   else
     {
@@ -358,12 +356,11 @@ live_mode (uint64_t cs_base, const VIEW_HDR * h, int json, int trans,
   run_start (&r);
   if (trans)
     {
-      /* a table that cannot be read fails now, not after one --interval */
+      /* no table yet: said now, not after one --interval; the run goes on */
       view_capture_trans (0.0);
       if (!view.tran_avail)
 	{
 	  trans_window_out (h->pid, h->db, r.lo, json);
-	  rc = 1;
 	}
     }
   while (rc == 0 && !term_stop_requested ())

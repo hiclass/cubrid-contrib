@@ -310,6 +310,7 @@ act_add (LIVE_WIN * w, int cs, int kind, int tran, int thr, int cpid)
 
 /* one sample: occupancy / waiter presence and the writer's tran index */
 
+
 void
 live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo)
 {

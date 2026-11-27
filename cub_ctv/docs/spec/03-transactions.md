@@ -789,10 +789,12 @@ fprintf (f, "]}");
 
 엔진은 복구 중(`rcv_phase != LOG_RESTARTED`)에 `logtb_expand_trantable` 로 `all_tdes` 를 `realloc` 하고(로그의 트랜잭션이 슬롯보다 많을 때), 종료 때 `logtb_undefine_trantable` 로 해제한다. 그래서 배열 주소와 개수는 프로브 때의 값이 아니라 구간마다 지금 값을 쓴다. `view_capture_idents` 가 맨 먼저 부른다. 반환 1 = 표가 바뀜.
 
-1. `tran_geom.at == 0`(프로브가 표를 찾은 적 없음)이거나 `mem_read(at, &p, 8)` 실패 → 0 (그대로 둔다).
+1. `tran_geom.at == 0`(프로브가 표를 찾은 적 없음: 엔진이 표를 만들기 전에 붙음): `log_gl != 0` 이고 `TRAN_RETRY_S`(1초)가 지났으면 프로브를 다시 한다(`tran_probe_retry`). 찾으면 `ptrs_n = prefetch_n = 0`, `tran_lock_clientids(ntran, 0)`, `DEG_TRAN` 해제, `tran_refused = NULL` 후 1. 못 찾으면 `tran_refused` 를 거부 사유로 두고 0. `mem_read(at, &p, 8)` 실패 → 0 (그대로 둔다).
 2. `p == all_tdes` 이면 제자리 확장만 본다: `p != 0`, `ntran < TRAN_SLOTS_MAX`, `all_tdes[ntran]` 이 유효 포인터이고 그 디스크립터의 `tran_index == ntran` 일 때만 계속하고, 아니면 0.
 3. `ptrs_n = 0`, `prefetch_n = 0`(옛 배열의 이미지를 버린다).
-4. `tdes_array_ok(p)`(유효 포인터이고 앞 `CS_MIN_SAMPLES` 칸의 `tran_index` 가 0..3)가 아니면 `all_tdes = 0`, `ntran = 0` 으로 두고 1(표 없음: 종료 중이거나 아직 만들어지지 않음. `at` 은 남으므로 다음 구간에 다시 본다).
-5. `all_tdes = p`, `ntran = tran_count()`, 1.
+4. `tdes_array_ok(p)`(유효 포인터이고 앞 `CS_MIN_SAMPLES` 칸의 `tran_index` 가 0..3)가 아니면 `all_tdes = 0`, `ntran = 0`, `tran_refused = "I-6 all_tdes not present now"` 로 두고 1(표 없음: 종료 중이거나 아직 만들어지지 않음. `at` 은 남으므로 다음 구간에 다시 본다).
+5. `all_tdes = p`, `ntran = tran_count()`, `tran_refused = NULL`, 1.
 
-판독량은 구간당 포인터 8바이트와(같은 주소일 때) 포인터 8바이트 + int 4바이트다. `ntran` 이 바뀌면 `ident_cache_setup` 이 다음 `tran_identity_prefetch` 에서 캐시를 새 크기로 다시 만든다.
+판독량은 구간당 포인터 8바이트와(같은 주소일 때) 포인터 8바이트 + int 4바이트다. 표를 찾지 못한 동안의 재시도 1회는 판독 약 40회·약 72KB·0.1 ms 미만이다(일회용 DB 서버를 표 정의 전에 gdb 로 세워 검증 빌드로 잰 값). 기본 1초 구간에서 매 구간 재시도해도 약 0.07MB/s 로 평시 판독량(약 0.3MB/s)보다 작아 매 구간으로 하되, 짧은 `--interval` 에서 늘지 않게 1초에 1회를 상한으로 둔다.
+
+엔진 쪽 사실(판독, 실서버 관측): 복구 중 늘어난 칸의 디스크립터는 `logtb_allocate_tdes_area` 가 `logtb_initialize_tdes (tdes, i)` 로 영역 안 순번 `i` 를 `tran_index` 에 넣는다(`log_tran_table.c:243`). 그 칸은 실제로 배정되기 전까지 자기 번호를 갖지 않으므로 `tran_count()` 는 자기 번호가 이어지는 데까지만 센다(실측: 엔진 61칸 중 47). 그 뒤 칸에 트랜잭션이 배정되면 제자리 확장 검사(2)가 자기 번호를 보고 다시 센다. `ntran` 이 바뀌면 `ident_cache_setup` 이 다음 `tran_identity_prefetch` 에서 캐시를 새 크기로 다시 만든다.
