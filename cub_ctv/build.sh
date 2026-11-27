@@ -3,7 +3,7 @@
 # distribution regardless of installed libraries.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
-CFLAGS="-O2 -Wall -Wextra -Wshadow"
+CFLAGS="-O2 -Wall -Wextra -Wshadow ${CTV_CFLAGS:-}"	# CTV_CFLAGS=-DCTV_VERIFY: verification build
 # the sources, listed: a stray .c in src/ is not linked in.  Names without
 # spaces, compiled from inside src/, so a path with spaces still builds.
 SRCS="cub_ctv.c ctv_cs.c ctv_dump.c ctv_elf.c ctv_text.c ctv_field.c ctv_sched.c ctv_mem.c ctv_msg.c ctv_os.c

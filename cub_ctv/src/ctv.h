@@ -760,6 +760,9 @@ void thr_cache_refresh (void);
 int thr_index_of_tid_mem (uint64_t tid);
 unsigned thr_cache_gen (void);
 void thr_probe_retry (void);
+#ifdef CTV_VERIFY
+extern unsigned long ctv_verify_reads, ctv_verify_bytes;
+#endif
 int thr_waiters_mem (uint64_t head, int *idx, int *tran, int max, uint64_t anchor_at);
 int thr_waiters_mem2 (uint64_t head, uint64_t head2, int *idx, int *tran, int max, uint64_t anchor_at);
 void thr_dump (FILE * f);

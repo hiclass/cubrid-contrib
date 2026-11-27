@@ -151,6 +151,9 @@ os_sample (LIVE_WIN * w, const CS_LAYOUT * lo, int k, int cs, uint64_t owner)
     }
   if (o->tid != tid)
     {
+#ifdef CTV_VERIFY
+      fprintf (stderr, "VERIFY os-tid %.3f slot=%d cs=%d first=%d now=%d\n", mono_s (), k, cs, o->tid, tid);
+#endif
       /* the slot went to another thread within the window (a worker that
        * ended, its entry taken again): its state is not this entry's */
       return;
@@ -310,6 +313,9 @@ act_add (LIVE_WIN * w, int cs, int kind, int tran, int thr, int cpid)
 
 /* one sample: occupancy / waiter presence and the writer's tran index */
 
+#ifdef CTV_VERIFY
+static int verify_regen[MAX_CS];	/* the next lookup of CS i follows a table rebuild */
+#endif
 
 void
 live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo)
@@ -321,9 +327,15 @@ live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo)
       /* the thread tables were rebuilt: an owner not found before may be
        * known now, and a thread id used again may be in another slot */
       w->own_gen = thr_cache_gen ();
+#ifdef CTV_VERIFY
+      fprintf (stderr, "VERIFY thr-gen %.3f gen=%u\n", mono_s (), w->own_gen);
+#endif
       for (i = 0; i < lo->count; i++)
 	{
 	  w->own_last[i] = 0;
+#ifdef CTV_VERIFY
+	  verify_regen[i] = 1;
+#endif
 	}
     }
   os_block_step (w);
@@ -371,8 +383,26 @@ live_accumulate (LIVE_WIN * w, const CS_LAYOUT * lo)
 	    {
 	      if (owner != w->own_last[i])
 		{
+#ifdef CTV_VERIFY
+		  int was = w->own_slot[i];
+		  uint64_t was_owner = w->own_last[i];
+#endif
 		  w->own_last[i] = owner;
 		  w->own_slot[i] = thr_index_of_tid_mem (owner);
+#ifdef CTV_VERIFY
+		  if (verify_regen[i] && was_owner == 0)
+		    {
+		      /* looked up again because the tables were rebuilt */
+		      fprintf (stderr, "VERIFY owner %.3f cs=%d owner=%llx slot %d->%d (tables rebuilt)\n",
+			       mono_s (), i, (unsigned long long) owner, was, w->own_slot[i]);
+		    }
+		  else if (w->own_slot[i] < 0)
+		    {
+		      fprintf (stderr, "VERIFY owner %.3f cs=%d owner=%llx slot unknown\n", mono_s (), i,
+			       (unsigned long long) owner);
+		    }
+		  verify_regen[i] = 0;
+#endif
 		}
 	      k = w->own_slot[i];
 	    }

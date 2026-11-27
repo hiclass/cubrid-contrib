@@ -11,6 +11,7 @@
 | 동적 빌드 | `./build.sh --dynamic` — glibc 를 동적 링크(재배포 시 LGPL 의무 회피, NOTICE 참고) |
 | 산출물 | `./cub_ctv` 약 1.2MB, `env -i ./cub_ctv` 실행 가능 |
 | 기타 인자 | `./build.sh --list-sources` — 소스 경로 목록(테스트용). 그 밖의 인자는 usage 출력 후 종료 코드 2 |
+| 검증 빌드 | `CTV_CFLAGS=-DCTV_VERIFY ./build.sh` — 검증용 기록(트랜잭션 표 주소·개수 변화, 프로브 재시도의 판독 횟수·바이트·시간, CLIENTIDS 잠금 탐색 개수, 스레드 표 세대 변화와 그 뒤 owner→칸 결과, 칸의 tid 가 바뀌어 버린 판독)을 `VERIFY …` 줄로 stderr 에 낸다. 배포 빌드와 기록 파일 형식은 그대로다(`#ifdef CTV_VERIFY` 블록을 빈 줄로 바꾼 사본의 배포 빌드와 바이트 동일) |
 | 커밋 | 바이너리는 `.gitignore` 로 제외 |
 
 ## 테스트

@@ -481,8 +481,16 @@ static int
 tran_probe_retry (void)
 {
   const char *why;
+#ifdef CTV_VERIFY
+  unsigned long r0 = ctv_verify_reads, b0 = ctv_verify_bytes;
+  double t0 = mono_s ();
+#endif
 
   why = tran_probe (tran_geom.log_gl);
+#ifdef CTV_VERIFY
+  fprintf (stderr, "VERIFY tran-retry %.3f found=%d reads=%lu bytes=%lu ms=%.3f\n", t0, why == NULL,
+	   ctv_verify_reads - r0, ctv_verify_bytes - b0, (mono_s () - t0) * 1000.0);
+#endif
   if (why != NULL)
     {
       tran_refused = why;
@@ -523,16 +531,26 @@ tran_table_recheck (void)
     }
   ptrs_n = 0;			/* the image is of the old array */
   prefetch_n = 0;
+#ifdef CTV_VERIFY
+  fprintf (stderr, "VERIFY tran %.3f old=%llx new=%llx valid=%d n_old=%d", mono_s (),
+	   (unsigned long long) tran_geom.all_tdes, (unsigned long long) p, tdes_array_ok (p), n);
+#endif
   if (!tdes_array_ok (p))
     {
       tran_geom.all_tdes = 0;	/* gone (shutdown) or not built yet: no table */
       tran_geom.ntran = 0;
       tran_refused = "I-6 all_tdes not present now";
+#ifdef CTV_VERIFY
+      fprintf (stderr, " n_new=0\n");
+#endif
       return 1;
     }
   tran_geom.all_tdes = p;
   tran_geom.ntran = tran_count ();
   tran_refused = NULL;
+#ifdef CTV_VERIFY
+  fprintf (stderr, " n_new=%d\n", tran_geom.ntran);
+#endif
   return 1;
 }
 
@@ -755,6 +773,17 @@ tran_lock_clientids (int ntran, int budget)
 	  tcap = tried != NULL && tried_at != NULL && trid != NULL ? ntran : 0;
 	  tcursor = 0;
 	}
+#ifdef CTV_VERIFY
+      {
+	static int logged = -1;
+
+	if (logged != ntran)
+	  {
+	    logged = ntran;
+	    fprintf (stderr, "VERIFY lock %.3f ntran=%d tcap=%d ptrs_n=%d\n", mono_s (), ntran, tcap, ptrs_n);
+	  }
+      }
+#endif
       if (tried == NULL || tried_at == NULL || trid == NULL
 	  || trids_gather (trid, NULL) != 0)
 	{

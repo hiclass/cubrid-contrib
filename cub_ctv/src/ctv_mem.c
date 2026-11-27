@@ -43,10 +43,17 @@ mem_open (int pid)
   return mem_fd < 0 ? -1 : 0;
 }
 
+#ifdef CTV_VERIFY
+unsigned long ctv_verify_reads = 0, ctv_verify_bytes = 0;	/* target reads made */
+#endif
 
 static ssize_t
 mem_pread (uint64_t addr, void *buf, size_t n)
 {
+#ifdef CTV_VERIFY
+  ctv_verify_reads++;
+  ctv_verify_bytes += n;
+#endif
   return pread (mem_fd, buf, n, (off_t) addr);
 }
 
@@ -113,6 +120,10 @@ mem_gather_ok (const uint64_t * addrs, size_t n, size_t each, void *buf,
 	{
 	  ssize_t got = process_vm_readv (mem_pid, lv, cnt, rv, cnt, 0);
 
+#ifdef CTV_VERIFY
+	  ctv_verify_reads++;
+	  ctv_verify_bytes += cnt * each;
+#endif
 
 	  if (got < 0 && (errno == ENOSYS || errno == EPERM))
 	    {

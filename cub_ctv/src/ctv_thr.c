@@ -750,6 +750,10 @@ thr_tables_reload (void)
 void
 thr_probe_retry (void)
 {
+#ifdef CTV_VERIFY
+  unsigned long r0 = ctv_verify_reads, b0 = ctv_verify_bytes;
+  double t0 = mono_s ();
+#endif
 
   if (thr_geom.base != 0 || thr_manager_sym == 0 || !every (&thr_retry_at, mono_s (), THR_RETRY_S))
     {
@@ -757,6 +761,10 @@ thr_probe_retry (void)
     }
   deg_set (DEG_THREAD, 0);
   thr_probe (thr_manager_sym, thr_pid);
+#ifdef CTV_VERIFY
+  fprintf (stderr, "VERIFY thr-retry %.3f found=%d reads=%lu bytes=%lu ms=%.3f\n", t0, thr_geom.base != 0,
+	   ctv_verify_reads - r0, ctv_verify_bytes - b0, (mono_s () - t0) * 1000.0);
+#endif
 }
 
 /* once a second: m_id / tid tables rebuilt by two gathers when the task
