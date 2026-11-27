@@ -21,7 +21,10 @@ included): none is left behind.
 view: scroll, json, detail, trans, narrow, wide, or pty:ROWSxCOLS:KEYS.
 state "open": undefined behaviour the reader does not refuse yet; a sanitizer
 build must report a signed overflow in <function> (a row that stops
-reporting fails, so it is moved to "fixed").  state "fixed": no report in any build.  Without a
+reporting fails, so it is moved to "fixed").  state "fixed": no report in any build.
+state "refused": the reader refuses the record (exit 1, "malformed record
+file at"), so this input no longer reaches <function>; the defect there is
+not fixed and stays open through another row.  Without a
 sanitizer build both only have to end with exit 0 / 1.
 
 usage: fuzz_replay.py --tool BIN --seeds DIR_OR_FILE... [--fixed DIR]
@@ -413,7 +416,7 @@ def read_manifest(d):
         ln = ln.split("#")[0].split()
         if not ln:
             continue
-        if len(ln) != 4 or ln[2] not in ("open", "fixed"):
+        if len(ln) != 4 or ln[2] not in ("open", "fixed", "refused"):
             sys.exit("fuzz FAIL: MANIFEST row: %s" % " ".join(ln))
         rows.append(ln)
     if not rows:
@@ -439,6 +442,9 @@ def run_fixed(tool, d, rows, san, tmo, work):
             what = "timeout"
         elif rep and rep[0] != "overflow":
             what = "%s report in %s" % rep
+        elif state == "refused":
+            if rc != 1 or "malformed record file at" not in err:
+                what = "listed refused but the reader took it (exit %s)" % rc
         elif san and state == "open":
             if not rep:
                 what = "listed open (%s) but no report: move the row to fixed" % func

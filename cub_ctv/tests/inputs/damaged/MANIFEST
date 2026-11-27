@@ -4,15 +4,20 @@
 #        behaviour (signed integer overflow) in <function>; a sanitizer
 #        build must report that there.  When the reader refuses the record, the row
 #        fails as "no report" and is moved to fixed.
-# fixed: no sanitizer report in any build. slot-owner.rec: its window (0.26 s)
-#        is shorter than its header's --interval (1 s), refused since the
-#        reader checks that; owner_block stays open through slot-queue.rec.
+# fixed: no sanitizer report in any build.
+# refused: the reader refuses the record, so the input no longer reaches
+#        <function>; the defect there is NOT fixed.  slot-owner.rec: its window
+#        (0.26 s) is shorter than its header's --interval (1 s).  The same
+#        overflow (owner tag, ctv_rows.c owner_block) is kept open through
+#        slot-owner-holder.rec, the same record with --interval 0.26;
+#        slot-queue.rec reaches another line of owner_block (the queue tag).
 # Every .rec here has a row.  Found by tests/fuzz_replay.py, but the last
 # three, made by hand: the fuzzer reaches their functions only on a pty.
 v-count.rec              scroll  open   rd_V
 q-count.rec              wide    open   rd_Q
 slot-json.rec            json    open   json_cs_rows
-slot-owner.rec           wide    fixed  owner_block
+slot-owner.rec           wide    refused owner_block
+slot-owner-holder.rec    wide    open   owner_block
 slot-queue.rec           wide    open   owner_block
 slot-detail-queue.rec    detail  open   print_detail_row
 slot-detail-chain.rec    detail  open   print_detail_row
