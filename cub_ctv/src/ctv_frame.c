@@ -332,6 +332,7 @@ view_capture_idents (void)
 {
   int t;
 
+  (void) tran_table_recheck ();
   view.tran_avail = tran_geom.all_tdes != 0 && !(degraded & DEG_TRAN);
   view.cid_locked = tran_geom.cid_stride != 0;
   view.has_trid = tran_geom.has_trid;

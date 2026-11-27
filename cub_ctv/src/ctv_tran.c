@@ -30,6 +30,7 @@ TRAN_GEOM tran_geom;	/* all_tdes == 0: unavailable */
 
 static uint64_t *tdes_ptrs = NULL;	/* all_tdes image (one read) */
 static int ptrs_n = 0;			/* valid entries of tdes_ptrs */
+static int ptrs_cap = 0;		/* entries tdes_ptrs has room for */
 static unsigned char *span_img = NULL;	/* gathered spans of the window */
 static unsigned char *span_ok = NULL;	/* span read for this slot */
 static unsigned char *span_free = NULL;	/* slot read as released (trid -1) */
@@ -71,9 +72,16 @@ tdes_ptrs_load (void)
     {
       return -1;
     }
-  if (tdes_ptrs == NULL && (tdes_ptrs = malloc ((size_t) n * 8)) == NULL)
+  if (tdes_ptrs == NULL || ptrs_cap < n)
     {
-      return -1;
+      /* the table can grow (tran_table_recheck) */
+      free (tdes_ptrs);
+      tdes_ptrs = malloc ((size_t) n * 8);
+      ptrs_cap = tdes_ptrs != NULL ? n : 0;
+      if (tdes_ptrs == NULL)
+	{
+	  return -1;
+	}
     }
   tdes_ptrs_read (0, tdes_ptrs, n);
   ptrs_n = n;
@@ -349,6 +357,7 @@ tran_probe_all_tdes (uint64_t log_gl)
 	    {
 	      tran_geom.all_tdes = p;
 	      tran_geom.off_ti = ti;
+	      tran_geom.at = log_gl + (uint64_t) off;
 	      free (blob);
 	      return NULL;
 	    }
@@ -435,6 +444,67 @@ tran_probe_trid (void)
     {
       deg_set (DEG_TRID, 1);
     }
+}
+
+/* the array at p is the descriptor table: its first slots name themselves */
+static int
+tdes_array_ok (uint64_t p)
+{
+  uint64_t tds[CS_MIN_SAMPLES];
+  int32_t ti;
+  int k;
+
+  if (!VALID_PTR (p) || mem_read (p, tds, sizeof (tds)) != 0)
+    {
+      return 0;
+    }
+  for (k = 0; k < CS_MIN_SAMPLES; k++)
+    {
+      if (!VALID_PTR (tds[k])
+	  || mem_read (tds[k] + (uint64_t) tran_geom.off_ti, &ti, 4) != 0 || ti != k)
+	{
+	  return 0;
+	}
+    }
+  return 1;
+}
+
+/* once a window: the engine reallocates all_tdes while it recovers (more
+ * transactions in the log than slots) and frees it when it shuts down, so
+ * the array and its count are those of now, not of the probe.  Reads the
+ * pointer (8 bytes) and the slot past the count; 1 when the table changed */
+int
+tran_table_recheck (void)
+{
+  uint64_t p, t;
+  int32_t ti;
+  int n = tran_geom.ntran;
+
+  if (tran_geom.at == 0 || mem_read (tran_geom.at, &p, 8) != 0)
+    {
+      return 0;			/* never found, or not readable now: as it was */
+    }
+  if (p == tran_geom.all_tdes)
+    {
+      /* grown in place: the slot past the count names itself */
+      if (p == 0 || n >= TRAN_SLOTS_MAX
+	  || mem_read_ptr (p + 8ULL * (uint64_t) n, &t) != 0 || !VALID_PTR (t)
+	  || mem_read (t + (uint64_t) tran_geom.off_ti, &ti, 4) != 0 || ti != n)
+	{
+	  return 0;
+	}
+    }
+  ptrs_n = 0;			/* the image is of the old array */
+  prefetch_n = 0;
+  if (!tdes_array_ok (p))
+    {
+      tran_geom.all_tdes = 0;	/* gone (shutdown) or not built yet: no table */
+      tran_geom.ntran = 0;
+      return 1;
+    }
+  tran_geom.all_tdes = p;
+  tran_geom.ntran = tran_count ();
+  return 1;
 }
 
 /* one-time geometry probe; NULL when the transaction table is available,
@@ -640,20 +710,20 @@ tran_lock_clientids (int ntran, int budget)
        * LAZY_RETRY_S (its strings may still have been filling) */
       static int32_t *tried = NULL, *trid = NULL;
       static time_t *tried_at = NULL;
-      static int tcursor = 0;
+      static int tcursor = 0, tcap = 0;
       int tries = 0, lazy = budget < ntran;
 
-      if (tried == NULL)
+      if (tcap < ntran)
 	{
+	  /* first use, or the table grew (tran_table_recheck) */
+	  free (tried);
+	  free (tried_at);
+	  free (trid);
 	  tried = calloc ((size_t) ntran, sizeof (int32_t));
-	}
-      if (tried_at == NULL)
-	{
 	  tried_at = calloc ((size_t) ntran, sizeof (time_t));
-	}
-      if (trid == NULL)
-	{
 	  trid = malloc ((size_t) ntran * sizeof (int32_t));
+	  tcap = tried != NULL && tried_at != NULL && trid != NULL ? ntran : 0;
+	  tcursor = 0;
 	}
       if (tried == NULL || tried_at == NULL || trid == NULL
 	  || trids_gather (trid, NULL) != 0)
@@ -801,6 +871,7 @@ ident_cache_setup (void)
   ident_cache = calloc ((size_t) tran_geom.ntran, sizeof (IDENT_CACHE));
   ident_cache_n = ident_cache == NULL ? 0 : tran_geom.ntran;
   free (tdes_ptrs);
+  ptrs_cap = 0;
   free (span_img);
   free (span_ok);
   free (span_free);

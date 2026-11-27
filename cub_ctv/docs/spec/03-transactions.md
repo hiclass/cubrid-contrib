@@ -92,7 +92,8 @@
 | `max_scan` | int | 디스크립터 1개에서 CLIENTIDS 를 찾는 스캔 바이트 | I-7 |
 | `scan_measured` | int | 1 = `max_scan` 이 실측 간격, 0 = fallback | I-7 |
 | `has_trid` | int | 1 = I-8 성립, `off_ti+4` 의 trid 를 신뢰 | I-8 |
-| `ntran` | int | 디스크립터 개수(부팅 후 고정으로 간주) | `tran_count()` |
+| `ntran` | int | 디스크립터 개수. 구간마다 `tran_table_recheck()` 가 다시 확인 | `tran_count()` |
+| `at` | uint64_t | `log_Gl` 안에서 all_tdes 포인터가 놓인 주소(`log_gl + off`). 구간마다 다시 읽는다 | `tran_probe_all_tdes()` |
 
 잠금 후에는 `cid_off`/`cid_stride` 가 프로세스 수명 동안 바뀌지 않는다(재프로브 없음).
 
@@ -111,7 +112,7 @@ typedef struct {
 
 | 이름 | 크기 | 수명 / 갱신 |
 |---|---|---|
-| `tdes_ptrs` (uint64_t*) | `ntran × 8` | `tdes_ptrs_load` 가 최초 할당(그때의 ntran). `ident_cache_setup` 재구성 시 free→NULL. 구간마다 덮어씀 |
+| `tdes_ptrs` (uint64_t*) | `ntran × 8` | `tdes_ptrs_load` 가 할당하고 `ptrs_cap`(들어가는 엔트리 수)이 ntran 보다 작으면 다시 할당한다. `ident_cache_setup` 재구성 시 free→NULL. 구간마다 덮어씀 |
 | `ptrs_n` | int | `tdes_ptrs` 유효 엔트리 수. load 시작 시 0, 성공 시 ntran |
 | `span_img` | `ntran × span_len` | 구간별 CLIENTIDS 구간 이미지. prefetch 에서 할당 |
 | `span_ok` | `ntran` | 슬롯 구간이 이번 gather 에서 읽혔는가 |
@@ -125,7 +126,7 @@ typedef struct {
 | `span_trid` | `ntran × 4` | 이번 구간 슬롯별 trid |
 | `span_trid_ok` | `ntran` | trid 판독 성공 여부 |
 | `last_try` (double) | — | 마지막 CLIENTIDS 잠금 시도 시각(초). `tran_lock_clientids` 와 `tran_geom_refresh` 가 공유 |
-| `tran_lock_clientids` 내부 static | `cursor`(int), `tcursor`(int), `tried`(int32×ntran, calloc), `tried_at`(time_t×ntran, calloc), `trid`(int32×ntran, malloc) | 최초 사용 시 할당, 해제하지 않음 |
+| `tran_lock_clientids` 내부 static | `cursor`(int), `tcursor`(int), `tried`(int32×ntran, calloc), `tried_at`(time_t×ntran, calloc), `trid`(int32×ntran, malloc) | 최초 사용 시, 그리고 ntran 이 잡아 둔 크기(`tcap`)보다 커지면 다시 할당(그때 `tcursor = 0`) |
 
 `IDENT_CACHE` 엔트리:
 
@@ -480,7 +481,7 @@ k=0..5, `o = off + k × stride`: `VALID_PTR(u64@o)` 이고, SSO 면 추가로 `u
 5. `rep_cache_reset()`.
 6. `tdes_ptrs_load()` (결과 무시).
 7. **trid 경로** — `has_trid ∧ ptrs_n == ntran` 인 경우:
-   1. `tried`(calloc), `tried_at`(calloc), `trid`(malloc) 각 ntran 개를 최초 1회 할당. 하나라도 NULL 이거나 `trids_gather(trid, NULL) != 0` → -1 (비-trid 경로로 내려가지 않음).
+   1. `tried`(calloc), `tried_at`(calloc), `trid`(malloc) 각 ntran 개를 `tcap < ntran` 일 때 할당한다(최초, 또는 표가 커진 뒤: 옛 것은 free, `tcap = ntran`, `tcursor = 0`). 하나라도 NULL 이거나 `trids_gather(trid, NULL) != 0` → -1 (비-trid 경로로 내려가지 않음).
    2. `lazy = (budget < ntran)`, `tries = 0`.
    3. `step = 0 .. ntran-2` 동안, 단 `lazy` 면 `tries < 4` 인 동안:
       1. `i = 1 + (tcursor + step) % (ntran - 1)` (슬롯 0 제외 순환).
@@ -573,7 +574,7 @@ trid 경로 요점:
 4. `span_lo = cid_off`, `span_len = CLIENTIDS_BYTES(cid_stride)` (trid 는 별도 gather 이므로 구간에 포함하지 않음).
 5. `ident_cache == NULL ? -1 : 0`.
 
-CLIENTIDS 잠금 후 첫 호출에서 한 번 구성되며, `ntran` 이 고정이므로 이후 재구성되지 않는다.
+CLIENTIDS 잠금 후 첫 호출에서 한 번 구성되며, `ntran` 이 바뀌면(`tran_table_recheck`) 다음 호출에서 새 크기로 다시 구성된다(`ident_cache_n != ntran`).
 
 `tdes_ptrs` 상태 전이 (`tdes_at` 이 보는 값):
 
@@ -783,3 +784,15 @@ fprintf (f, "]}");
 | 개별 gather 범위 실패 | 해당 슬롯 `span_ok = 0` → 그 슬롯만 개별 판독 |
 | 캐시 키 할당 실패 | 캐시 없이 `tran_identity_mem` |
 | 메모리 할당 실패 일반 | 해당 기능 -1/미수행, 프로세스 중단 없음 |
+
+## 표 재확인 (`int tran_table_recheck(void)`)
+
+엔진은 복구 중(`rcv_phase != LOG_RESTARTED`)에 `logtb_expand_trantable` 로 `all_tdes` 를 `realloc` 하고(로그의 트랜잭션이 슬롯보다 많을 때), 종료 때 `logtb_undefine_trantable` 로 해제한다. 그래서 배열 주소와 개수는 프로브 때의 값이 아니라 구간마다 지금 값을 쓴다. `view_capture_idents` 가 맨 먼저 부른다. 반환 1 = 표가 바뀜.
+
+1. `tran_geom.at == 0`(프로브가 표를 찾은 적 없음)이거나 `mem_read(at, &p, 8)` 실패 → 0 (그대로 둔다).
+2. `p == all_tdes` 이면 제자리 확장만 본다: `p != 0`, `ntran < TRAN_SLOTS_MAX`, `all_tdes[ntran]` 이 유효 포인터이고 그 디스크립터의 `tran_index == ntran` 일 때만 계속하고, 아니면 0.
+3. `ptrs_n = 0`, `prefetch_n = 0`(옛 배열의 이미지를 버린다).
+4. `tdes_array_ok(p)`(유효 포인터이고 앞 `CS_MIN_SAMPLES` 칸의 `tran_index` 가 0..3)가 아니면 `all_tdes = 0`, `ntran = 0` 으로 두고 1(표 없음: 종료 중이거나 아직 만들어지지 않음. `at` 은 남으므로 다음 구간에 다시 본다).
+5. `all_tdes = p`, `ntran = tran_count()`, 1.
+
+판독량은 구간당 포인터 8바이트와(같은 주소일 때) 포인터 8바이트 + int 4바이트다. `ntran` 이 바뀌면 `ident_cache_setup` 이 다음 `tran_identity_prefetch` 에서 캐시를 새 크기로 다시 만든다.

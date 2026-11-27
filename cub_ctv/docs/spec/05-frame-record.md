@@ -253,7 +253,7 @@
 4. `view.count = lo->count`, `rows` 를 `view.rows` 로 복사, `view.dt = dt`.
 5. `w != NULL` 이면 `view.st = w->st`(구간 통계 통째 복사), 아니면 `win_stats_clear(&view.st)`.
 6. 각 CS `i`: `view.prev[i] = rows[i]` 후 `nenter`, `nwait`, `total_ms` 만 `w->prev[i]` 의 값(스냅샷은 0, 0, 0.0)으로 바꾼다. **실시간 판독 없음**(복사만).
-7. `view_capture_idents()` (§4.3) — **실시간 판독**(TDES·CLIENTIDS).
+7. `view_capture_idents()` (§4.3) — **실시간 판독**(TDES·CLIENTIDS). 맨 먼저 `tran_table_recheck()`(03 "표 재확인")로 all_tdes 주소와 개수를 지금 값으로 맞춘다.
 8. 직전 프레임이 표시한 칸 표시 해제: `i < view.nslot` 에 대해 `slot_seen[view.slot[i]] = 0`. 그다음 `ntid = nchain = nslot = 0`.
 9. 각 CS `i` 에 대해 차례로:
    1. `row_held(&rows[i])` 이면 `view_add_tid(rows[i].owner)` (아니면 owner 필드는 0 이거나 쓰이지 않으므로 추가하지 않음).

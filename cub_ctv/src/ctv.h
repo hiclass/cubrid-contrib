@@ -281,7 +281,8 @@ typedef struct
   int max_scan;			/* per-TDES scan bound (tdes spacing) */
   int scan_measured;		/* max_scan is the measured spacing */
   int has_trid;			/* I-8 held: trid@off_ti+4 is trusted */
-  int ntran;			/* descriptor count (fixed after boot) */
+  int ntran;			/* descriptor count */
+  uint64_t at;			/* where log_Gl keeps all_tdes (read again a window) */
 } TRAN_GEOM;
 
 typedef struct
@@ -761,6 +762,7 @@ void thr_dump (FILE * f);
 
 /* ctv_tran.c: transactions - TDES and CLIENTIDS probes (I-6..I-11), identities and their cache */
 const char *tran_probe (uint64_t log_gl);
+int tran_table_recheck (void);
 int tran_lock_clientids (int ntran, int budget);
 void tran_geom_refresh (void);
 void tran_identity_prefetch (void);
